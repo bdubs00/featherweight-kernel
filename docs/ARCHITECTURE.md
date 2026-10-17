@@ -685,7 +685,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 
 | Method and path | Purpose |
 |---|---|
-| `POST /v1/runs` | Create a run. Body fields: `agent`, `input`, `title`, `instructions`, `profile`, `budget`, `metadata`, `wait`, `files` (section 7.10). |
+| `POST /v1/runs` | Create a run. Body fields: `agent`, `input`, `title`, `instructions`, `profile`, `budget`, `metadata`, `wait`, `files` (section 7.10). A trusted caller, the static token or a workload, also sets `principal` and `principalKind`, the person that the run is for (section 11.9). |
 | `GET /v1/runs` | List the runs of this process. `?parent={id}` lists the children of a run. `agent`, `state`, `principal`, and `limit` narrow the list. `GET /v1/fleet/runs` of the workbench lists the runs of a whole fleet. |
 | `GET /v1/runs/{id}` | Get one run. |
 | `GET /v1/runs/{id}/events` | Stream the ledger as server-sent events. `Last-Event-ID` resumes from a sequence number. Under `Accept: application/json`, one page of events with `lines`, the short line of each event, as the MCP tool `run_events` of the workbench gives. |
@@ -1002,14 +1002,18 @@ The kernel keeps a child inside its parent:
 - A child uses only tools that its own profile and every ancestor allow.
 - A child carries the policy rules of every ancestor, and the stricter verdict wins.
 - The budget of a child is capped by the budget of its parent, and its deadline is the earliest deadline of its ancestors.
-- `spawn.maxDepth` (default 3) bounds how deep the tree goes, and `spawn.maxChildren` (default 16) bounds how many children one run starts in its life. Past either bound, `spawn_task` returns an error result.
+- `spawn.maxDepth` (default 3) bounds how deep the tree goes, and `spawn.maxChildren` (default 16) bounds how many children one run starts in its life. `spawn.driver` names a `Spawner` that runs the children in other processes (below). Past either bound, `spawn_task` returns an error result.
 - A canceled parent cancels its children.
 - A child shares the trace of its parent, so one trace shows the whole tree.
 - A child takes no slot of `maxRuns`, because its parent holds one while it waits. Otherwise parents that wait for children can fill every slot.
 
 When a child needs an approval or asks a question, `spawn_task` relays it to the caller of the parent. It arrives as a question on the parent run. Every surface shows it, and the answer goes to the child. The parent run therefore stays the one place to watch.
 
-Under ax, a later milestone creates a child ax Task through the `ax.v1alpha1.AX` gRPC service at `FW_AX_SERVER` (default `ax-server.ax-system.svc.cluster.local:8080`). The child copies the image, the environment, and the workspace bindings of the parent, and adds `FW_PARENT_RUN` and `TRACEPARENT`. The parent then talks to the child by A2A through the router. This builds the task tree that the ax concepts document describes.
+A `Spawner` runs the children in other processes, and `spawn.driver` selects one. Without one, `spawn_task` starts the child in this process, as above. With one, the kernel fills the request of the child and hands it to the spawner: the principal and its kind are those of the parent, so the child acts as the same person; the budget is the budget of the parent, capped, with the working time that the parent has left as the deadline; the tool list is the list of the parent when the child names none; and the metadata key `fw.parent` holds the id of the parent. The spawner returns the child and the name of the process that holds it. The kernel appends `fw.run.child` to the ledger of the parent with both, counts the child toward `spawn.maxChildren`, and from then on `Get`, `WaitFor`, `Decide`, `Cancel`, and `Children` reach the child through the spawner, with `Run.Member` set. A restart reads the children back from the ledger. A canceled parent cancels its remote children too. The rules of the policy of the parent do not travel: the child runs with the policy of its own process, which is the same image and the same configuration under ax.
+
+The driver `ax` runs each child in a child Task. It creates the Task through the `ax.v1alpha1.AX` gRPC service at `ax.server`, with the image, the command, the resources, the environment, and the workspaces of this Task, without the goals and without the debug services. The child gets `FW_PARENT_RUN`, `FW_PARENT_MEMBER`, the name of this Task as `ax:<atespace>/<task>`, and `FW_SPAWN_MAXDEPTH`, the depth that `spawn.maxDepth` leaves it, and it loses the fleet name and URL of the parent, because it derives its own. The driver waits until the Task runs, then starts the child run through the atenet router at `ax.router` with the static token of the fleet, the person of the parent, and an idempotency key, and sends the request again while the child boots. It follows the run through the native API of the child, reads it once a second while a tool waits, and relays decisions and a cancel the same way. A child Task that never gets its run is deleted. A child Task that finished its run stays, for the ledger of the run; the suspend controller of the workbench puts it to sleep. The parent Task needs the ax server and the router in its egress policy.
+
+The native API lets a trusted caller, the static token or a workload, name the principal of a run in the body: `principal` and `principalKind`. The child Task gets the person of the parent this way. A person who names a principal starts the run as themself.
 
 ### 11.10 Local testing without a cluster
 
@@ -1105,6 +1109,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 | `Clock` | the system clock | a manual clock for tests, your own | `fw.WithClock` |
 | `ToolLimits` | 256 KB in, 100 KB out, 10 min | your own numbers per tool | `tools.limits:` |
 | `PersonTokens` | none | the package `tokens`, a client of a token broker, or a linked package that keeps the grants of people, such as the workbench | `tokens.url:` or `Agent.SetPersonTokens` |
+| `Spawner` | children in this process | `ax`, a child Task per child; your own | `spawn.driver:` or `fw.WithSpawner` |
 
 ### 12.3 Middleware
 
@@ -1134,7 +1139,7 @@ A skill is a directory with a `SKILL.md` file whose front matter names and descr
 
 Each driver registers itself by name at init, for example `fw.RegisterBus("nats", nats.New)`. A third-party Go module adds a driver by being imported. A blank import in `cmd/fw/drivers.go` selects the drivers that the default binary includes. A custom build leaves out a driver by leaving out its import.
 
-A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), `fw.RegisterRunAnnotator` adds a run annotator, `fw.RegisterService` adds a service (section 12.4), `metrics.RegisterCollector` adds series to the metrics surface (section 10.1), `cli.RegisterDoctorCheck` adds a line to `fw doctor`, `Kit.SetRelay` of the native surface sets the relay for the runs of other processes (section 12.8), and `Agent.SetPersonTokens` gives the tool sources the tokens of people (section 7.11).
+A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), `fw.RegisterRunAnnotator` adds a run annotator, `fw.RegisterService` adds a service (section 12.4), `fw.RegisterSpawner` adds a spawner driver (section 11.9), `metrics.RegisterCollector` adds series to the metrics surface (section 10.1), `cli.RegisterDoctorCheck` adds a line to `fw doctor`, `Kit.SetRelay` of the native surface sets the relay for the runs of other processes (section 12.8), and `Agent.SetPersonTokens` gives the tool sources the tokens of people (section 7.11).
 
 ### 12.7 Out-of-process extension
 
@@ -1172,6 +1177,13 @@ func (a *Agent) WaitFor(ctx context.Context, id string, done func(*Run) bool) (*
 
 // Children lists the child runs of a run.
 func (a *Agent) Children(ctx context.Context, id string) ([]*Run, error)
+
+// SpawnChild starts a child of a run: in this process, or through the
+// Spawner of the agent in another one (section 11.9). NewRunRequest builds
+// its request from an input and options.
+func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (*Run, error)
+func (a *Agent) Spawner() Spawner
+func NewRunRequest(input string, opts ...RunOption) RunRequest
 
 // AuthorizeAll asks the Authz about several checks for the principal in ctx.
 // An Authz that implements BatchAuthz gets every check in one call.
@@ -1242,6 +1254,7 @@ func WithPrices(p Prices) Option
 func WithLogger(l *slog.Logger) Option
 func WithClock(c Clock) Option
 func WithServices(s ...Service) Option
+func WithSpawner(s Spawner) Option
 func WithoutServices() Option
 func WithFiles(f Files) Option
 func WithoutDefaults() Option
@@ -1538,6 +1551,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The spawner revision of 2026-10-17 put `spawn_task` behind the `Spawner` plug, the second item of stage 4 of docs/ROADMAP.md. `Agent.SpawnChild` starts a child in this process or through the spawner, the ledger of the parent records a remote child in `fw.run.child`, and the run methods of the agent reach a remote child through the spawner. The driver `ax` of the package `ax` creates a child Task over the ax gRPC API and drives its run through the atenet router. The native API lets a trusted caller name the person of a run with `principal` and `principalKind`, and `RunRequest` gained `PrincipalKind`. The module depends on `github.com/google/ax` for the generated API.
 
 The token broker revision of 2026-10-17 added the kernel package `tokens`, the first item of stage 4 of docs/ROADMAP.md. With `tokens.url`, a process gets the access tokens of people from a broker, the front of the workbench, through `fw.PersonTokens`, and a notice on the bus resumes its paused calls when a connection ends. The configuration gained the key `tokens`, and `fw doctor` gained the line `tokens`. A `cli.DoctorCheck` of a linked package gets the secrets of the process since this revision.
 

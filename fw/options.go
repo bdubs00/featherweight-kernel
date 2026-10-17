@@ -36,9 +36,14 @@ type options struct {
 	annotators []RunAnnotator
 	services   []Service
 	noServices bool
+	spawner    Spawner
 }
 
 // WithServices adds services to the registered ones (see Service).
+// WithSpawner runs the children of spawn_task through s, in place of the
+// driver that spawn.driver names or the children in this process.
+func WithSpawner(s Spawner) Option { return func(o *options) { o.spawner = s } }
+
 func WithServices(s ...Service) Option {
 	return func(o *options) { o.services = append(o.services, s...) }
 }

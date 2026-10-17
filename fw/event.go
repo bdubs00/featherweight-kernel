@@ -45,6 +45,7 @@ const (
 	EvRunSuspended      = "fw.run.suspended"
 	EvRunResumed        = "fw.run.resumed"
 	EvRunFinished       = "fw.run.finished"
+	EvRunChild          = "fw.run.child" // a spawner started a child of this run in another process; see RunChildData
 	EvLoopDetected      = "fw.loop.detected"
 	// EvToolSend is published on the bus by the send tool. It is not a ledger event.
 	EvToolSend = "fw.tool.send"

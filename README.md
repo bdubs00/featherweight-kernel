@@ -36,7 +36,7 @@ Every run has a budget. It limits turns, tokens, cost, working time, tool calls 
 
 ## Agents that create agents
 
-The `spawn_task` tool starts a child run with its own task, prompt, tools, skills, model, and budget, and returns its answer. A model starts several children in one response, and they run at the same time. A child never has more than its parent: fewer tools, stricter rules, a smaller budget, and a bounded depth and count. When a child needs an approval, the question appears on the parent run, so the parent stays the one place to watch.
+The `spawn_task` tool starts a child run with its own task, prompt, tools, skills, model, and budget, and returns its answer. A model starts several children in one response, and they run at the same time. A child never has more than its parent: fewer tools, stricter rules, a smaller budget, and a bounded depth and count. When a child needs an approval, the question appears on the parent run, so the parent stays the one place to watch. With `spawn.driver: ax`, each child gets an ax Task of its own, acts as the same person, and the parent follows it through the atenet router; section 11.9 of the architecture has the details.
 
 ## Instructions and skills
 

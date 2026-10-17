@@ -1,0 +1,391 @@
+package ax
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/bdubs00/featherweight-kernel/fw"
+	v1alpha1 "github.com/google/ax/pkg/apis/v1alpha1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// fakeAX is an ax API server that keeps Tasks in memory. A new Task is
+// Pending for pendingReads reads of its status, then Running.
+type fakeAX struct {
+	v1alpha1.UnimplementedAXServer
+	addr string
+
+	mu           sync.Mutex
+	tasks        map[string]*v1alpha1.Task
+	reads        map[string]int
+	pendingReads int
+	deleted      []string
+}
+
+func newFakeAX(t *testing.T) *fakeAX {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeAX{addr: lis.Addr().String(), tasks: map[string]*v1alpha1.Task{}, reads: map[string]int{}, pendingReads: 1}
+	srv := grpc.NewServer()
+	v1alpha1.RegisterAXServer(srv, f)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	return f
+}
+
+func key(atespace, name string) string { return atespace + "/" + name }
+
+func (f *fakeAX) CreateTask(_ context.Context, req *v1alpha1.CreateTaskRequest) (*v1alpha1.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := req.GetTask()
+	k := key(t.GetMetadata().GetAtespace(), t.GetMetadata().GetName())
+	if _, ok := f.tasks[k]; ok {
+		return nil, status.Error(codes.AlreadyExists, k)
+	}
+	t.Status = &v1alpha1.TaskStatus{Phase: "Pending"}
+	f.tasks[k] = t
+	return t, nil
+}
+
+func (f *fakeAX) GetTask(_ context.Context, req *v1alpha1.GetTaskRequest) (*v1alpha1.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(req.GetAtespace(), req.GetName())
+	t, ok := f.tasks[k]
+	if !ok {
+		return nil, status.Error(codes.NotFound, k)
+	}
+	f.reads[k]++
+	if f.reads[k] > f.pendingReads {
+		t.Status.Phase = "Running"
+	}
+	return t, nil
+}
+
+func (f *fakeAX) DeleteTask(_ context.Context, req *v1alpha1.DeleteTaskRequest) (*v1alpha1.DeleteTaskResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(req.GetAtespace(), req.GetName())
+	delete(f.tasks, k)
+	f.deleted = append(f.deleted, k)
+	return &v1alpha1.DeleteTaskResponse{}, nil
+}
+
+func (f *fakeAX) created() []*v1alpha1.Task {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*v1alpha1.Task
+	for _, t := range f.tasks {
+		out = append(out, t)
+	}
+	return out
+}
+
+// fakeRouter plays the atenet router and the native API of one child: it
+// checks the actor header and the token, starts one run, lets it finish
+// after two reads, and records the decisions and the cancel.
+type fakeRouter struct {
+	*httptest.Server
+	token string
+
+	mu         sync.Mutex
+	actors     []string
+	body       map[string]any
+	keys       []string
+	failStarts int // how many POST /v1/runs answer 503 first
+	reads      int
+	decisions  []map[string]any
+	canceled   bool
+}
+
+func newFakeRouter(t *testing.T) *fakeRouter {
+	t.Helper()
+	f := &fakeRouter{token: "fleet-secret"}
+	mux := http.NewServeMux()
+	guard := func(w http.ResponseWriter, r *http.Request) bool {
+		f.mu.Lock()
+		f.actors = append(f.actors, r.Header.Get("ate-target-actor"))
+		f.mu.Unlock()
+		if r.Header.Get("Authorization") != "Bearer "+f.token {
+			w.WriteHeader(http.StatusUnauthorized)
+			return false
+		}
+		return true
+	}
+	run := func(state string) map[string]any {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		principal, _ := f.body["principal"].(string)
+		out := map[string]any{"id": "01CHILD", "agent": "default", "state": state, "principal": principal, "usage": map[string]any{}}
+		if state == "completed" {
+			out["output"] = "child done"
+		}
+		return out
+	}
+	mux.HandleFunc("POST /v1/runs", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r) {
+			return
+		}
+		f.mu.Lock()
+		f.keys = append(f.keys, r.Header.Get("Idempotency-Key"))
+		if f.failStarts > 0 {
+			f.failStarts--
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.body = body
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(run("running"))
+	})
+	mux.HandleFunc("GET /v1/runs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r) {
+			return
+		}
+		if r.PathValue("id") != "01CHILD" {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"detail":"no run has that id"}`))
+			return
+		}
+		f.mu.Lock()
+		f.reads++
+		state := "running"
+		if f.reads > 2 {
+			state = "completed"
+		}
+		if f.canceled {
+			state = "canceled"
+		}
+		f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(run(state))
+	})
+	mux.HandleFunc("POST /v1/runs/{id}/approvals/{approval}", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r) {
+			return
+		}
+		var d map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&d)
+		d["approval"] = r.PathValue("approval")
+		f.mu.Lock()
+		f.decisions = append(f.decisions, d)
+		f.mu.Unlock()
+		if r.PathValue("approval") == "stale" {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"detail":"no pending approval"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /v1/runs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r) {
+			return
+		}
+		f.mu.Lock()
+		f.canceled = true
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	f.Server = httptest.NewServer(mux)
+	t.Cleanup(f.Close)
+	return f
+}
+
+// newSpawnerUnderTest stashes a parent Task and returns a spawner against
+// the fakes.
+func newSpawnerUnderTest(t *testing.T, ax *fakeAX, router *fakeRouter) *Spawner {
+	t.Helper()
+	prevTask, prevWS := Stashed()
+	t.Cleanup(func() { Stash(prevTask, prevWS) })
+	Stash(&Task{
+		APIVersion: "ax.io/v1alpha1", Kind: "Task",
+		Metadata: ObjectMeta{Name: "migrator", Atespace: "team"},
+		Spec: TaskSpec{
+			Image:   "ghcr.io/example/fw:toolbox",
+			Command: []string{"fw", "serve"},
+			Env: []EnvVar{{Name: "FW_MODEL", Value: "openai/x"}, {Name: "FW_WORKBENCH_FLEET_NAME", Value: "old"},
+				{Name: EnvParentRun, Value: "stale"}, {Name: "FW_API_TOKEN", Value: "fleet-secret"}},
+			Resources:  ResourcesSpec{Requests: ResourceList{CPU: "500m", Memory: "1Gi"}},
+			Workspaces: []WorkspaceRef{{Name: "repo", Path: "/workspace/repo", Goal: "migrate everything"}},
+			Debug:      true,
+		},
+	}, nil)
+	t.Setenv("FW_TEST_FLEET_TOKEN", "fleet-secret")
+	cfg := fw.DefaultConfig()
+	cfg.AX.Server = ax.addr
+	cfg.AX.Router = strings.TrimPrefix(router.URL, "http://")
+	cfg.Auth.TokenEnv = "FW_TEST_FLEET_TOKEN"
+	cfg.Spawn.MaxDepth = 3
+	s, err := NewSpawner(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.readyPoll, s.runPoll = 5*time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
+func TestSpawnCreatesAChildTaskAndStartsItsRun(t *testing.T) {
+	ctx := context.Background()
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	router.failStarts = 1 // the child boots after its Task runs
+	s := newSpawnerUnderTest(t, ax, router)
+	parent := &fw.Run{ID: "01PARENT", Depth: 0}
+	req := fw.RunRequest{Input: "migrate module x", Principal: "ada", PrincipalKind: fw.KindUser,
+		Metadata: map[string]string{fw.MetaParent: parent.ID}, Budget: &fw.Budget{MaxTurns: 3, Deadline: 5 * time.Minute},
+		Profile: &fw.AgentProfile{Tools: []string{"files", "bash"}}}
+	run, member, err := s.Spawn(ctx, parent, req)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if run.ID != "01CHILD" || run.Principal != "ada" || !strings.HasPrefix(member, "ax:team/migrator-") {
+		t.Fatalf("run = %+v, member %q", run, member)
+	}
+	// The Task is the parent Task with a new name, no goal, no debug, and
+	// the variables of a child.
+	tasks := ax.created()
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %d", len(tasks))
+	}
+	task := tasks[0]
+	if task.GetMetadata().GetAtespace() != "team" || "ax:team/"+task.GetMetadata().GetName() != member || task.GetSpec().GetImage() != "ghcr.io/example/fw:toolbox" ||
+		len(task.GetSpec().GetCommand()) != 2 || task.GetSpec().GetDebug() || task.GetSpec().GetResources().GetRequests().GetCpu() != "500m" {
+		t.Fatalf("task = %+v", task)
+	}
+	if ws := task.GetSpec().GetWorkspaces(); len(ws) != 1 || ws[0].GetName() != "repo" || ws[0].GetGoal() != "" {
+		t.Fatalf("workspaces = %+v", ws)
+	}
+	env := map[string]string{}
+	for _, e := range task.GetSpec().GetEnv() {
+		env[e.GetName()] = e.GetValue()
+	}
+	if env["FW_MODEL"] != "openai/x" || env[EnvParentRun] != "01PARENT" || env[EnvParentMember] != "ax:team/migrator" || env[envSpawnMaxDepth] != "2" || env["FW_API_TOKEN"] != "fleet-secret" {
+		t.Fatalf("env = %v", env)
+	}
+	if _, ok := env["FW_WORKBENCH_FLEET_NAME"]; ok {
+		t.Fatal("the child kept the fleet name of the parent")
+	}
+	// The run went to the child through the router, as the person, with
+	// the budget, the tools, and the parent in the metadata, and the retry
+	// carried the same idempotency key.
+	router.mu.Lock()
+	body, keys, actors := router.body, router.keys, router.actors
+	router.mu.Unlock()
+	if body["principal"] != "ada" || body["principalKind"] != "user" || body["input"] != "migrate module x" {
+		t.Fatalf("body = %v", body)
+	}
+	meta, _ := body["metadata"].(map[string]any)
+	if meta[fw.MetaParent] != "01PARENT" || meta[fw.MetaParentMember] != "ax:team/migrator" {
+		t.Fatalf("metadata = %v", meta)
+	}
+	budget, _ := body["budget"].(map[string]any)
+	if budget["maxTurns"] != float64(3) || budget["deadline"] != "5m0s" {
+		t.Fatalf("budget = %v", budget)
+	}
+	profile, _ := body["profile"].(map[string]any)
+	if tools, _ := profile["tools"].([]any); len(tools) != 2 {
+		t.Fatalf("profile = %v", profile)
+	}
+	if len(keys) != 2 || keys[0] != keys[1] || !strings.HasPrefix(keys[0], "spawn:01PARENT:team/") {
+		t.Fatalf("idempotency keys = %v", keys)
+	}
+	for _, a := range actors {
+		if "ax:"+a != member {
+			t.Fatalf("actor = %q, want the child", a)
+		}
+	}
+
+	// The run methods reach the child.
+	got, err := s.Get(ctx, member, "01CHILD")
+	if err != nil || got.State != fw.StateRunning {
+		t.Fatalf("Get = %+v, %v", got, err)
+	}
+	done, err := s.WaitFor(ctx, member, "01CHILD", func(r *fw.Run) bool { return r.State.Terminal() })
+	if err != nil || done.State != fw.StateCompleted || done.Output != "child done" {
+		t.Fatalf("WaitFor = %+v, %v", done, err)
+	}
+	if err := s.Decide(ctx, member, "01CHILD", fw.ApprovalDecision{ApprovalID: "ap1", Decision: "allow", Note: "go"}); err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if err := s.Decide(ctx, member, "01CHILD", fw.ApprovalDecision{ApprovalID: "stale", Decision: "allow"}); !errors.Is(err, fw.ErrNoPendingApproval) {
+		t.Fatalf("Decide on a stale approval = %v", err)
+	}
+	if _, err := s.Get(ctx, member, "01NOPE"); !errors.Is(err, fw.ErrRunNotFound) {
+		t.Fatalf("Get unknown = %v", err)
+	}
+	if _, err := s.Get(ctx, "http://elsewhere", "01CHILD"); !errors.Is(err, fw.ErrRunNotFound) {
+		t.Fatalf("Get at a member that is not a Task = %v", err)
+	}
+	if err := s.Cancel(ctx, member, "01CHILD"); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	router.mu.Lock()
+	decisions, canceled := router.decisions, router.canceled
+	router.mu.Unlock()
+	if len(decisions) != 2 || decisions[0]["approval"] != "ap1" || decisions[0]["decision"] != "allow" || decisions[0]["note"] != "go" || !canceled {
+		t.Fatalf("decisions = %v, canceled %v", decisions, canceled)
+	}
+}
+
+func TestSpawnDeletesTheTaskWhenTheRunDoesNotStart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	router.token = "another-secret" // the child refuses the token, so the run never starts
+	s := newSpawnerUnderTest(t, ax, router)
+	_, _, err := s.Spawn(ctx, &fw.Run{ID: "01PARENT"}, fw.RunRequest{Input: "x"})
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("Spawn = %v", err)
+	}
+	ax.mu.Lock()
+	deleted := ax.deleted
+	ax.mu.Unlock()
+	if len(deleted) != 1 || !strings.HasPrefix(deleted[0], "team/migrator-") {
+		t.Fatalf("deleted = %v", deleted)
+	}
+}
+
+func TestNewSpawnerNeedsTheRouter(t *testing.T) {
+	cfg := fw.DefaultConfig()
+	cfg.AX.Router = ""
+	if _, err := NewSpawner(cfg); err == nil || !strings.Contains(err.Error(), "ax.router") {
+		t.Fatalf("NewSpawner without a router = %v", err)
+	}
+	cfg.AX.Router = "atenet-router.ate-system.svc.cluster.local"
+	s, err := NewSpawner(cfg)
+	if err != nil || s.server != DefaultServer || s.tokenEnv != "FW_API_TOKEN" {
+		t.Fatalf("NewSpawner = %+v, %v", s, err)
+	}
+	prevTask, prevWS := Stashed()
+	t.Cleanup(func() { Stash(prevTask, prevWS) })
+	Stash(nil, nil)
+	if _, _, err := s.Spawn(context.Background(), &fw.Run{ID: "p"}, fw.RunRequest{Input: "x"}); err == nil || !strings.Contains(err.Error(), "not an ax Task") {
+		t.Fatalf("Spawn outside ax = %v", err)
+	}
+	for _, name := range []string{"migrator", strings.Repeat("a", 80)} {
+		child, err := childName(name)
+		if err != nil || len(child) > maxTaskName || !strings.HasPrefix(child, name[:min(len(name), 20)]) {
+			t.Fatalf("childName(%d) = %q, %v", len(name), child, err)
+		}
+	}
+}

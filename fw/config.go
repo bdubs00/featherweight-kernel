@@ -344,10 +344,13 @@ type MemoryToolConfig struct {
 // SpawnConfig bounds the child runs that a run starts through spawn_task.
 // MaxDepth is the deepest child allowed: 1 lets a run start children, and 2
 // lets those children start children. MaxChildren is the number of child
-// runs that one run can start in its life.
+// runs that one run can start in its life. Driver names a registered
+// Spawner, such as "ax", which runs each child in another process; empty
+// runs the children in this process (docs/ARCHITECTURE.md section 11.9).
 type SpawnConfig struct {
-	MaxDepth    int `yaml:"maxDepth" json:"maxDepth"`
-	MaxChildren int `yaml:"maxChildren" json:"maxChildren"`
+	MaxDepth    int    `yaml:"maxDepth" json:"maxDepth"`
+	MaxChildren int    `yaml:"maxChildren" json:"maxChildren"`
+	Driver      string `yaml:"driver,omitempty" json:"driver,omitempty"`
 }
 
 // MCPServerConfig is one MCP server that fw connects to. Title is the name

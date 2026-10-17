@@ -179,6 +179,11 @@ type createBody struct {
 	Metadata     map[string]string `json:"metadata"`
 	Wait         bool              `json:"wait"`
 	Files        []fileBody        `json:"files"`
+	// Principal and PrincipalKind name the person that the run is for. Only
+	// a trusted caller, the static token or a workload, sets them; a parent
+	// in another process does, so the child acts as its person.
+	Principal     string `json:"principal"`
+	PrincipalKind string `json:"principalKind"`
 }
 
 // fileBody is one attachment of a run or a message (section 7.10). Data is
@@ -417,13 +422,15 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := fw.RunRequest{
-		Agent:        body.Agent,
-		Input:        body.Input,
-		Instructions: body.Instructions,
-		Profile:      profile,
-		Budget:       budget,
-		Metadata:     body.Metadata,
-		Files:        attachments(body.Files),
+		Agent:         body.Agent,
+		Input:         body.Input,
+		Instructions:  body.Instructions,
+		Profile:       profile,
+		Budget:        budget,
+		Metadata:      body.Metadata,
+		Files:         attachments(body.Files),
+		Principal:     strings.TrimSpace(body.Principal),
+		PrincipalKind: strings.TrimSpace(body.PrincipalKind),
 	}
 	run, ok := s.start(w, r, req)
 	if !ok {
@@ -460,7 +467,13 @@ func (s *server) start(w http.ResponseWriter, r *http.Request, req fw.RunRequest
 	req.Origin = fw.OriginHTTP
 	req.IdempotencyKey = key
 	if p := fw.PrincipalFrom(r.Context()); p != nil {
-		req.Principal = p.Subject
+		// A trusted process, the static token or a workload, starts a run for
+		// a person when it names one: a parent in another Task does. Anyone
+		// else starts the run as the principal of the request.
+		trusted := p.Kind == fw.KindToken || p.Kind == fw.KindWorkload
+		if !trusted || strings.TrimSpace(req.Principal) == "" {
+			req.Principal, req.PrincipalKind = p.Subject, ""
+		}
 	}
 	run, err := s.a.Start(r.Context(), req.Input, fw.WithRequest(req))
 	if err != nil {

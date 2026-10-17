@@ -1,6 +1,6 @@
 module github.com/bdubs00/featherweight-kernel
 
-go 1.27.0
+go 1.27.1
 
 require (
 	github.com/a2aproject/a2a-go/v2 v2.6.0
@@ -47,6 +47,7 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
+	github.com/google/ax v0.3.2-0.20261016202944-8d2ccf36f194 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect

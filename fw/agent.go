@@ -45,6 +45,7 @@ type Agent struct {
 	tlsConfig *tls.Config
 	prices    Prices
 	clock     Clock
+	spawner   Spawner // the children in other processes, see spawn.go
 
 	tokMu        sync.RWMutex
 	personTokens PersonTokens // the tokens of people from a linked package, see connect.go
@@ -261,6 +262,12 @@ func New(opts ...Option) (*Agent, error) {
 	}
 	if a.prices == nil {
 		a.prices = PriceTable(cfg.Prices)
+	}
+	a.spawner = o.spawner
+	if a.spawner == nil && !o.noDefaults {
+		if a.spawner, err = newSpawner(ctx, cfg); err != nil {
+			return nil, err
+		}
 	}
 	if err := a.startKernel(ctx); err != nil {
 		return nil, err

@@ -56,6 +56,7 @@ type kernel struct {
 	idem      map[string]string       // idempotency key to run id
 	overrides map[string]*runOverride // per-run tools and policy, for replay
 	kids      map[string]int          // child runs started by each run, in its life
+	remote    map[string]childRef     // the children that a Spawner runs in other processes
 
 	sem chan struct{} // one slot per active run, Config.MaxRuns slots
 
@@ -139,6 +140,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		idem:      map[string]string{},
 		overrides: map[string]*runOverride{},
 		kids:      map[string]int{},
+		remote:    map[string]childRef{},
 		sem:       make(chan struct{}, maxRuns),
 		drainCh:   make(chan struct{}),
 		closedCh:  make(chan struct{}),
@@ -282,9 +284,10 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			req.Principal = p.Subject
 		}
 	}
-	// The run keeps the kind of the person who starts it.
-	var kind string
-	if p := PrincipalFrom(ctx); p != nil && p.Subject == req.Principal {
+	// The run keeps the kind of the person who starts it. A trusted process
+	// that starts a run for a person names the kind in the request.
+	kind := req.PrincipalKind
+	if p := PrincipalFrom(ctx); kind == "" && p != nil && p.Subject == req.Principal {
 		kind = p.Kind
 	}
 	if req.ID == "" {
@@ -431,6 +434,14 @@ func (a *Agent) Wait(ctx context.Context, id string) (*Run, error) {
 func (a *Agent) WaitFor(ctx context.Context, id string, done func(*Run) bool) (*Run, error) {
 	rs, err := a.k.lookup(id)
 	if err != nil {
+		if ref, ok := a.remoteChild(id); ok {
+			r, err := a.spawner.WaitFor(ctx, ref.member, id, func(r *Run) bool {
+				a.decorateChild(r, ref)
+				return done(r)
+			})
+			a.decorateChild(r, ref)
+			return r, err
+		}
 		return nil, err
 	}
 	for {
@@ -465,6 +476,15 @@ func (a *Agent) Children(ctx context.Context, id string) ([]*Run, error) {
 		if child.parent == id {
 			kids = append(kids, child.snapshot())
 		}
+	}
+	for cid, ref := range a.remoteChildren(id) {
+		r, err := a.spawner.Get(ctx, ref.member, cid)
+		if err != nil {
+			a.log.Warn("read a remote child", "run", cid, "member", ref.member, "error", err)
+			continue
+		}
+		a.decorateChild(r, ref)
+		kids = append(kids, r)
 	}
 	out, err := a.viewable(ctx, kids)
 	if err != nil {
@@ -561,6 +581,9 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 func (a *Agent) Get(ctx context.Context, id string) (*Run, error) {
 	rs, err := a.k.lookup(id)
 	if err != nil {
+		if ref, ok := a.remoteChild(id); ok {
+			return a.getRemote(ctx, id, ref)
+		}
 		return nil, err
 	}
 	r := rs.snapshot()
@@ -696,6 +719,16 @@ func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error
 	}
 	rs, err := a.k.lookup(id)
 	if err != nil {
+		if ref, ok := a.remoteChild(id); ok {
+			r, err := a.getRemote(ctx, id, ref)
+			if err != nil {
+				return err
+			}
+			if err := a.Authorize(ctx, ActionRunOperate, Target{Agent: r.Agent, Run: r}); err != nil {
+				return err
+			}
+			return a.spawner.Decide(ctx, ref.member, id, d)
+		}
 		return err
 	}
 	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
@@ -766,6 +799,16 @@ func normalizeDecision(d ApprovalDecision) (string, error) {
 func (a *Agent) Cancel(ctx context.Context, id string) error {
 	rs, err := a.k.lookup(id)
 	if err != nil {
+		if ref, ok := a.remoteChild(id); ok {
+			r, err := a.getRemote(ctx, id, ref)
+			if err != nil {
+				return err
+			}
+			if err := a.Authorize(ctx, ActionRunOperate, Target{Agent: r.Agent, Run: r}); err != nil {
+				return err
+			}
+			return a.spawner.Cancel(ctx, ref.member, id)
+		}
 		return err
 	}
 	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
@@ -799,6 +842,11 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 		}
 		if cerr := a.Cancel(context.Background(), child.id); cerr != nil {
 			a.log.Warn("cancel child run", "run", child.id, "parent", rs.id, "error", cerr)
+		}
+	}
+	for cid, ref := range a.remoteChildren(rs.id) {
+		if cerr := a.spawner.Cancel(context.Background(), ref.member, cid); cerr != nil {
+			a.log.Warn("cancel remote child run", "run", cid, "member", ref.member, "parent", rs.id, "error", cerr)
 		}
 	}
 	return nil
@@ -1025,6 +1073,9 @@ func WithRequest(req RunRequest) RunOption {
 		}
 		if req.Origin != "" {
 			r.Origin = req.Origin
+		}
+		if req.PrincipalKind != "" {
+			r.PrincipalKind = req.PrincipalKind
 		}
 		if req.Principal != "" {
 			r.Principal = req.Principal

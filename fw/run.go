@@ -256,6 +256,7 @@ type RunRequest struct {
 	Metadata       map[string]string `json:"metadata,omitempty"`
 	Origin         string            `json:"origin,omitempty"`
 	Principal      string            `json:"principal,omitempty"`
+	PrincipalKind  string            `json:"principalKind,omitempty"` // the kind of Principal, when a trusted process starts the run for a person
 	Parent         string            `json:"parent,omitempty"`
 	IdempotencyKey string            `json:"idempotencyKey,omitempty"`
 	Files          []Block           `json:"files,omitempty"` // attachments of the first message; see Attachment

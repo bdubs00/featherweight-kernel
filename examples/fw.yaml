@@ -240,6 +240,7 @@ time:                           # the clock of the agent (docs/ARCHITECTURE.md s
 spawn:                          # child runs through spawn_task
   maxDepth: 3                   # 1 lets a run start children, 2 lets those start children
   maxChildren: 16               # child runs that one run can start in its life
+  driver: ""                    # empty runs the children in this process; ax runs each child in a child Task through ax.server and ax.router. FW_SPAWN_DRIVER
 
 prices: {}                      # "anthropic/claude-opus-5-5": { input: 4.00, output: 20.00 } per million tokens
 

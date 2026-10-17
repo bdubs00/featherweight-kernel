@@ -77,12 +77,8 @@ const spawnTaskDescription = "Start a child run that works on a task by itself a
 	"A child gets at most the tools you have; tools, skills, model, effort, max_turns, and deadline narrow it further, and it runs at most as long as this run. " +
 	"When a child needs an approval or asks a question, the question goes to the caller of this run."
 
-// spawnTaskTool starts a child run in the same process.
-//
-// TODO(ax): under ax, create a child ax Task through the ax.v1alpha1.AX gRPC
-// service at Config.AX.Server, copy the image, the environment, and the
-// workspace bindings, add FW_PARENT_RUN and TRACEPARENT, and talk to the
-// child by A2A through the router (docs/ARCHITECTURE.md section 11.9).
+// spawnTaskTool starts a child run: in this process, or in another one
+// through the Spawner of the agent (docs/ARCHITECTURE.md section 11.9).
 type spawnTaskTool struct{}
 
 func newSpawnTask(*fw.Config) (fw.Tool, error) { return spawnTaskTool{}, nil }
@@ -131,7 +127,7 @@ func (spawnTaskTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 	if !ok {
 		return bad, nil
 	}
-	run, err := a.Start(ctx, in.Input, opts...)
+	run, err := a.SpawnChild(ctx, parent, fw.NewRunRequest(in.Input, opts...))
 	if err != nil {
 		if ctx.Err() != nil {
 			return canceled(ctx, "spawn_task")
@@ -156,7 +152,7 @@ func (spawnTaskTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 // spawnOptions builds the run options of a child. It returns an error
 // result and false when the input cannot be used.
 func spawnOptions(in spawnInput, parent string) ([]fw.RunOption, fw.ToolResult, bool) {
-	opts := []fw.RunOption{fw.WithParent(parent), fw.WithOrigin(fw.OriginTool)}
+	opts := []fw.RunOption{fw.WithOrigin(fw.OriginTool)}
 	if in.Agent != "" {
 		opts = append(opts, fw.AsAgent(in.Agent))
 	}

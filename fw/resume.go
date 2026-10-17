@@ -35,9 +35,16 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		}
 		var q RunQueuedData
 		trace := ""
+		var remote []RunChildData
 		for _, e := range evs {
-			if e.Type == EvRunQueued {
+			switch e.Type {
+			case EvRunQueued:
 				_ = e.Decode(&q)
+			case EvRunChild:
+				var d RunChildData
+				if e.Decode(&d) == nil && d.Child != "" && d.Member != "" {
+					remote = append(remote, d)
+				}
 			}
 			if trace == "" {
 				trace = e.TraceParent
@@ -50,6 +57,10 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		k.runs[id] = rs
 		if q.Parent != "" {
 			k.kids[q.Parent]++
+		}
+		for _, d := range remote {
+			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1}
+			k.kids[id]++
 		}
 		if key := q.Metadata["idempotencyKey"]; key != "" {
 			k.idem[idemKey(q.Principal, key)] = id
