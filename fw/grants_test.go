@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -76,72 +75,68 @@ func TestProfileGrantsOptionPolicy(t *testing.T) {
 	}
 }
 
-type lockStore struct{ locked string }
-
-func (lockStore) Put(context.Context, AgentProfile) error { return nil }
-func (lockStore) Delete(context.Context, string) error    { return nil }
-func (s lockStore) Locked(name string) bool               { return name == s.locked }
-
-func TestProfileLocked(t *testing.T) {
-	a := newTestAgent(t, newScript().Model(), WithProfileStore(lockStore{locked: "fixed"}))
-	if !a.ProfileLocked("fixed") || a.ProfileLocked("free") {
-		t.Error("ProfileLocked does not follow the store")
+// The configuration defines every profile but the ones that the loader read
+// from files, and SetProfiles keeps the defined ones as they are.
+func TestProfileLockedAndSetProfiles(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Agents = map[string]AgentProfile{"fixed": {System: "from fw.yaml"}, "free": {System: "from a file"}}
+	cfg.FileProfiles = map[string]bool{"free": true}
+	a := newTestAgent(t, newScript().Model(), WithConfig(cfg))
+	if !a.ProfileLocked("fixed") || a.ProfileLocked("free") || a.ProfileLocked("nope") {
+		t.Error("ProfileLocked does not follow the configuration")
 	}
-	b := newTestAgent(t, newScript().Model(), WithProfileStore(memStoreForGrants{}))
-	if b.ProfileLocked("fixed") {
-		t.Error("a store without Locked locks a profile")
+	next := a.ProfileSet()
+	next["free"] = AgentProfile{System: "changed"}
+	next["new"] = AgentProfile{Name: "new", System: "added"}
+	if err := a.SetProfiles(next); err != nil {
+		t.Fatal(err)
 	}
-}
-
-type memStoreForGrants struct{}
-
-func (memStoreForGrants) Put(context.Context, AgentProfile) error { return nil }
-func (memStoreForGrants) Delete(context.Context, string) error    { return nil }
-
-func TestOptInTool(t *testing.T) {
-	a := newTestAgent(t, newScript().Model(), WithTools(
-		grantTool("files", ToolSpec{}),
-		grantTool("propose_agent", ToolSpec{OptIn: true}),
-	))
-	for _, tc := range []struct {
-		tools []string
-		want  string
-	}{
-		{nil, GrantNone},
-		{[]string{"*"}, GrantNone},
-		{[]string{"files"}, GrantNone},
-		{[]string{"propose_agent"}, "allow"},
-		{[]string{"propose_*"}, "allow"},
-		{[]string{"*", "propose_agent"}, "allow"},
+	if p, ok := a.ProfileNamed("new"); !ok || p.Name != "new" || p.System != "added" {
+		t.Errorf("new = %+v, %v", p, ok)
+	}
+	if p, _ := a.ProfileNamed("free"); p.System != "changed" {
+		t.Errorf("free = %+v", p)
+	}
+	if a.ProfileLocked("new") || !a.ProfileLocked("fixed") {
+		t.Error("the lock changed with the set")
+	}
+	// A change to a fixed profile, its removal, and an invalid profile are
+	// refused, and the set stays as it was.
+	for name, change := range map[string]func(map[string]AgentProfile){
+		"edit":    func(m map[string]AgentProfile) { m["fixed"] = AgentProfile{System: "mine"} },
+		"remove":  func(m map[string]AgentProfile) { delete(m, "fixed") },
+		"invalid": func(m map[string]AgentProfile) { m["bad name"] = AgentProfile{} },
+		"effort":  func(m map[string]AgentProfile) { m["x"] = AgentProfile{Effort: "turbo"} },
 	} {
-		g := grantsByName(t, a, AgentProfile{Name: "x", Tools: tc.tools})
-		if g["propose_agent"].Verdict != tc.want {
-			t.Errorf("tools %v: propose_agent = %s, want %s", tc.tools, g["propose_agent"].Verdict, tc.want)
+		m := a.ProfileSet()
+		change(m)
+		if err := a.SetProfiles(m); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("%s: SetProfiles = %v, want ErrInvalidRequest", name, err)
 		}
-		if tc.tools == nil && g["files"].Verdict != "allow" {
-			t.Errorf("an empty list leaves out files: %+v", g["files"])
-		}
+	}
+	if p, _ := a.ProfileNamed("fixed"); p.System != "from fw.yaml" || len(a.ProfileSet()) != 3 {
+		t.Errorf("the set changed on a refusal: %+v", a.ProfileSet())
 	}
 }
 
 func TestCheckProfile(t *testing.T) {
-	ctx := testCtx(t)
-	a := newTestAgent(t, newScript().Model(), WithProfile(AgentProfile{Name: "fixed"}), WithProfileStore(lockStore{locked: "fixed"}))
-	exists, err := a.CheckProfile(ctx, AgentProfile{Name: "fresh", System: "s"})
-	if err != nil || exists {
-		t.Fatalf("check fresh = %v, %v", exists, err)
+	a := newTestAgent(t, newScript().Model(), WithProfile(AgentProfile{Name: "fixed"}))
+	if err := a.CheckProfile(AgentProfile{Name: "fresh", System: "s"}); err != nil {
+		t.Fatalf("check fresh = %v", err)
 	}
 	if _, ok := a.ProfileNamed("fresh"); ok {
 		t.Fatal("CheckProfile saved the profile")
 	}
-	if _, err := a.CheckProfile(ctx, AgentProfile{Name: "fixed"}); !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "change it there") {
-		t.Errorf("check of a locked profile = %v", err)
-	}
-	if _, err := a.CheckProfile(ctx, AgentProfile{Name: "bad name"}); !errors.Is(err, ErrInvalidRequest) {
-		t.Errorf("check of a bad name = %v", err)
-	}
-	if _, err := a.CheckProfile(ctx, AgentProfile{Name: "x", Effort: "turbo"}); !errors.Is(err, ErrInvalidRequest) {
-		t.Errorf("check of a bad effort = %v", err)
+	for name, p := range map[string]AgentProfile{
+		"bad name":  {Name: "bad name"},
+		"dot":       {Name: "..bad"},
+		"effort":    {Name: "x", Effort: "turbo"},
+		"model":     {Name: "x", Model: "nope"},
+		"time zone": {Name: "x", TimeZone: "Mars/Olympus"},
+	} {
+		if err := a.CheckProfile(p); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("check of %s = %v", name, err)
+		}
 	}
 }
 

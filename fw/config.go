@@ -45,6 +45,11 @@ type Config struct {
 	Version    string                    `yaml:"-" json:"version,omitempty"`
 	// ConfigFile is the configuration file that the loader read, or "".
 	ConfigFile string `yaml:"-" json:"-"`
+	// FileProfiles names the profiles that the loader read from the files
+	// under <home>/agents. Every other profile comes from fw.yaml, from a
+	// FW_AGENTS_* variable, or from a Go option, and the configuration
+	// wins over a file at the next start (see Agent.ProfileLocked).
+	FileProfiles map[string]bool `yaml:"-" json:"-"`
 	// Extensions holds the top-level blocks of fw.yaml that a linked package
 	// claimed with RegisterExtension, by key, as the loader read them. The
 	// kernel reads none of them, and no variable sets them. Extension

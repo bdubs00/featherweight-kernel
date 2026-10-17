@@ -165,11 +165,12 @@ such as local:*.
                             name is the name field of the file, else the file name
   fw agents delete <name>   remove a profile
 
-A change is written to <home>/agents/<name>.yaml. A running server reads
-the change at its next start. A profile that fw.yaml defines is changed in
-fw.yaml, not here. A put whose file has no access block keeps the access
-block of the profile that it replaces. In the list, an access of - means
-that the profile follows access.default.`
+The kernel writes no profile: put and delete come with fw-workbench, which
+writes <home>/agents/<name>.yaml. A running server reads the change at its
+next start. A profile that fw.yaml defines is changed in fw.yaml, not here.
+A put whose file has no access block keeps the access block of the profile
+that it replaces. In the list, an access of - means that the profile
+follows access.default.`
 
 // cmdAgents lists, prints, puts, and deletes agent profiles.
 func cmdAgents(ctx context.Context, g *globals, args []string) int {
@@ -208,7 +209,10 @@ func cmdAgents(ctx context.Context, g *globals, args []string) int {
 	case "put":
 		return g.putProfile(ctx, a, arg, *name)
 	case "delete":
-		if err := a.DeleteProfile(ctx, arg); err != nil {
+		if AgentsDelete == nil {
+			return g.fail("agents", errNoAgentWrites)
+		}
+		if err := AgentsDelete(ctx, a, arg); err != nil {
 			return g.fail("agents", accessHint(cfg, err))
 		}
 		fmt.Fprintf(g.stdout, "deleted the profile %s under %s; a running server reads the change at its next start\n", arg, filepath.Join(cfg.Home, "agents"))
@@ -300,8 +304,15 @@ func (g *globals) printProfile(ctx context.Context, a *fw.Agent, name string, as
 	return exitOK
 }
 
+// errNoAgentWrites is the answer of put and delete in a binary without a
+// package that manages profiles.
+var errNoAgentWrites = errors.New("fw writes no agent profile; fw-workbench agents put and delete do, or write the file under <home>/agents yourself")
+
 // putProfile reads a profile file and creates or replaces the profile.
 func (g *globals) putProfile(ctx context.Context, a *fw.Agent, path, name string) int {
+	if AgentsPut == nil {
+		return g.fail("agents", errNoAgentWrites)
+	}
 	p, err := config.LoadProfile(path)
 	if err != nil {
 		return g.fail("agents", err)
@@ -309,13 +320,8 @@ func (g *globals) putProfile(ctx context.Context, a *fw.Agent, path, name string
 	if name != "" {
 		p.Name = name
 	}
-	old, existed := a.ProfileNamed(p.Name)
-	if existed && p.Access == nil {
-		// A file without an access block replaces the texts, not the
-		// owners, so a replace does not drop the ownership of the profile.
-		p.Access = old.Access
-	}
-	if err := a.PutProfile(ctx, p); err != nil {
+	_, existed := a.ProfileNamed(p.Name)
+	if err := AgentsPut(ctx, a, p); err != nil {
 		return g.fail("agents", accessHint(a.Config(), err))
 	}
 	verb := "created"

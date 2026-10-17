@@ -13,9 +13,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestProfileStoreIsSet(t *testing.T) {
-	if fw.ProfileStoreOpener == nil {
-		t.Fatal("fw.ProfileStoreOpener is nil after importing config")
+// The loader names the profiles that it read from files, so the kernel
+// knows which profiles the configuration defines.
+func TestLoadNamesFileProfiles(t *testing.T) {
+	cleanEnv(t)
+	home := os.Getenv("FW_HOME")
+	writeFile(t, filepath.Join(home, "agents", "free.yaml"), "system: from the file\n")
+	path := writeFile(t, filepath.Join(t.TempDir(), "fw.yaml"), "agents:\n  fixed: {system: from fw.yaml}\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.FileProfiles["free"] || cfg.FileProfiles["fixed"] || len(cfg.Agents) != 2 {
+		t.Fatalf("FileProfiles = %v, agents %v", cfg.FileProfiles, cfg.Agents)
 	}
 }
 
@@ -111,9 +121,9 @@ func TestProfileStoreRoundTrip(t *testing.T) {
 	}
 }
 
-// A profile that fw.yaml defines cannot be changed or deleted through the
-// store, and a file of the same name cannot sneak the change in either.
-func TestProfileStoreRefusesConfiguredProfiles(t *testing.T) {
+// The store writes any profile, and the loader decides: fw.yaml wins over
+// a file of the same name at the next load.
+func TestProfileStoreAndLoaderOrder(t *testing.T) {
 	cleanEnv(t)
 	home := os.Getenv("FW_HOME")
 	writeFile(t, filepath.Join(home, "agents", "shadowed.yaml"), "system: from the file\n")
@@ -129,21 +139,13 @@ func TestProfileStoreRefusesConfiguredProfiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	for _, name := range []string{"fixed", "shadowed", "fromenv"} {
-		err := store.Put(ctx, fw.AgentProfile{Name: name, System: "changed"})
-		if err == nil || !strings.Contains(err.Error(), "the configuration defines it") || !strings.Contains(err.Error(), name) {
-			t.Errorf("put %s: %v", name, err)
-		}
-		err = store.Delete(ctx, name)
-		if err == nil || !strings.Contains(err.Error(), "cannot delete") {
-			t.Errorf("delete %s: %v", name, err)
-		}
-		if l, ok := store.(fw.ProfileLocker); !ok || !l.Locked(name) {
-			t.Errorf("the store does not report %s as locked", name)
-		}
+	if cfg.FileProfiles["shadowed"] || cfg.FileProfiles["fixed"] || cfg.FileProfiles["fromenv"] || !cfg.FileProfiles["free"] {
+		t.Errorf("FileProfiles = %v", cfg.FileProfiles)
 	}
-	if l := store.(fw.ProfileLocker); l.Locked("free") || l.Locked("new") {
-		t.Error("the store reports a profile file or a new name as locked")
+	// A file for a profile that fw.yaml defines is written but lost at the
+	// next load. The kernel refuses such a change before it reaches the store.
+	if err := store.Put(ctx, fw.AgentProfile{Name: "shadowed", System: "changed"}); err != nil {
+		t.Errorf("put shadowed: %v", err)
 	}
 	if err := store.Put(ctx, fw.AgentProfile{Name: "free", System: "changed"}); err != nil {
 		t.Errorf("put of a file profile: %v", err)
@@ -157,22 +159,6 @@ func TestProfileStoreRefusesConfiguredProfiles(t *testing.T) {
 	}
 	if cfg2.Agents["free"].System != "changed" || cfg2.Agents["new"].System != "new" || cfg2.Agents["shadowed"].System != "fw.yaml wins" {
 		t.Errorf("reload: free %q new %q shadowed %q", cfg2.Agents["free"].System, cfg2.Agents["new"].System, cfg2.Agents["shadowed"].System)
-	}
-
-	// A configuration that the loader did not build treats every profile
-	// it holds as fixed.
-	own := fw.DefaultConfig()
-	own.Home = home
-	own.Agents = map[string]fw.AgentProfile{"opt": {System: "from a Go option"}}
-	store2, err := OpenProfileStore(own)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store2.Put(ctx, fw.AgentProfile{Name: "opt"}); err == nil {
-		t.Error("a Go option profile was changed")
-	}
-	if err := store2.Put(ctx, fw.AgentProfile{Name: "other"}); err != nil {
-		t.Errorf("a new profile: %v", err)
 	}
 }
 

@@ -53,9 +53,8 @@ type Agent struct {
 	// ProfileGrants can name its pattern rules.
 	rulesPolicy bool
 
-	profMu       sync.RWMutex // guards cfg.Agents, which is replaced, never changed in place
-	profileStore ProfileStore
-	storeWarn    sync.Once
+	profMu sync.RWMutex    // guards cfg.Agents, which is replaced, never changed in place
+	fixed  map[string]bool // the profiles that the configuration defines, see ProfileLocked
 
 	obsMu      sync.RWMutex
 	observers  []Observer
@@ -112,6 +111,14 @@ func New(opts ...Option) (*Agent, error) {
 	for _, p := range o.profiles {
 		cfg.Agents[p.Name] = p
 	}
+	// The configuration defines every profile but the ones that the loader
+	// read from files under <home>/agents.
+	fixed := make(map[string]bool, len(cfg.Agents))
+	for name := range cfg.Agents {
+		if !cfg.FileProfiles[name] {
+			fixed[name] = true
+		}
+	}
 	toolMW := o.toolMW
 	if cfg.Tools.Limits.Limit != (Limit{}) || len(cfg.Tools.Limits.PerTool) > 0 {
 		// The limits wrap every tool outermost, so the kernel never records a
@@ -119,27 +126,27 @@ func New(opts ...Option) (*Agent, error) {
 		toolMW = append([]ToolMiddleware{LimitTools(cfg.Tools.Limits)}, o.toolMW...)
 	}
 	a := &Agent{
-		cfg:          cfg,
-		log:          o.logger,
-		modelMW:      o.modelMW,
-		toolMW:       toolMW,
-		policy:       o.policy,
-		ledger:       o.ledger,
-		bus:          o.bus,
-		secrets:      o.secrets,
-		compactor:    o.compactor,
-		authn:        o.authn,
-		authz:        o.authz,
-		tlsConfig:    o.tlsConfig,
-		profileStore: o.store,
-		grants:       o.grants,
-		prices:       o.prices,
-		clock:        o.clock,
-		observers:    o.observers,
-		annotators:   o.annotators,
-		fleet:        o.fleet,
-		models:       map[string]Model{},
-		noResume:     o.noResume,
+		cfg:        cfg,
+		fixed:      fixed,
+		log:        o.logger,
+		modelMW:    o.modelMW,
+		toolMW:     toolMW,
+		policy:     o.policy,
+		ledger:     o.ledger,
+		bus:        o.bus,
+		secrets:    o.secrets,
+		compactor:  o.compactor,
+		authn:      o.authn,
+		authz:      o.authz,
+		tlsConfig:  o.tlsConfig,
+		grants:     o.grants,
+		prices:     o.prices,
+		clock:      o.clock,
+		observers:  o.observers,
+		annotators: o.annotators,
+		fleet:      o.fleet,
+		models:     map[string]Model{},
+		noResume:   o.noResume,
 	}
 	a.ready.Store(true)
 	if a.log == nil {
@@ -198,11 +205,6 @@ func New(opts ...Option) (*Agent, error) {
 	}
 	if a.authz == nil {
 		a.authz = NewRulesAuthz(cfg.Access, a.ProfileNamed)
-	}
-	if a.profileStore == nil && ProfileStoreOpener != nil {
-		if a.profileStore, err = ProfileStoreOpener(cfg); err != nil {
-			return nil, err
-		}
 	}
 	if a.tlsConfig == nil && cfg.TLS.Provider != "" {
 		if a.tlsConfig, err = NewTLSConfig(ctx, cfg, a.secrets); err != nil {

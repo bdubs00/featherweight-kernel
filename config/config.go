@@ -190,7 +190,7 @@ func loadProfiles(cfg *fw.Config, configDir string, lookup lookupFunc) error {
 		searchDirs[name] = agentsDir
 		fromFiles[name] = true
 	}
-	recordOrigins(cfg, fromFiles)
+	cfg.FileProfiles = fromFiles
 
 	for name, p := range cfg.Agents {
 		text, err := resolvePrompt(p.System, searchDirs[name], configDir, home)

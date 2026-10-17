@@ -101,27 +101,6 @@ func TestRolesAndAgents(t *testing.T) {
 
 }
 
-func TestPutKeepsAccessAndNormalizes(t *testing.T) {
-	ctx := context.Background()
-	a := newAgent(t, fw.WithProfile(fw.AgentProfile{Name: "reviewer", Access: &fw.Access{Owners: []string{"alice"}}}))
-	alice := fw.WithPrincipal(ctx, &fw.Principal{Subject: "alice", Kind: fw.KindUser})
-	v, created, err := Put(alice, a, fw.AgentProfile{Name: " reviewer ", Description: "edited", Effort: "LOW", TimeZone: " America/Chicago ", Policy: &fw.Rules{Default: "Ask"}})
-	if err != nil || created || v.Description != "edited" || v.Effort != "low" || v.TimeZone != "America/Chicago" || v.Policy.Default != "ask" || v.Access == nil || v.Access.Owners[0] != "alice" {
-		t.Fatalf("put = %+v, created %v, %v", v, created, err)
-	}
-	v, created, err = Put(alice, a, fw.AgentProfile{Name: "new", Access: &fw.Access{Owners: []string{" alice ", ""}, Viewers: []string{"*"}}})
-	if err != nil || !created || v.Role != "owner" || len(v.Access.Owners) != 1 || v.Access.Owners[0] != "alice" || len(v.Access.Operators) != 0 {
-		t.Fatalf("create = %+v, created %v, %v", v, created, err)
-	}
-	if _, _, err := Put(alice, a, fw.AgentProfile{Name: "bad", Policy: &fw.Rules{Default: "maybe"}}); err == nil {
-		t.Error("a bad policy default was accepted")
-	}
-	_, _, err = Put(alice, a, fw.AgentProfile{Name: "bad", TimeZone: "Mars/Olympus"})
-	if !errors.Is(err, fw.ErrInvalidRequest) || !strings.Contains(err.Error(), "timeZone") {
-		t.Errorf("a bad time zone: %v", err)
-	}
-}
-
 func TestFilterAndTail(t *testing.T) {
 	ctx := context.Background()
 	a := newAgent(t, fw.WithProfile(fw.AgentProfile{Name: "reviewer"}))

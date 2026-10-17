@@ -40,6 +40,14 @@ var (
 	CardJSON func(a *fw.Agent) ([]byte, error)
 )
 
+// AgentsPut and AgentsDelete create, replace, and remove an agent profile
+// for the verb agents. The kernel writes no profile, so they are nil in fw,
+// and the verb says so. The workbench sets them.
+var (
+	AgentsPut    func(ctx context.Context, a *fw.Agent, p fw.AgentProfile) error
+	AgentsDelete func(ctx context.Context, a *fw.Agent, name string) error
+)
+
 // AgentOptions returns options that every verb adds last when it builds an
 // agent. Tests set it to inject a fake model. It is nil in the binary.
 var AgentOptions func() []fw.Option

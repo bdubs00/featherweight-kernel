@@ -26,7 +26,6 @@ type options struct {
 	profiles   []AgentProfile
 	authn      Authn
 	authz      Authz
-	store      ProfileStore
 	tlsConfig  *tls.Config
 	prices     Prices
 	logger     *slog.Logger
@@ -147,9 +146,6 @@ func WithAuthn(a Authn) Option { return func(o *options) { o.authn = a } }
 
 // WithAuthz uses an authorization plug in place of the rules from access.
 func WithAuthz(z Authz) Option { return func(o *options) { o.authz = z } }
-
-// WithProfileStore keeps profile changes in a store of your own.
-func WithProfileStore(s ProfileStore) Option { return func(o *options) { o.store = s } }
 
 // WithTLS serves the listener with this TLS configuration, in place of
 // the one that Config.TLS builds.

@@ -1,9 +1,9 @@
 package config
 
 // This file is the profile store: one YAML file per profile under
-// <home>/agents, which loadProfiles reads at the next start. The kernel
-// calls the store from Agent.PutProfile and Agent.DeleteProfile, so a
-// profile that a dashboard or fw agents changes outlives the process.
+// <home>/agents, which loadProfiles reads at the next start. The workbench
+// writes a profile that a person creates or changes through the store and
+// hands the kernel the new set with fw.Agent.SetProfiles.
 //
 // File format. A file holds the fields of fw.AgentProfile under their yaml
 // keys, with name set to the profile name, and system and instructions as
@@ -17,10 +17,9 @@ package config
 // Origin rule. A profile that the configuration defines, in fw.yaml, in a
 // FW_AGENTS_* variable, or through a Go option, wins over a file of the
 // same name at the next load, so a change to it through the store is lost
-// at the next start. The store refuses such a change with an error that
-// says so. loadProfiles records which names it read from files, and the
-// store treats every other name that the configuration holds when the
-// store opens as fixed.
+// at the next start. The loader records the names that it read from files
+// in fw.Config.FileProfiles, and fw.Agent.ProfileLocked and SetProfiles
+// refuse a change to every other profile.
 
 import (
 	"context"
@@ -31,72 +30,28 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"weak"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 	"gopkg.in/yaml.v3"
 )
 
-func init() {
-	fw.ProfileStoreOpener = OpenProfileStore
-}
-
-// origins records, per loaded configuration, the profile names that
-// loadProfiles read from files under <home>/agents. The key is a weak
-// pointer, so a configuration that nothing holds any more falls out of
-// the map at the next record. This is the one piece of state that the
-// loader and the store share.
-var origins = struct {
-	mu sync.Mutex
-	m  map[weak.Pointer[fw.Config]]map[string]bool
-}{m: map[weak.Pointer[fw.Config]]map[string]bool{}}
-
-// recordOrigins remembers the names that came from files for cfg.
-func recordOrigins(cfg *fw.Config, fromFiles map[string]bool) {
-	origins.mu.Lock()
-	defer origins.mu.Unlock()
-	for k := range origins.m {
-		if k.Value() == nil {
-			delete(origins.m, k)
-		}
-	}
-	origins.m[weak.Make(cfg)] = fromFiles
-}
-
-// fileOrigins returns the names that loadProfiles read from files for cfg,
-// or nil for a configuration that the loader did not build.
-func fileOrigins(cfg *fw.Config) map[string]bool {
-	origins.mu.Lock()
-	defer origins.mu.Unlock()
-	return origins.m[weak.Make(cfg)]
-}
-
-// fileStore is the profile store: one YAML file per profile under dir.
-type fileStore struct {
-	cfg   *fw.Config
-	dir   string
-	fixed map[string]bool // the names that the configuration defines
+// ProfileStore is the profile store: one YAML file per profile under dir.
+type ProfileStore struct {
+	cfg *fw.Config
+	dir string
 
 	mu    sync.Mutex
 	files map[string]string // profile name to its file, for the files that exist
 }
 
 // OpenProfileStore returns the store of a configuration: one YAML file per
-// profile under <home>/agents. fw.New calls it through
-// fw.ProfileStoreOpener.
-func OpenProfileStore(cfg *fw.Config) (fw.ProfileStore, error) {
+// profile under <home>/agents.
+func OpenProfileStore(cfg *fw.Config) (*ProfileStore, error) {
 	home := cfg.Home
 	if home == "" {
 		home = fw.DefaultHome()
 	}
-	fromFiles := fileOrigins(cfg)
-	fixed := map[string]bool{}
-	for name := range cfg.Agents {
-		if !fromFiles[name] {
-			fixed[name] = true
-		}
-	}
-	s := &fileStore{cfg: cfg, dir: filepath.Join(home, "agents"), fixed: fixed}
+	s := &ProfileStore{cfg: cfg, dir: filepath.Join(home, "agents")}
 	files, err := profileFiles(s.dir)
 	if err != nil {
 		return nil, err
@@ -144,21 +99,12 @@ func profileFileName(path string) string {
 	return strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 }
 
-// errFixed words the refusal to change a profile that the configuration
-// defines.
-func (s *fileStore) errFixed(name, verb string) error {
-	return fmt.Errorf("config: cannot %s the profile %s: the configuration defines it (fw.yaml, a FW_AGENTS_* variable, or a Go option), and the configuration wins over %s at the next load; change it there", verb, name, s.dir)
-}
-
-// Put implements fw.ProfileStore. It validates the profile as Validate
-// does, so the next load accepts the file, and writes the file to a
-// temporary name first, so a crash leaves the old file whole.
-func (s *fileStore) Put(_ context.Context, p fw.AgentProfile) error {
+// Put writes or replaces the file of a profile. It validates the profile
+// as Validate does, so the next load accepts the file, and writes the file
+// to a temporary name first, so a crash leaves the old file whole.
+func (s *ProfileStore) Put(_ context.Context, p fw.AgentProfile) error {
 	if p.Name == "" {
 		return errors.New("config: a profile needs a name")
-	}
-	if s.fixed[p.Name] {
-		return s.errFixed(p.Name, "change")
 	}
 	if problems := profileProblems(s.cfg, p.Name, p); len(problems) > 0 {
 		return fmt.Errorf("config: profile %s: %s", p.Name, strings.Join(problems, "; "))
@@ -209,12 +155,9 @@ func writeAll(f *os.File, data []byte) error {
 	return f.Close()
 }
 
-// Delete implements fw.ProfileStore. A profile with no file is deleted
+// Delete removes the file of a profile. A profile with no file is deleted
 // already.
-func (s *fileStore) Delete(_ context.Context, name string) error {
-	if s.fixed[name] {
-		return s.errFixed(name, "delete")
-	}
+func (s *ProfileStore) Delete(_ context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path, ok := s.files[name]
@@ -316,7 +259,3 @@ func LoadProfile(path string) (fw.AgentProfile, error) {
 	}
 	return p, nil
 }
-
-// Locked implements fw.ProfileLocker. The store refuses a change to a
-// profile that the configuration defines.
-func (s *fileStore) Locked(name string) bool { return s.fixed[name] }

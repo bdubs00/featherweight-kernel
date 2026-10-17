@@ -91,8 +91,6 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/runs/{id}/files/{path...}", s.remote(s.runFile)},
 		{"GET /v1/agents", s.listAgents},
 		{"GET /v1/agents/{name}", s.getAgent},
-		{"PUT /v1/agents/{name}", s.putAgent},
-		{"DELETE /v1/agents/{name}", s.deleteAgent},
 		{"GET /v1/status", s.status},
 		{"GET /v1/tools", s.listTools},
 		{"GET /v1/skills", s.listSkills},

@@ -32,7 +32,7 @@ The package `fw` still holds about 2,800 lines for the workbench: `fleet.go`, `g
 
 1. Teams: `teams.go`, `Agent.TeamsOf`, and the teams in `fw.run.queued`. Done on 2026-10-17. The move added two hooks to the kernel for every later step: a claimed configuration block (`fw.RegisterExtension`) and the run annotator (`fw.RegisterRunAnnotator`). `GET /v1/whoami` moved to the workbench with it.
 2. Model titles: `title.go` and `fw.TitlesModel`. Fix the resume classification in `fw/resume.go` at the same time. It reads the last event type instead of the projected state. Done on 2026-10-17. The kernel gained `Agent.Annotate` and the event `fw.run.annotated` in their place, the rebuild reads the state of a run, and the file ledger closes the file of a finished run again after an annotation.
-3. Profile writes: `PutProfile`, `DeleteProfile`, and the routes `PUT` and `DELETE /v1/agents/{name}`.
+3. Profile writes: `PutProfile`, `DeleteProfile`, and the routes `PUT` and `DELETE /v1/agents/{name}`. Done on 2026-10-17. The kernel keeps `Agent.SetProfiles` for a package that writes profile files, and the workbench package `agents` owns the writes, the ownership rule, the routes, the MCP tools, and the verbs `put` and `delete`.
 4. The fleet: `fw/fleet.go`, `surface/native/fleet.go`, `surface/view/fleet.go`, `telemetry/fleet.go`, and the key `fleet` of the configuration.
 5. Grants and connections: `connect.go`, `grants.go`, `tools/mcp/person.go`, and `tools/mcp/user.go`. The kernel keeps one primitive: a run can pause until a credential arrives from outside. The OAuth flows and the grant store go to the workbench.
 

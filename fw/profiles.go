@@ -1,30 +1,23 @@
 package fw
 
-// This file manages the agent profiles at runtime. The configuration loads
-// them at start, and the workbench or the API adds, changes, and removes
-// them while the process runs. A ProfileStore keeps a change on disk, so
-// the next start sees it. The config package provides the store that
-// writes one YAML file per profile under <home>/agents.
+// This file is the agent profiles at runtime. The configuration loads them
+// at start, from fw.yaml and from the files under <home>/agents. A linked
+// package that manages profiles for people, such as the workbench, writes
+// the files and hands the kernel the new set with SetProfiles. The kernel
+// writes no profile itself. A profile that the configuration defines, in
+// fw.yaml, in a FW_AGENTS_* variable, or through a Go option, is fixed:
+// the configuration wins at the next start, so SetProfiles refuses a
+// change to it.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
 	"sort"
 	"strings"
 )
-
-// ProfileStore keeps profile changes. Put writes or replaces a profile, and
-// Delete removes one.
-type ProfileStore interface {
-	Put(ctx context.Context, p AgentProfile) error
-	Delete(ctx context.Context, name string) error
-}
-
-// ProfileStoreOpener opens the profile store of a configuration. The config
-// package sets it. When it is nil, a change lives in memory only and the
-// kernel logs a warning once.
-var ProfileStoreOpener func(cfg *Config) (ProfileStore, error)
 
 // ErrProfileNotFound is returned by DeleteProfile for an unknown name.
 var ErrProfileNotFound = fmt.Errorf("%w: profile not found", ErrAgentNotFound)
@@ -103,112 +96,62 @@ func (a *Agent) ListProfiles(ctx context.Context) ([]AgentProfile, error) {
 	return out, nil
 }
 
-// PutProfile adds or replaces a profile and keeps it in the store. A new
-// profile needs ActionAgentCreate, and a change needs ActionAgentEdit. When
-// a principal creates a profile that names no owner, the principal becomes
-// its owner.
-func (a *Agent) PutProfile(ctx context.Context, p AgentProfile) error {
-	p.Name = strings.TrimSpace(p.Name)
-	exists, action, err := a.checkPut(ctx, &p)
-	if err != nil {
-		return err
-	}
-	if principal := PrincipalFrom(ctx); principal != nil && !exists && p.Access == nil && principal.Kind != KindAnonymous {
-		p.Access = &Access{Owners: []string{principal.Subject}}
-	}
-	if a.profileStore != nil {
-		if err := a.profileStore.Put(ctx, p); err != nil {
-			return fmt.Errorf("fw: store profile %s: %w", p.Name, err)
+// ProfileSet returns a copy of the current profiles, by name.
+func (a *Agent) ProfileSet() map[string]AgentProfile {
+	return maps.Clone(a.profiles())
+}
+
+// SetProfiles replaces the profiles of the agent with next. A linked package
+// that keeps profiles on disk for people, such as the workbench, calls it
+// after a write, so a run can name the new profile at once. Every profile
+// must pass CheckProfile. A profile that the configuration defines must
+// stay as it is, or SetProfiles refuses the set with ErrInvalidRequest,
+// because the configuration wins at the next start. Runs in flight keep
+// the profile that they started with.
+func (a *Agent) SetProfiles(next map[string]AgentProfile) error {
+	set := make(map[string]AgentProfile, len(next))
+	for name, p := range next {
+		p.Name = strings.TrimSpace(name)
+		if err := a.CheckProfile(p); err != nil {
+			return err
 		}
-	} else {
-		a.warnNoStore()
+		set[p.Name] = p
 	}
 	a.profMu.Lock()
-	next := make(map[string]AgentProfile, len(a.cfg.Agents)+1)
-	for k, v := range a.cfg.Agents {
-		next[k] = v
+	defer a.profMu.Unlock()
+	for name := range a.fixed {
+		cur, ok := a.cfg.Agents[name]
+		if !ok {
+			continue // a fixed profile that an option removed is gone for good
+		}
+		cur.Name = name
+		if p, ok := set[name]; !ok || !reflect.DeepEqual(p, cur) {
+			return fmt.Errorf("%w: the configuration defines the agent %s, so change it there", ErrInvalidRequest, name)
+		}
 	}
-	next[p.Name] = p
-	a.cfg.Agents = next
-	a.profMu.Unlock()
-	a.log.Info("profile saved", "profile", p.Name, "action", action, "principal", subjectOf(ctx))
+	a.cfg.Agents = set
 	return nil
 }
 
-// checkPut checks a profile for PutProfile: the name, the fields, and the
-// authorization of a create or an edit.
-func (a *Agent) checkPut(ctx context.Context, p *AgentProfile) (exists bool, action string, err error) {
-	if err := checkProfileName(p.Name); err != nil {
-		return false, "", err
-	}
-	if err := a.checkProfile(p); err != nil {
-		return false, "", err
-	}
-	_, exists = a.profiles()[p.Name]
-	action = ActionAgentCreate
-	if exists {
-		action = ActionAgentEdit
-	}
-	if err := a.Authorize(ctx, action, Target{Agent: p.Name}); err != nil {
-		return false, "", err
-	}
-	return exists, action, nil
-}
-
-// CheckProfile runs the checks of PutProfile and changes nothing. It also
-// refuses a profile that the store locks. It reports whether a profile of
-// that name exists, so a surface can preview a create or an edit.
-func (a *Agent) CheckProfile(ctx context.Context, p AgentProfile) (exists bool, err error) {
-	p.Name = strings.TrimSpace(p.Name)
-	exists, _, err = a.checkPut(ctx, &p)
-	if err != nil {
-		return false, err
-	}
-	if a.ProfileLocked(p.Name) {
-		return false, fmt.Errorf("%w: the configuration defines the agent %s, so change it there", ErrInvalidRequest, p.Name)
-	}
-	return exists, nil
-}
-
-// DeleteProfile removes a profile. It needs ActionAgentDelete.
-func (a *Agent) DeleteProfile(ctx context.Context, name string) error {
-	if _, ok := a.profiles()[name]; !ok {
-		return fmt.Errorf("%w: %s", ErrProfileNotFound, name)
-	}
-	if err := a.Authorize(ctx, ActionAgentDelete, Target{Agent: name}); err != nil {
+// CheckProfile reports whether the kernel accepts a profile: its name is
+// safe as a file name, a tool name part, and a URL element, and its fields
+// fit, as checkProfile checks an inline profile. It changes nothing.
+func (a *Agent) CheckProfile(p AgentProfile) error {
+	if err := checkProfileName(strings.TrimSpace(p.Name)); err != nil {
 		return err
 	}
-	if a.profileStore != nil {
-		if err := a.profileStore.Delete(ctx, name); err != nil {
-			return fmt.Errorf("fw: delete profile %s: %w", name, err)
-		}
-	} else {
-		a.warnNoStore()
-	}
-	a.profMu.Lock()
-	next := make(map[string]AgentProfile, len(a.cfg.Agents))
-	for k, v := range a.cfg.Agents {
-		if k != name {
-			next[k] = v
-		}
-	}
-	a.cfg.Agents = next
-	a.profMu.Unlock()
-	a.log.Info("profile deleted", "profile", name, "principal", subjectOf(ctx))
-	return nil
+	return a.checkProfile(&p)
 }
 
-func (a *Agent) warnNoStore() {
-	a.storeWarn.Do(func() {
-		a.log.Warn("no profile store is configured; profile changes live in memory until the process ends")
-	})
-}
-
-func subjectOf(ctx context.Context) string {
-	if p := PrincipalFrom(ctx); p != nil {
-		return p.Subject
-	}
-	return ""
+// ProfileLocked reports whether the configuration defines the profile, so a
+// change at runtime is lost at the next start, and a surface says so before
+// a person edits it. The profiles that the loader read from the files under
+// <home>/agents (Config.FileProfiles) are not locked.
+func (a *Agent) ProfileLocked(name string) bool {
+	a.profMu.RLock()
+	defer a.profMu.RUnlock()
+	_, ok := a.cfg.Agents[name]
+	return ok && a.fixed[name]
 }
 
 // checkProfileName accepts names that are safe as a file name, a tool name

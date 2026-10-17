@@ -23,7 +23,6 @@ import (
 
 	"github.com/bdubs00/featherweight-kernel/config"
 	"github.com/bdubs00/featherweight-kernel/fw"
-	"gopkg.in/yaml.v3"
 )
 
 // The configuration refuses a TLS provider that is not registered, so the
@@ -118,7 +117,7 @@ func TestAgentsBuiltinDefault(t *testing.T) {
 
 func TestAgentsVerb(t *testing.T) {
 	m := &scriptModel{resps: []*fw.Response{endTurn("ok")}}
-	home := env(t, fw.WithModel(m))
+	env(t, fw.WithModel(m))
 	path := filepath.Join(t.TempDir(), "fw.yaml")
 	if err := os.WriteFile(path, []byte("agents:\n  fixed:\n    description: From fw.yaml\n    model: anthropic/claude-haiku-5-5\n    access: {owners: [alice], viewers: [\"*\"]}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -136,97 +135,36 @@ func TestAgentsVerb(t *testing.T) {
 		t.Errorf("table:\n%s", out)
 	}
 
-	// Put: a new profile from a file, owned by the local principal.
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "prompt.md"), []byte("You write.\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	file := filepath.Join(dir, "writer.yaml")
-	if err := os.WriteFile(file, []byte("description: Writes\nsystem: prompt.md\ntools: [files]\nskills: []\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	code, out, errOut = run(t, "", "agents", "put", file)
-	if code != 0 {
-		t.Fatalf("put: exit %d\n%s", code, errOut)
-	}
-	if !strings.Contains(out, "created the profile writer under "+filepath.Join(home, "agents")) || !strings.Contains(out, "next start") {
-		t.Errorf("put output: %s", out)
-	}
-	stored, err := os.ReadFile(filepath.Join(home, "agents", "writer.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var p fw.AgentProfile
-	if err := yaml.Unmarshal(stored, &p); err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "writer" || p.System != "You write.\n" || p.Access == nil || p.Access.Owners[0] != localPrincipal().Subject || p.Skills == nil || len(p.Skills) != 0 {
-		t.Errorf("stored profile: %+v access %+v", p, p.Access)
-	}
-
-	// Get: as YAML and as JSON, and the list has both profiles.
-	code, out, _ = run(t, "", "agents", "writer")
-	if code != 0 || !strings.Contains(out, "name: writer\n") || !strings.Contains(out, "system: |") && !strings.Contains(out, "system: You write.") {
+	// Get: as YAML and as JSON.
+	code, out, _ = run(t, "", "agents", "fixed")
+	if code != 0 || !strings.Contains(out, "name: fixed\n") || !strings.Contains(out, "description: From fw.yaml") {
 		t.Errorf("get: exit %d\n%s", code, out)
 	}
-	code, out, _ = run(t, "", "agents", "--json", "writer")
+	code, out, _ = run(t, "", "agents", "--json", "fixed")
 	var got fw.AgentProfile
-	if code != 0 || json.Unmarshal([]byte(out), &got) != nil || got.Name != "writer" || got.Description != "Writes" {
+	if code != 0 || json.Unmarshal([]byte(out), &got) != nil || got.Name != "fixed" || got.Description != "From fw.yaml" {
 		t.Errorf("get json: exit %d\n%s", code, out)
 	}
-	code, out, _ = run(t, "", "agents")
-	if code != 0 || strings.Count(out, "\n") != 3 || !strings.Contains(out, "writer") {
-		t.Errorf("list: exit %d\n%s", code, out)
-	}
 
-	// The new profile runs.
-	code, _, errOut = run(t, "", "run", "--agent", "writer", "go")
-	if code != 0 || len(m.requests()) != 1 || strings.TrimSpace(m.requests()[0].System) != "You write." {
-		t.Errorf("run: exit %d\n%s", code, errOut)
-	}
-
-	// Replace with -name: the file has no access block, so the profile
-	// keeps its owner. Then delete, which the owner can.
-	code, out, _ = run(t, "", "agents", "put", "--name", "writer", file)
-	if code != 0 || !strings.Contains(out, "replaced the profile writer") {
-		t.Errorf("replace: exit %d\n%s", code, out)
-	}
-	code, out, _ = run(t, "", "agents", "--json", "writer")
-	if code != 0 || json.Unmarshal([]byte(out), &got) != nil || got.Access == nil || got.Access.Owners[0] != localPrincipal().Subject {
-		t.Errorf("after the replace: exit %d\n%s", code, out)
-	}
-	code, out, errOut = run(t, "", "agents", "delete", "writer")
-	if code != 0 || !strings.Contains(out, "deleted the profile writer") {
-		t.Errorf("delete: exit %d\n%s%s", code, out, errOut)
-	}
-	if _, err := os.Stat(filepath.Join(home, "agents", "writer.yaml")); err == nil {
-		t.Error("the file remains after the delete")
-	}
-
-	// Errors: a fw.yaml profile without and with the admin role, an
-	// unknown profile, a bad file, and bad usage.
-	if code, _, errOut := run(t, "", "agents", "put", "--name", "fixed", file); code != 1 || !strings.Contains(errOut, "forbidden") || !strings.Contains(errOut, "add local:* to access.admins") {
-		t.Errorf("put over fw.yaml without a role: exit %d\n%s", code, errOut)
-	}
-	t.Setenv("FW_ACCESS_ADMINS", "local:*")
-	if code, _, errOut := run(t, "", "agents", "put", "--name", "fixed", file); code != 1 || !strings.Contains(errOut, "the configuration defines it") {
-		t.Errorf("put over fw.yaml: exit %d\n%s", code, errOut)
-	}
-	if code, _, errOut := run(t, "", "agents", "delete", "fixed"); code != 1 || !strings.Contains(errOut, "the configuration defines it") {
-		t.Errorf("delete of fw.yaml: exit %d\n%s", code, errOut)
-	}
-	t.Setenv("FW_ACCESS_ADMINS", "")
-	if code, _, errOut := run(t, "", "agents", "nope"); code != 1 || !strings.Contains(errOut, `"nope"`) || !strings.Contains(errOut, "fixed") {
-		t.Errorf("unknown: exit %d\n%s", code, errOut)
-	}
-	if code, _, errOut := run(t, "", "agents", "delete", "nope"); code != 1 || !strings.Contains(errOut, "not found") {
-		t.Errorf("delete unknown: exit %d\n%s", code, errOut)
-	}
-	if err := os.WriteFile(file, []byte("sytem: typo\n"), 0o644); err != nil {
+	// The kernel writes no profile: put and delete name the workbench. A
+	// linked package sets AgentsPut and AgentsDelete; the workbench tests
+	// cover that path.
+	file := filepath.Join(t.TempDir(), "writer.yaml")
+	if err := os.WriteFile(file, []byte("description: Writes\nsystem: You write.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if code, _, errOut := run(t, "", "agents", "put", file); code != 1 || !strings.Contains(errOut, "sytem") {
-		t.Errorf("bad file: exit %d\n%s", code, errOut)
+	for _, args := range [][]string{{"agents", "put", file}, {"agents", "delete", "fixed"}} {
+		if code, _, errOut := run(t, "", args...); code != 1 || !strings.Contains(errOut, "fw-workbench agents put and delete do") {
+			t.Errorf("%v: exit %d\n%s", args, code, errOut)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("FW_HOME"), "agents", "writer.yaml")); err == nil {
+		t.Error("fw agents put wrote a file")
+	}
+
+	// Errors: an unknown profile and bad usage.
+	if code, _, errOut := run(t, "", "agents", "nope"); code != 1 || !strings.Contains(errOut, `"nope"`) || !strings.Contains(errOut, "fixed") {
+		t.Errorf("unknown: exit %d\n%s", code, errOut)
 	}
 	for _, args := range [][]string{{"agents", "put"}, {"agents", "a", "b"}, {"agents", "delete"}, {"agents", "put", "a", "b"}} {
 		if code, _, _ := run(t, "", args...); code != exitUsage {
@@ -288,9 +226,6 @@ func TestAgentsAndRunUnderClosedAccess(t *testing.T) {
 	}
 	if code, _, errOut := run(t, "", "run", "--agent", "theirs", "go"); code != 0 {
 		t.Errorf("admin run: exit %d\n%s", code, errOut)
-	}
-	if code, _, errOut := run(t, "", "agents", "delete", "theirs"); code != 0 {
-		t.Errorf("admin delete: exit %d\n%s", code, errOut)
 	}
 }
 

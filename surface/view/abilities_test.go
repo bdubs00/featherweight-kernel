@@ -68,8 +68,9 @@ func TestAbilities(t *testing.T) {
 }
 
 func TestAgentViewLockedAndAbilities(t *testing.T) {
-	a := newAgent(t, fw.WithProfile(fw.AgentProfile{Name: "fixed"}), fw.WithProfileStore(lockedStore{}),
-		fw.WithTools(abilityTool("files", "builtin", "", false)))
+	// A profile from an option is one that the configuration defines, so it
+	// is locked.
+	a := newAgent(t, fw.WithProfile(fw.AgentProfile{Name: "fixed"}), fw.WithTools(abilityTool("files", "builtin", "", false)))
 	v, err := Agent(context.Background(), a, "fixed")
 	if err != nil {
 		t.Fatal(err)
@@ -93,9 +94,3 @@ func TestLowerFirst(t *testing.T) {
 		}
 	}
 }
-
-type lockedStore struct{}
-
-func (lockedStore) Put(context.Context, fw.AgentProfile) error { return nil }
-func (lockedStore) Delete(context.Context, string) error       { return nil }
-func (lockedStore) Locked(string) bool                         { return true }

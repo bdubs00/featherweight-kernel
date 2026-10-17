@@ -793,7 +793,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 }
 ```
 
-The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET`, `PUT`, and `DELETE /v1/agents/{name}`. The workbench serves `GET /v1/whoami`, the caller with its roles and its teams.
+The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET /v1/agents/{name}`. The workbench serves `PUT` and `DELETE /v1/agents/{name}` and `GET /v1/whoami`, the caller with its roles and its teams.
 
 An extension adds routes to this surface (section 12.8). The workbench adds the page, the browser sign-in, home, results, transcripts, the builder, the fleet, usage, and connections (the workbench architecture, section 2).
 
@@ -1185,7 +1185,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 | `Observer` | messages, status, metrics, bus, a2a, trace | your own | `fw.Observe` |
 | `Authn` | bearer token | none, oidc, spiffe, a chain of modes, your own | `auth.mode:` or `fw.WithAuthn` |
 | `Authz` | rules from `access` | an external MCP or bus decision point, your own | `access.external:` or `fw.WithAuthz` |
-| `ProfileStore` | one YAML file per profile | your own | `fw.WithProfileStore` |
+| Profiles at runtime | the configuration | a linked package that writes files, such as the workbench | `Agent.SetProfiles` |
 | TLS provider | plain HTTP | `file`, `spiffe`, your own | `tls.provider:` or `fw.WithTLS` |
 | `Prices` | empty | a price table | `prices:` or `fw.Prices` |
 | `Clock` | the system clock | a manual clock for tests, your own | `fw.WithClock` |
@@ -1327,7 +1327,6 @@ func WithBudget(b Budget) Option
 func WithListen(addr string) Option
 func WithAuthn(a Authn) Option
 func WithAuthz(z Authz) Option
-func WithProfileStore(s ProfileStore) Option
 func WithTLS(c *tls.Config) Option
 func WithPrices(p Prices) Option
 func WithLogger(l *slog.Logger) Option
@@ -1381,7 +1380,7 @@ The command line mirrors the API. Each command is one verb.
 | `fw card` | Print the A2A agent card |
 | `fw config` | Print the resolved configuration with secrets masked |
 | `fw env` | Print every configuration variable, and the value of each one that is set |
-| `fw agents [name]` | List the profiles, print one, or `put` and `delete` one from a file |
+| `fw agents [name]` | List the profiles or print one. `put` and `delete` come with `fw-workbench`. |
 | `fw whoami` | Print the local principal that the commands use |
 
 `fw-workbench` takes every verb above. It adds `fw-workbench mcp`, which serves the MCP server over stdio (the workbench architecture, section 3). In `fw`, the verb `mcp` fails with a message that names `fw-workbench mcp`.
@@ -1431,9 +1430,9 @@ The kernel enforces this through the `Authz` plug on every call that carries a p
 
 ### 13.3 Managing agents
 
-A profile is created, changed, and removed at runtime through `PutProfile` and `DeleteProfile`. The native API, `fw agents`, and the MCP server of the workbench expose them. A principal that creates a profile without an `access` block becomes its first owner. An individual or a group therefore owns the agents that they make. With `access.external`, that owner is data: the access block travels in each later check, and the control plane decides whether it counts. The `ProfileStore` keeps each change as one YAML file under `$FW_HOME/agents`, and the next start reads it. A profile that `fw.yaml` defines is not changed from the API, because the file wins at the next load.
+The kernel reads its profiles from `fw.yaml`, from the `FW_AGENTS_*` variables, from Go options, and from the files under `$FW_HOME/agents`, and it writes none. A linked package that manages agents for people, the workbench, writes a file and hands the kernel the new set with `Agent.SetProfiles`, so a run can name the new profile at once. `SetProfiles` checks every profile with `Agent.CheckProfile`, which judges the name and the fields of a profile and changes nothing. A profile that the configuration defines is fixed: `Agent.ProfileLocked` reports it, and `SetProfiles` refuses a change to it, because the configuration wins over a file at the next start. The loader names the profiles that it read from files in `Config.FileProfiles`, so the kernel knows which profiles are fixed.
 
-`PUT /v1/agents/{name}?dryRun=true` checks a profile as a save does and changes nothing. `Agent.CheckProfile` runs these checks in the kernel. `Agent.ProfileGrants` gives the verdict of each tool of an agent, and the view of one agent carries it in plain words as `abilities`. The workbench adds the MCP tools, the page, the shared views, and the agent builder (the workbench architecture, section 6).
+The actions `agent.create`, `agent.edit`, and `agent.delete` stay in the kernel, because they define the roles of section 13.2. The workbench authorizes a write with them, gives a new profile to its creator as the first owner, and serves `PUT` and `DELETE /v1/agents/{name}`, `PUT /v1/agents/{name}?dryRun=true`, the MCP tools, and the verbs `put` and `delete` of `fw agents` (the workbench architecture, section 10). `Agent.ProfileGrants` gives the verdict of each tool of an agent, and the view of one agent carries it in plain words as `abilities`.
 
 ### 13.4 Rules
 
@@ -1629,6 +1628,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The profiles revision of 2026-10-17 moved the profile writes to the workbench, the third step of stage 3. The kernel lost `PutProfile`, `DeleteProfile`, `fw.ProfileStore`, `fw.WithProfileStore`, `fw.ProfileLocker`, the routes `PUT` and `DELETE /v1/agents/{name}`, and the verbs `put` and `delete` of `fw agents`. It gained `Agent.SetProfiles`, `Agent.ProfileSet`, a `CheckProfile` that changes nothing, `Config.FileProfiles`, and the hooks `cli.AgentsPut` and `cli.AgentsDelete` (section 13.3). The store of the config package writes the files and judges nothing.
 
 The titles revision of 2026-10-17 moved the model titles to the workbench, the second step of stage 3. The kernel lost `titles`, `fw.WithTitles`, `fw.CleanTitle`, the title call, and the event `fw.run.titled`. It gained `Agent.Annotate` and the event `fw.run.annotated`, metadata for a run after its start, with the usage of the model call that wrote it (section 8.2). The rebuild at start now reads the state of a run and not its last event, so a finished run with a late annotation is not resumed, and the file ledger closes the file of a finished run again after an annotation. The workbench asks for a title the first time that it shows a run (the workbench architecture, section 9).
 

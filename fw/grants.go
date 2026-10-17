@@ -169,17 +169,3 @@ func (a *Agent) extraTools(ctx context.Context, req RunRequest, parent *runState
 	}
 	return out
 }
-
-// ProfileLocker is a ProfileStore that refuses changes to some profiles.
-// The store of the config package locks the profiles that the
-// configuration defines, because the configuration wins at the next start.
-type ProfileLocker interface {
-	Locked(name string) bool
-}
-
-// ProfileLocked reports whether the profile store refuses a change to the
-// profile, so a surface can say so before a person edits it.
-func (a *Agent) ProfileLocked(name string) bool {
-	l, ok := a.profileStore.(ProfileLocker)
-	return ok && l.Locked(name)
-}
