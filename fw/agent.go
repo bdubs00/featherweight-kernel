@@ -46,6 +46,7 @@ type Agent struct {
 	prices    Prices
 	clock     Clock
 	spawner   Spawner // the children in other processes, see spawn.go
+	node      string  // the name of this process, see Config.Node
 
 	tokMu        sync.RWMutex
 	personTokens PersonTokens // the tokens of people from a linked package, see connect.go
@@ -263,6 +264,10 @@ func New(opts ...Option) (*Agent, error) {
 	if a.prices == nil {
 		a.prices = PriceTable(cfg.Prices)
 	}
+	a.node = strings.TrimSpace(cfg.Node)
+	if a.node == "" {
+		a.node = DefaultNode(cfg.Listen)
+	}
 	a.spawner = o.spawner
 	if a.spawner == nil && !o.noDefaults {
 		if a.spawner, err = newSpawner(ctx, cfg); err != nil {
@@ -313,6 +318,24 @@ func (a *Agent) Files() Files {
 
 // Config returns the resolved configuration.
 func (a *Agent) Config() *Config { return a.cfg }
+
+// Node returns the name of this process among the processes of a fleet
+// (Config.Node).
+func (a *Agent) Node() string { return a.node }
+
+// DefaultNode returns the default name of a process outside ax:
+// "<host>:<port>" from the host name and the port of listen, or the host
+// name alone when listen names no port.
+func DefaultNode(listen string) string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "fw"
+	}
+	if _, port, err := net.SplitHostPort(strings.TrimSpace(listen)); err == nil && port != "" {
+		return host + ":" + port
+	}
+	return host
+}
 
 // Logger returns the logger.
 func (a *Agent) Logger() *slog.Logger { return a.log }

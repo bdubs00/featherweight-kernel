@@ -115,11 +115,13 @@ ledger:
   url: ""                       # nats and redis: the server
   options: {}                   # driver options; FW_LEDGER_OPTIONS_<NAME>
 
+node: ""                       # the name of this process among the processes of a fleet, in every ledger event; ax sets ax:<atespace>/<task>, else <host>:<port>. FW_NODE
+
 bus:
   driver: mem                   # mem | nats | redis | kafka
   url: ""                       # nats://nats:4222, redis://redis:6379, kafka://broker:9092
   intake: ""                    # queue to pull run requests from, for example fw.jobs.reviewer
-  egress: ""                    # subject prefix to publish ledger events to, for example fw.events
+  egress: ""                    # subject prefix to publish ledger events to, for example fw.events; the front of a fleet reads it
   egressTypes: []               # empty publishes every type
   options: {}                   # driver options; FW_BUS_OPTIONS_<NAME>
 

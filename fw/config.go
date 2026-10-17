@@ -14,9 +14,14 @@ import (
 // Config is the resolved configuration of one fw process. Keys match
 // examples/fw.yaml. Every field has a default from DefaultConfig.
 type Config struct {
-	Listen     string                    `yaml:"listen" json:"listen"`
-	Home       string                    `yaml:"home" json:"home"`
-	TLS        ListenTLSConfig           `yaml:"tls" json:"tls"`
+	Listen string          `yaml:"listen" json:"listen"`
+	Home   string          `yaml:"home" json:"home"`
+	TLS    ListenTLSConfig `yaml:"tls" json:"tls"`
+	// Node is the name of this process among the processes of a fleet. Every
+	// ledger event carries it, so the egress stream tells a consumer which
+	// process holds a run. Under ax it is "ax:<atespace>/<task>", which the
+	// package ax sets; elsewhere the default is "<host>:<port>".
+	Node       string                    `yaml:"node,omitempty" json:"node,omitempty"`
 	Auth       AuthConfig                `yaml:"auth" json:"auth"`
 	Access     AccessConfig              `yaml:"access" json:"access"`
 	Model      string                    `yaml:"model" json:"model"`

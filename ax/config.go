@@ -59,6 +59,8 @@ func BootstrapTimeout() time.Duration {
 //   - A "bootstrap" profile joins Agents unless one exists. Its empty
 //     access block shows it to access.admins only.
 //   - FW_ATESPACE is set to the atespace of the Task when it is unset.
+//   - Node is set to "ax:<atespace>/<task>" when it is empty, so every
+//     ledger event names this Task.
 //
 // The caller sets Listen again after this call to honor a --port flag.
 func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
@@ -121,11 +123,14 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 		}
 	}
 
-	atespace, _ := Identity(task)
+	atespace, name := Identity(task)
 	if atespace != "" {
 		if _, set := os.LookupEnv(EnvAtespace); !set {
 			_ = os.Setenv(EnvAtespace, atespace)
 		}
+	}
+	if cfg.Node == "" && atespace != "" && name != "" {
+		cfg.Node = "ax:" + atespace + "/" + name
 	}
 }
 

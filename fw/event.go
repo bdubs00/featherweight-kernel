@@ -13,13 +13,17 @@ const SpecVersion = "1.0"
 
 // Event is one ledger entry in the CloudEvents 1.0 shape.
 type Event struct {
-	SpecVersion string          `json:"specversion"`
-	ID          string          `json:"id"`
-	Source      string          `json:"source"`
-	Type        string          `json:"type"`
-	Time        time.Time       `json:"time"`
-	Subject     string          `json:"subject"` // the run id
-	Seq         uint64          `json:"seq"`
+	SpecVersion string    `json:"specversion"`
+	ID          string    `json:"id"`
+	Source      string    `json:"source"`
+	Type        string    `json:"type"`
+	Time        time.Time `json:"time"`
+	Subject     string    `json:"subject"` // the run id
+	Seq         uint64    `json:"seq"`
+	// Node names the process that appended the event (Config.Node), so a
+	// consumer of many processes, such as the front of a fleet, knows which
+	// one holds the run.
+	Node        string          `json:"node,omitempty"`
 	TraceParent string          `json:"traceparent,omitempty"`
 	Data        json.RawMessage `json:"data,omitempty"`
 }

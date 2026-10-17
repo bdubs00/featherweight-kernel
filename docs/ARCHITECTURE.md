@@ -806,7 +806,7 @@ The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each mes
 
 ### 9.4 Egress
 
-The setting `bus.egress` names a subject prefix, for example `fw.events`. The `bus` projection publishes each ledger event to `<prefix>.<atespace>.<agent>.<type>`. The setting `bus.egressTypes` limits the published types. Consumers include audit, billing, dashboards, and other agents.
+The setting `bus.egress` names a subject prefix, for example `fw.events`. The `bus` projection publishes each ledger event to `<prefix>.<atespace>.<agent>.<type>`. The setting `bus.egressTypes` limits the published types. Each event carries `node`, the name of the process from the key `node` of the configuration, so a consumer that follows many processes knows which one holds the run; the front of a fleet reads the stream this way (the workbench architecture, section 4.8). Consumers include audit, billing, dashboards, and other agents.
 
 ### 9.5 Request and reply
 
@@ -1551,6 +1551,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The node revision of 2026-10-17 gave every ledger event the field `node`, the name of the process from the key `node` of the configuration: `ax:<atespace>/<task>` under ax, which the package `ax` sets, else `<host>:<port>`. The front of a fleet reads the egress streams of its workers and places each run by it (KERNEL_SPLIT.md, section 7).
 
 The spawner revision of 2026-10-17 put `spawn_task` behind the `Spawner` plug, the second item of stage 4 of docs/ROADMAP.md. `Agent.SpawnChild` starts a child in this process or through the spawner, the ledger of the parent records a remote child in `fw.run.child`, and the run methods of the agent reach a remote child through the spawner. The driver `ax` of the package `ax` creates a child Task over the ax gRPC API and drives its run through the atenet router. The native API lets a trusted caller name the person of a run with `principal` and `principalKind`, and `RunRequest` gained `PrincipalKind`. The module depends on `github.com/google/ax` for the generated API.
 

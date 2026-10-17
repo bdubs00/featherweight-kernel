@@ -882,6 +882,7 @@ func (a *Agent) appendLocked(guard context.Context, rs *runState, e Event) (Even
 	}
 	e.Time = a.now().UTC()
 	e.Source = rs.source
+	e.Node = a.node
 	e.TraceParent = rs.trace
 	e.Data = a.redact.data(e.Data)
 	began := time.Now()
