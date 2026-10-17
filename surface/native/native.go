@@ -545,7 +545,7 @@ func (s *server) listRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	matched := view.Filter(runs, q.Get("agent"), q.Get("state"), q.Get("principal"), 0)
+	matched := view.FilterBatch(view.Filter(runs, q.Get("agent"), q.Get("state"), q.Get("principal"), 0), q.Get("batch"))
 	glance, total := view.GlanceOf(matched, time.Now()), len(matched)
 	if limit > 0 && len(matched) > limit {
 		matched = matched[:limit]

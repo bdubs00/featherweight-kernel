@@ -350,6 +350,22 @@ func Filter(runs []*fw.Run, agent, state, principal string, limit int) []*fw.Run
 	return out
 }
 
+// FilterBatch keeps the runs of one batch, by the metadata key
+// fw.MetaBatch. An empty batch keeps every run.
+func FilterBatch(runs []*fw.Run, batch string) []*fw.Run {
+	batch = strings.TrimSpace(batch)
+	if batch == "" {
+		return runs
+	}
+	out := make([]*fw.Run, 0, len(runs))
+	for _, r := range runs {
+		if r.Metadata[fw.MetaBatch] == batch {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // EventLine is one event of a run as a short line that a person reads.
 type EventLine struct {
 	Seq  uint64    `json:"seq"`

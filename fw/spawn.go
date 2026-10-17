@@ -86,6 +86,24 @@ type RunChildData struct {
 	Member string `json:"member"`
 }
 
+// inheritBatch gives a child the batch of its parent when the request
+// names none.
+func inheritBatch(meta map[string]string, parent *Run) map[string]string {
+	if parent == nil {
+		return meta
+	}
+	batch := parent.Metadata[MetaBatch]
+	if batch == "" || meta[MetaBatch] != "" {
+		return meta
+	}
+	out := make(map[string]string, len(meta)+1)
+	for k, v := range meta {
+		out[k] = v
+	}
+	out[MetaBatch] = batch
+	return out
+}
+
 // childRef is where a remote child lives.
 type childRef struct {
 	parent string
@@ -135,6 +153,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		req.Metadata = map[string]string{}
 	}
 	req.Metadata[MetaParent] = parent
+	req.Metadata = inheritBatch(req.Metadata, p.snapshot())
 	var b Budget
 	if req.Budget != nil {
 		b = *req.Budget

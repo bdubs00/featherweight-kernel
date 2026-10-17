@@ -326,6 +326,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, err
 	}
 	extra := a.extraTools(ctx, req, parent)
+	req.Metadata = inheritBatch(req.Metadata, parentRun)
 	meta := a.annotate(ctx, &req, parentRun, req.Metadata)
 	if req.IdempotencyKey != "" {
 		if meta == nil {

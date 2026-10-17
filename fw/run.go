@@ -290,6 +290,12 @@ func WithParent(id string) RunOption { return func(r *RunRequest) { r.Parent = i
 // that takes a title from a person puts it here.
 const MetaTitle = "fw.title"
 
+// MetaBatch is the metadata key of the job that a run belongs to. The
+// front of a fleet gives every run of one job the same value when it puts
+// the job on the queue, and a child run inherits the value of its parent,
+// in this process or in another one, so one name covers the whole job.
+const MetaBatch = "fw.batch"
+
 // MaxTitleRunes is the length of a title that TitleFrom makes.
 const MaxTitleRunes = 64
 
