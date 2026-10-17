@@ -14,6 +14,8 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -606,10 +608,17 @@ func describe(e fw.Event) string {
 			}
 			return s
 		}
-	case fw.EvRunTitled:
-		var d fw.RunTitledData
+	case fw.EvRunAnnotated:
+		var d fw.RunAnnotatedData
 		if e.Decode(&d) == nil {
-			return "titled: " + oneLine(d.Title, 80)
+			if t := strings.TrimSpace(d.Metadata[fw.MetaTitle]); t != "" {
+				return "titled: " + oneLine(t, 80)
+			}
+			keys := slices.Sorted(maps.Keys(d.Metadata))
+			if len(keys) == 0 {
+				return "annotated with usage"
+			}
+			return "annotated: " + strings.Join(keys, ", ")
 		}
 	case fw.EvContextCompacted:
 		var d fw.ContextCompactedData

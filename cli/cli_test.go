@@ -130,7 +130,6 @@ func env(t *testing.T, opts ...fw.Option) string {
 	t.Setenv("FW_ATESPACE", "test")
 	// A scripted model answers in order, so the runs of these tests make
 	// no title call.
-	t.Setenv("FW_TITLES", fw.TitlesInput)
 	t.Chdir(t.TempDir())
 	home := t.TempDir()
 	t.Setenv("FW_HOME", home)

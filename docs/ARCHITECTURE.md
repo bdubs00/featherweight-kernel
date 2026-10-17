@@ -69,7 +69,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 |---|---|
 | `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5) |
 | `fw.run.started` | model, tool names, brief (the sections that tools add to the system prompt), time zone |
-| `fw.run.titled` | title, usage, provider, model (section 8.2) |
+| `fw.run.annotated` | metadata, usage, provider, model (section 8.2) |
 | `fw.message.received` | role, content, origin (`http`, `a2a`, `mcp`, `bus`, `cli`, `kernel`), note kind |
 | `fw.turn.started` | turn number |
 | `fw.model.requested` | provider, model, effort, estimated input tokens |
@@ -120,7 +120,7 @@ A projection holds no state that the ledger does not hold. When the process rest
 
 ### 4.5 Resume
 
-On start, `fw` reads the index and finds every run whose last event is not terminal. For each such run, it rebuilds the message history and appends `fw.run.resumed`. Then it continues from the last complete point:
+On start, `fw` reads the index and finds every run whose state is not terminal. The state, and not the last event, decides, so a finished run with a late annotation stays finished (section 8.2). For each such run, it rebuilds the message history and appends `fw.run.resumed`. Then it continues from the last complete point:
 
 1. If the last event is `fw.model.requested`, send the request again.
 2. If the last event is `fw.tool.requested` and the tool is idempotent, run the tool again.
@@ -799,13 +799,17 @@ An extension adds routes to this surface (section 12.8). The workbench adds the 
 
 #### Run titles
 
-`title` names the work in a few words, so a list reads "Fix checkout retries" and not only "reviewer". The metadata key `fw.title` (`fw.MetaTitle`) sets it. The field `title` of `POST /v1/runs` and the argument `title` of the MCP tool `run` of the workbench put a trimmed title into that key. Such a title wins over a `fw.title` entry in `metadata`. A title of more than 200 characters is an invalid request. The MCP tool `run` sends the title to another fleet member in `metadata`. A member of any version therefore keeps it.
+`title` names the work in a few words, so a list reads "Fix checkout retries" and not only "reviewer". The metadata key `fw.title` (`fw.MetaTitle`) sets it. The field `title` of `POST /v1/runs` puts a trimmed title into that key. Such a title wins over a `fw.title` entry in `metadata`. A title of more than 200 characters is an invalid request.
 
 Without the key, the run takes `fw.TitleFrom` of its input. That is the first sentence of the first line with text, without Markdown marks, cut at a word to 64 characters (`fw.MaxTitleRunes`). An input without text gives no title. The `status` projection computes this title from `fw.run.queued`, so a run in an older ledger gets a title too.
 
-`titles`, or `FW_TITLES`, sets how a run gets its title. The value `input`, the default of the kernel, keeps the title of the input and makes no extra call. The workbench sets `model` as its default (the workbench architecture, section 1.1). With `model`, a top-level run that starts gets a title of a few words from a model. The kernel makes this call beside the first turn. The call goes to `compaction.model`, else to the model of the run. `fw.CleanTitle` turns the answer into one line of at most 64 characters. The kernel records it as `fw.run.titled` with the title, the usage, the provider, and the model of the call. A program that embeds fw sets the value with the option `fw.WithTitles`. Under `model`, a test with a scripted model uses `fw.WithTitles(fw.TitlesInput)`, because the title call takes an answer of the script.
+The kernel makes no title call. A title that a model writes comes from the workbench, which records it on the run as an annotation (the workbench architecture, section 9).
 
-The usage of the title call counts in the usage, the cost, and the budget of the run, and in `fw_model_tokens_total`. A title that the request sets wins over a written title. A child run, a replay, and a run without text in its input keep the title of the input. A title call that fails changes nothing, so the run keeps the title of its input. A shutdown cancels a title call and never waits for it. The title of a short run can arrive after `fw.run.finished`. It changes only the title and the usage, and the metrics and the traces never read it as a run that opened again.
+#### Annotations
+
+`Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entry `idempotencyKey` cannot change, and the metadata after the merge must fit the bounds of `fw.CheckMetadata`.
+
+An annotation changes the state of a run in no way. One that arrives after `fw.run.finished` leaves the run finished: the metrics and the traces open no run for it, the file ledger closes the file of the run again after it, and a restart does not resume the run, because the rebuild reads the state of a run and not its last event (section 4.5).
 
 ### 8.3 A2A server
 
@@ -918,7 +922,7 @@ The `metrics` projection maintains this registry. The route `/metrics` carries n
 
 The origin of a child run is `tool`. `fw_approvals_oldest_timestamp_seconds` is the Unix time of the request of the oldest approval that waits. An agent without such an approval has no series.
 
-`fw_model_tokens_total` and `fw_model_cost_usd_total` also count the summary calls of a compaction, from `fw.context.compacted`, and the title call of a run, from `fw.run.titled`. The kernel adds these tokens to the usage of the run, so the metrics match the ledger. These calls do not count in `fw_model_requests_total`. `fw_model_cost_usd_total` counts priced tokens only. The tokens of a model without a price go to `fw_model_unpriced_tokens_total`, because their cost is unknown, not zero. A price of zero is a price. Without a price table, every token is unpriced.
+`fw_model_tokens_total` and `fw_model_cost_usd_total` also count the summary calls of a compaction, from `fw.context.compacted`, and the model call of an annotation, from `fw.run.annotated`, such as the title call of the workbench. The kernel adds these tokens to the usage of the run, so the metrics match the ledger. These calls do not count in `fw_model_requests_total`. `fw_model_cost_usd_total` counts priced tokens only. The tokens of a model without a price go to `fw_model_unpriced_tokens_total`, because their cost is unknown, not zero. A price of zero is a price. Without a price table, every token is unpriced.
 
 The model latency histogram has buckets up to 900 seconds, because one turn on a large model can run for minutes. The Go runtime and process collectors are on. The library is `github.com/prometheus/client_golang`.
 
@@ -1216,7 +1220,7 @@ A skill is a directory with a `SKILL.md` file whose front matter names and descr
 
 Each driver registers itself by name at init, for example `fw.RegisterBus("nats", nats.New)`. A third-party Go module adds a driver by being imported. A blank import in `cmd/fw/drivers.go` selects the drivers that the default binary includes. A custom build leaves out a driver by leaving out its import.
 
-A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp`, the tool `propose_agent`, and `titles: model` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), and `fw.RegisterRunAnnotator` adds a run annotator (section 12.4).
+A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), and `fw.RegisterRunAnnotator` adds a run annotator (section 12.4).
 
 ### 12.7 Out-of-process extension
 
@@ -1625,6 +1629,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The titles revision of 2026-10-17 moved the model titles to the workbench, the second step of stage 3. The kernel lost `titles`, `fw.WithTitles`, `fw.CleanTitle`, the title call, and the event `fw.run.titled`. It gained `Agent.Annotate` and the event `fw.run.annotated`, metadata for a run after its start, with the usage of the model call that wrote it (section 8.2). The rebuild at start now reads the state of a run and not its last event, so a finished run with a late annotation is not resumed, and the file ledger closes the file of a finished run again after an annotation. The workbench asks for a title the first time that it shows a run (the workbench architecture, section 9).
 
 The teams revision of 2026-10-17 moved the teams to the workbench, the first step of the hollowing of `fw` (docs/ROADMAP.md, stage 3). The kernel lost `Agent.TeamsOf`, `Agent.AgentTeamsOf`, `access.teams`, the teams in `fw.run.queued` and in the answers of `access.external`, `by` on `GET /v1/runs`, and `GET /v1/whoami`. It gained two hooks for any linked package: a claimed configuration block, through `fw.RegisterExtension` and `Config.Extension` (section 12.1), and the run annotator, through `fw.RegisterRunAnnotator` and `fw.WithRunAnnotators` (section 12.4). The workbench records the teams of a run in its metadata through an annotator, and serves `GET /v1/whoami` and `GET /v1/home/others` (the workbench architecture, section 8).
 

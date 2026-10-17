@@ -35,7 +35,6 @@ type options struct {
 	files      Files
 	grants     GrantStore
 	noDefaults bool
-	titles     string // see WithTitles
 	noResume   bool
 	annotators []RunAnnotator
 }
@@ -161,11 +160,6 @@ func WithPrices(p Prices) Option { return func(o *options) { o.prices = p } }
 
 // WithLogger uses a logger.
 func WithLogger(l *slog.Logger) Option { return func(o *options) { o.logger = l } }
-
-// WithTitles sets how a run gets its title (Config.Titles): TitlesInput or
-// TitlesModel. A test with a scripted model uses TitlesInput, so its runs
-// make no title call.
-func WithTitles(mode string) Option { return func(o *options) { o.titles = mode } }
 
 // WithoutDefaults skips the built-in tools and the registered tool sources
 // and surfaces, so only what the options give is used.

@@ -85,7 +85,7 @@ curl -s -H "Authorization: Bearer secret" -H "Content-Type: application/json" \
      -d '{"input": "Say hello.", "instructions": "Answer in one sentence.", "wait": true}' http://localhost:8080/v1/runs
 ```
 
-Follow the ledger of a run as server-sent events with `GET /v1/runs/{id}/events`, or on the command line with `fw events <id> --follow`. Each run has a title, such as "Fix checkout retries". It comes from the request, or else from the first sentence of the input. Set `titles: model` to let a model write it, at the cost of one more model call per run.
+Follow the ledger of a run as server-sent events with `GET /v1/runs/{id}/events`, or on the command line with `fw events <id> --follow`. Each run has a title, such as "Fix checkout retries". It comes from the request, or else from the first sentence of the input. The workbench lets a model write one and records it on the run.
 
 ## Observability
 

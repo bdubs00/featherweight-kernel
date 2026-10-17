@@ -496,7 +496,7 @@ func newAgent(t *testing.T, m fw.Model, opts ...fw.Option) *fw.Agent {
 		fw.WithBus(fw.NewMemBus()),
 		fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
-	a, err := fw.New(append(append(base, fw.WithTitles(fw.TitlesInput)), opts...)...)
+	a, err := fw.New(append(base, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -752,7 +752,7 @@ func TestMetricsLateTitle(t *testing.T) {
 	f.emit(fw.EvRunQueued, fw.RunQueuedData{Agent: "default", Input: "work"})
 	f.emit(fw.EvRunStarted, fw.RunStartedData{})
 	f.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeCompleted})
-	f.emit(fw.EvRunTitled, fw.RunTitledData{Title: "Do the work", Usage: &fw.Usage{InputTokens: 30, OutputTokens: 4}, Provider: "local", Model: "free"})
+	f.emit(fw.EvRunAnnotated, fw.RunAnnotatedData{Metadata: map[string]string{fw.MetaTitle: "Do the work"}, Usage: &fw.Usage{InputTokens: 30, OutputTokens: 4}, Provider: "local", Model: "free"})
 	if got := value(t, reg, "fw_runs_active", map[string]string{"agent": "default"}); got != 0 {
 		t.Errorf("fw_runs_active = %v after a late title", got)
 	}

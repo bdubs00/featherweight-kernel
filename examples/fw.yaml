@@ -232,7 +232,6 @@ compaction:                     # a long run replaces its history with a summary
   at: 150000                    # estimated tokens of context that start a summary; 0 is off. An overflow error from the model also starts one.
   model: ""                     # the model of the summary call, a selector or a name from models; empty is the model of the run
 
-titles: input                   # input: the first sentence of the input, with no extra call. model: a short title from compaction.model, else the model of the run; the workbench sets it. FW_TITLES
 
 time:                           # the clock of the agent (docs/ARCHITECTURE.md section 5.8)
   zone: ""                      # an IANA name such as America/Chicago, or UTC; empty is the zone of the system, UTC in a sandbox; FW_TIME_ZONE

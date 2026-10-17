@@ -103,9 +103,6 @@ func New(opts ...Option) (*Agent, error) {
 			cfg = DefaultConfig()
 		}
 	}
-	if o.titles != "" {
-		cfg.Titles = o.titles
-	}
 	if cfg.Home == "" {
 		cfg.Home = DefaultHome()
 	}

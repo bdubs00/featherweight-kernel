@@ -85,7 +85,6 @@ func newTestAgent(t *testing.T, m Model, opts ...Option) *Agent {
 	}
 	// A scripted model answers in order, so a test run makes no title
 	// call. title_test.go turns model titles on where it needs them.
-	a.cfg.Titles = TitlesInput
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

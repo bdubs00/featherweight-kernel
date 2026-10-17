@@ -4,7 +4,10 @@ package fw
 // the model sees, and the status object that every surface returns. Both are
 // functions of the ledger alone.
 
-import "strings"
+import (
+	"maps"
+	"strings"
+)
 
 // ProjectHistory builds the message history that the next model call sends.
 // It starts at the latest fw.context.compacted event, with a user message
@@ -273,14 +276,20 @@ func (r *Run) Apply(e Event, prices Prices) {
 		if p, ok := priceOf(prices, d.Provider, d.Model); ok {
 			r.Usage.CostUSD += Cost(d.Usage, p)
 		}
-	case EvRunTitled:
-		var d RunTitledData
+	case EvRunAnnotated:
+		var d RunAnnotatedData
 		if e.Decode(&d) != nil {
 			return
 		}
-		// A title that the request set wins over a written one.
-		if t := strings.TrimSpace(d.Title); t != "" && strings.TrimSpace(r.Metadata[MetaTitle]) == "" {
-			r.Title = t
+		if len(d.Metadata) > 0 {
+			r.Metadata = maps.Clone(r.Metadata)
+			if r.Metadata == nil {
+				r.Metadata = map[string]string{}
+			}
+			maps.Copy(r.Metadata, d.Metadata)
+			if t := strings.TrimSpace(r.Metadata[MetaTitle]); t != "" {
+				r.Title = t
+			}
 		}
 		if d.Usage != nil {
 			r.Usage.Usage = r.Usage.Usage.Add(*d.Usage)

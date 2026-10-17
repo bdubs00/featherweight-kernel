@@ -29,7 +29,7 @@ func newAgent(t *testing.T, opts ...fw.Option) *fw.Agent {
 		fw.WithBus(fw.NewMemBus()),
 		fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 	}
-	a, err := fw.New(append(append(base, fw.WithTitles(fw.TitlesInput)), opts...)...)
+	a, err := fw.New(append(base, opts...)...)
 	if err != nil {
 		t.Fatalf("fw.New: %v", err)
 	}

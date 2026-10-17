@@ -22,7 +22,7 @@ func TestRegisterDefaults(t *testing.T) {
 		t.Fatalf("the change ran %d times with the kernel defaults in place, want 2", n)
 	}
 	c := DefaultConfig()
-	if slices.Contains(c.Surfaces, "mcp") || slices.Contains(c.Tools.Builtin, "propose_agent") || c.Titles != TitlesInput {
-		t.Fatalf("kernel defaults: surfaces %v, built-in tools %v, titles %q", c.Surfaces, c.Tools.Builtin, c.Titles)
+	if slices.Contains(c.Surfaces, "mcp") || slices.Contains(c.Tools.Builtin, "propose_agent") {
+		t.Fatalf("kernel defaults: surfaces %v, built-in tools %v", c.Surfaces, c.Tools.Builtin)
 	}
 }

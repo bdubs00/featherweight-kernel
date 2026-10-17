@@ -188,7 +188,6 @@ func TestFileLedgerDriverWithAgent(t *testing.T) {
 		t.Fatal("Ledger.Path does not override the directory")
 	}
 	cfg.Ledger.Path = ""
-	cfg.Titles = TitlesInput // the script holds one answer
 
 	// The agent opens the "file" driver from the configuration.
 	t.Setenv("FW_ATESPACE", "")

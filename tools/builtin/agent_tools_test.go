@@ -15,7 +15,7 @@ func newTestAgent(t *testing.T) *fw.Agent {
 	model := fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
 		return &fw.Response{}, nil
 	}}
-	a, err := fw.New(fw.WithTitles(fw.TitlesInput),
+	a, err := fw.New(
 		fw.WithoutDefaults(),
 		fw.WithLedger(fw.NewMemLedger()),
 		fw.WithBus(fw.NewMemBus()),

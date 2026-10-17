@@ -116,9 +116,9 @@ func (t *Tracer) Observe(e fw.Event) {
 		}
 		t.end(e.Subject, rt, ts)
 		return
-	case fw.EvRunTitled:
-		// A title can arrive after the run finished, so it never opens a
-		// run span.
+	case fw.EvRunAnnotated:
+		// An annotation can arrive after the run finished, so it never
+		// opens a run span.
 		if rt != nil {
 			rt.current().AddEvent(e.Type, trace.WithTimestamp(ts))
 		}

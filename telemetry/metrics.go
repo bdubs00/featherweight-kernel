@@ -502,10 +502,10 @@ func (m *Metrics) Observe(e fw.Event) {
 	case fw.EvRunSuspended:
 		m.suspend(e, st)
 		return
-	case fw.EvRunTitled:
-		// A title can arrive after the run finished. It counts the tokens
-		// of its call and never opens the run.
-		var d fw.RunTitledData
+	case fw.EvRunAnnotated:
+		// An annotation can arrive after the run finished. It counts the
+		// tokens of the call that wrote it and never opens the run.
+		var d fw.RunAnnotatedData
 		if e.Decode(&d) == nil && d.Usage != nil {
 			m.usage(d.Provider, d.Model, *d.Usage)
 		}

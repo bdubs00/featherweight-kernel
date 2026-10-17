@@ -358,7 +358,6 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	}
 	_, err := a.emit(ctx, rs, EvRunStarted, RunStartedData{Model: a.cfg.ModelSelector(prof.Model), Tools: names, Brief: a.brief(ctx, rs, tools), TimeZone: zone})
 	if err == nil {
-		a.maybeTitle(rs, c.queued, prof.Model)
 	}
 	return err
 }

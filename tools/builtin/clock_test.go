@@ -58,7 +58,7 @@ func newClockAgent(t *testing.T, zone string, noteAfter, deadline time.Duration,
 		c.clock.Advance(s.advance)
 		return s.resp, nil
 	}}
-	c.a, err = fw.New(fw.WithTitles(fw.TitlesInput),
+	c.a, err = fw.New(
 		fw.WithConfig(cfg),
 		fw.WithoutDefaults(),
 		fw.WithLedger(fw.NewMemLedger()),

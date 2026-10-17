@@ -10,7 +10,7 @@ import (
 func TestEventsPage(t *testing.T) {
 	ctx := context.Background()
 	l := fw.NewMemLedger()
-	a, err := fw.New(fw.WithTitles(fw.TitlesInput), fw.WithConfig(fw.DefaultConfig()), fw.WithLedger(l), fw.WithBus(fw.NewMemBus()),
+	a, err := fw.New(fw.WithConfig(fw.DefaultConfig()), fw.WithLedger(l), fw.WithBus(fw.NewMemBus()),
 		fw.WithAuthn(fw.NoAuthn{}), fw.WithoutDefaults(), fw.WithModel(fw.ModelFunc{}))
 	if err != nil {
 		t.Fatal(err)

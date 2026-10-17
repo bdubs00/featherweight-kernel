@@ -57,8 +57,16 @@ type fileRun struct {
 	mu       sync.Mutex
 	loaded   bool   // seq is known
 	seq      uint64 // last sequence number in the file
+	done     bool   // the run finished, and no later event opened it again
 	f        *os.File
 	watchers []*ledgerWatcher
+}
+
+// keepsDone reports whether an event leaves a finished run finished. An
+// annotation adds metadata and opens nothing again; every other event
+// after the end, such as a follow-up message, works on the run again.
+func keepsDone(done bool, typ string) bool {
+	return IsTerminal(typ) || (done && typ == EvRunAnnotated)
 }
 
 type indexEntry struct {
@@ -152,9 +160,10 @@ func (l *FileLedger) Append(_ context.Context, e Event) (uint64, error) {
 	for _, w := range r.watchers {
 		w.push(e)
 	}
-	if IsTerminal(e.Type) {
+	r.done = keepsDone(r.done, e.Type)
+	if r.done {
 		// A finished run seldom grows again, so release its file. A
-		// follow-up opens it again.
+		// follow-up opens it again, and an annotation closes it again.
 		_ = r.f.Close()
 		r.f = nil
 	}
@@ -180,6 +189,7 @@ func (l *FileLedger) loadLocked(id string, r *fileRun) error {
 	defer f.Close()
 	var seq uint64
 	var good int64
+	done := false
 	br := bufio.NewReader(f)
 	for {
 		line, err := br.ReadBytes('\n')
@@ -190,12 +200,14 @@ func (l *FileLedger) loadLocked(id string, r *fileRun) error {
 			return fmt.Errorf("fw: file ledger: read %s: %w", id, err)
 		}
 		var head struct {
-			Seq uint64 `json:"seq"`
+			Seq  uint64 `json:"seq"`
+			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(line, &head); err != nil {
 			return fmt.Errorf("fw: file ledger: %s line %d is not an event: %w", id, seq+1, err)
 		}
 		seq = head.Seq
+		done = keepsDone(done, head.Type)
 		good += int64(len(line))
 	}
 	if st, err := f.Stat(); err == nil && st.Size() > good {
@@ -203,7 +215,7 @@ func (l *FileLedger) loadLocked(id string, r *fileRun) error {
 			return fmt.Errorf("fw: file ledger: cut partial line of %s: %w", id, err)
 		}
 	}
-	r.seq, r.loaded = seq, true
+	r.seq, r.loaded, r.done = seq, true, done
 	return nil
 }
 

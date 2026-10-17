@@ -52,7 +52,7 @@ func callTool(id, name, input string) *fw.Response {
 func startPeer(t *testing.T, resps []*fw.Response, tools ...fw.Tool) string {
 	t.Helper()
 	t.Setenv("FW_ATESPACE", "")
-	a, err := fw.New(fw.WithTitles(fw.TitlesInput),
+	a, err := fw.New(
 		fw.WithoutDefaults(),
 		fw.WithAuthn(fw.NoAuthn{}),
 		fw.WithModel((&script{resps: resps}).model()),

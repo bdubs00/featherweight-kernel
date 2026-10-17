@@ -135,7 +135,7 @@ func newSpawnAgent(t *testing.T, m fw.Model, opts ...fw.Option) *fw.Agent {
 		fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		fw.WithTools(builtinTool(t, "spawn_task", cfg), builtinTool(t, "await_task", cfg)),
 	}
-	a, err := fw.New(append(append(base, fw.WithTitles(fw.TitlesInput)), opts...)...)
+	a, err := fw.New(append(base, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}

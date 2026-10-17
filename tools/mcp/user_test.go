@@ -936,7 +936,7 @@ func TestRunPausesUntilConnected(t *testing.T) {
 	}}
 	a, err := fw.New(fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithModel(model), fw.WithLedger(fw.NewMemLedger()),
 		fw.WithBus(fw.NewMemBus()), fw.WithGrantStore(fw.NewMemGrantStore()), fw.WithToolSources(s),
-		fw.WithTitles(fw.TitlesInput), fw.WithLogger(slog.New(slog.DiscardHandler)))
+		fw.WithLogger(slog.New(slog.DiscardHandler)))
 	if err != nil {
 		t.Fatal(err)
 	}

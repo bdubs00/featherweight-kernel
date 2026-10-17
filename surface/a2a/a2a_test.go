@@ -97,7 +97,7 @@ func newEnvWith(t *testing.T, s *Surface, m fw.Model, opts ...fw.Option) *env {
 		fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
 		fw.WithSurfaces(s),
 	}
-	a, err := fw.New(append(append(base, fw.WithTitles(fw.TitlesInput)), opts...)...)
+	a, err := fw.New(append(base, opts...)...)
 	if err != nil {
 		t.Fatalf("fw.New: %v", err)
 	}

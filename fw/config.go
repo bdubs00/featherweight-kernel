@@ -30,7 +30,6 @@ type Config struct {
 	Policy     PolicyConfig              `yaml:"policy" json:"policy"`
 	Budget     Budget                    `yaml:"budget" json:"budget"`
 	Compaction CompactionConfig          `yaml:"compaction" json:"compaction"`
-	Titles     string                    `yaml:"titles,omitempty" json:"titles,omitempty"` // input (the default) or model, see TitlesInput
 	Time       TimeConfig                `yaml:"time" json:"time"`
 	Spawn      SpawnConfig               `yaml:"spawn" json:"spawn"`
 	Prices     map[string]Price          `yaml:"prices" json:"prices,omitempty"`
@@ -570,7 +569,6 @@ func DefaultConfig() *Config {
 			MaxRepeats:      DefaultMaxRepeats,
 		},
 		Compaction: CompactionConfig{At: DefaultCompactAt},
-		Titles:     TitlesInput,
 		Time:       TimeConfig{NoteAfter: DefaultNoteAfter},
 		Spawn:      SpawnConfig{MaxDepth: DefaultSpawnDepth, MaxChildren: DefaultSpawnChildren},
 		Surfaces:   []string{"native", "a2a", "metrics"},

@@ -2,6 +2,7 @@ package fw
 
 import (
 	"context"
+	"fmt"
 	"maps"
 )
 
@@ -46,4 +47,58 @@ func (a *Agent) annotate(ctx context.Context, req *RunRequest, parent *Run, meta
 		out = next
 	}
 	return out
+}
+
+// EvRunAnnotated is the event of Annotate.
+const EvRunAnnotated = "fw.run.annotated"
+
+// RunAnnotatedData is the payload of fw.run.annotated: metadata that a
+// surface or a linked package adds to a run after the kernel queued it, such
+// as a title that a model wrote. Metadata merges into the metadata of the
+// run, and a later entry replaces an earlier one. Usage, Provider, and Model
+// name the model call that produced the metadata, when a model wrote it.
+// The usage and the cost of the run include that usage, and the metrics
+// count it. The event changes the state of a run in no way, so one that
+// arrives after fw.run.finished opens nothing again.
+type RunAnnotatedData struct {
+	Metadata map[string]string `json:"metadata,omitempty"`
+	Usage    *Usage            `json:"usage,omitempty"`
+	Provider string            `json:"provider,omitempty"`
+	Model    string            `json:"model,omitempty"`
+}
+
+// metaIdempotencyKey is the metadata entry that the kernel keeps for the
+// idempotency key of a request. Annotate refuses to change it.
+const metaIdempotencyKey = "idempotencyKey"
+
+// Annotate adds metadata to a run after the kernel queued it, as
+// fw.run.annotated. With a principal in ctx, the caller needs the operator
+// role on the run. The data must hold metadata or usage. The metadata of
+// the run after the merge must fit the bounds of CheckMetadata, and the
+// entry idempotencyKey cannot change. A finished run takes an annotation
+// and stays finished.
+func (a *Agent) Annotate(ctx context.Context, id string, d RunAnnotatedData) error {
+	rs, err := a.k.lookup(id)
+	if err != nil {
+		return err
+	}
+	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
+		return err
+	}
+	if len(d.Metadata) == 0 && d.Usage == nil {
+		return fmt.Errorf("%w: an annotation holds metadata or usage", ErrInvalidRequest)
+	}
+	if _, ok := d.Metadata[metaIdempotencyKey]; ok {
+		return fmt.Errorf("%w: the metadata entry %s cannot change", ErrInvalidRequest, metaIdempotencyKey)
+	}
+	merged := maps.Clone(rs.snapshot().Metadata)
+	if merged == nil {
+		merged = map[string]string{}
+	}
+	maps.Copy(merged, d.Metadata)
+	if err := CheckMetadata(merged); err != nil {
+		return err
+	}
+	_, err = a.emit(nil, rs, EvRunAnnotated, d)
+	return err
 }

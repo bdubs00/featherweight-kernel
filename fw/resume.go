@@ -16,7 +16,9 @@ import (
 )
 
 // rebuild loads every run of the ledger into the cache. It returns the runs
-// whose last event is not terminal, oldest first.
+// whose state is not terminal, oldest first. The state, not the last event,
+// decides: metadata that arrives after fw.run.finished leaves a run
+// finished, and a follow-up message opens it again.
 func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 	k := a.k
 	var unfinished []*runState
@@ -53,7 +55,7 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 			k.idem[idemKey(q.Principal, key)] = id
 		}
 		k.mu.Unlock()
-		if !IsTerminal(evs[len(evs)-1].Type) {
+		if !rs.run.State.Terminal() {
 			unfinished = append(unfinished, rs)
 		}
 	}

@@ -32,7 +32,6 @@ func TestExtension(t *testing.T) {
 	}
 	a, err := fw.New(
 		fw.WithoutDefaults(),
-		fw.WithTitles(fw.TitlesInput),
 		fw.WithAuthn(fw.TokenAuthn{Token: "s3cret"}),
 		fw.WithModel(newScript().model()),
 		fw.WithLedger(fw.NewMemLedger()),

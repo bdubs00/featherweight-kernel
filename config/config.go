@@ -340,11 +340,6 @@ func validate(c *fw.Config, servers bool) error {
 	default:
 		p = append(p, fmt.Sprintf("tools.memory.scope %q is not one of %s, %s", c.Tools.Memory.Scope, fw.MemoryScopeAgent, fw.MemoryScopeShared))
 	}
-	switch strings.ToLower(strings.TrimSpace(c.Titles)) {
-	case "", fw.TitlesInput, fw.TitlesModel:
-	default:
-		p = append(p, fmt.Sprintf("titles %q is not one of %s, %s", c.Titles, fw.TitlesInput, fw.TitlesModel))
-	}
 	p = append(p, checkBudget("budget", c.Budget)...)
 	if c.Compaction.At < 0 {
 		p = append(p, fmt.Sprintf("compaction.at %d is negative", c.Compaction.At))

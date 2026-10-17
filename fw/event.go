@@ -46,7 +46,6 @@ const (
 	EvRunResumed        = "fw.run.resumed"
 	EvRunFinished       = "fw.run.finished"
 	EvLoopDetected      = "fw.loop.detected"
-	EvRunTitled         = "fw.run.titled"
 	// EvToolSend is published on the bus by the send tool. It is not a ledger event.
 	EvToolSend = "fw.tool.send"
 )
@@ -239,17 +238,6 @@ type ContextCompactedData struct {
 	// Usage counts the tokens of the summary calls, so the usage, the cost,
 	// and the budget of the run include them. Provider and Model name the
 	// model of the last summary call, for the price.
-	Usage    *Usage `json:"usage,omitempty"`
-	Provider string `json:"provider,omitempty"`
-	Model    string `json:"model,omitempty"`
-}
-
-// RunTitledData is the payload of fw.run.titled: a title of a few words
-// that a model wrote for the run (see TitlesModel). Usage counts the
-// tokens of the title call, so the usage, the cost, and the budget of the
-// run include them. Provider and Model name the model, for the price.
-type RunTitledData struct {
-	Title    string `json:"title"`
 	Usage    *Usage `json:"usage,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
