@@ -122,11 +122,10 @@ type RunQueuedData struct {
 	Principal    string            `json:"principal,omitempty"`
 	// PrincipalKind is the kind of the principal, such as user, when the
 	// caller that started the run is the principal.
-	PrincipalKind string   `json:"principalKind,omitempty"`
-	Parent        string   `json:"parent,omitempty"`
-	Depth         int      `json:"depth,omitempty"`
-	Files         []Block  `json:"files,omitempty"` // file blocks that reference the attachments
-	Teams         []string `json:"teams,omitempty"` // the teams of the principal at the start (section 13.6)
+	PrincipalKind string  `json:"principalKind,omitempty"`
+	Parent        string  `json:"parent,omitempty"`
+	Depth         int     `json:"depth,omitempty"`
+	Files         []Block `json:"files,omitempty"` // file blocks that reference the attachments
 	// ExtraTools names the tools that the inline profile gives the run
 	// beyond the tool list of its named profile, so every surface can tell
 	// the person.

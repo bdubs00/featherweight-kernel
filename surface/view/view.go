@@ -70,7 +70,6 @@ func (u Usage) String() string {
 // process when the fleet is on (docs/ARCHITECTURE.md section 8.6).
 type Whoami struct {
 	Principal *fw.Principal     `json:"principal"`
-	Teams     []string          `json:"teams,omitempty"` // the teams of the caller (section 13.6)
 	Roles     map[string]string `json:"roles"`
 	Admin     bool              `json:"admin"`
 	CanCreate bool              `json:"canCreate"`
@@ -130,8 +129,7 @@ func (w Whoami) String() string {
 // the agent can do in plain words. Only Agent fills it, not Agents.
 type AgentView struct {
 	fw.AgentProfile
-	Role  string   `json:"role"`
-	Teams []string `json:"teams,omitempty"` // the teams of the agent (section 13.6)
+	Role string `json:"role"`
 	// Usage sums the runs of the agent that the caller can see.
 	//
 	// Deprecated: the page no longer shows usage, and operators read the
@@ -246,7 +244,6 @@ func WhoamiOf(ctx context.Context, a *fw.Agent) (Whoami, error) {
 	if w.Principal == nil {
 		w.Principal = &fw.Principal{}
 	}
-	w.Teams = a.TeamsOf(fw.PrincipalFrom(ctx))
 	if f := a.Fleet(); f != nil {
 		w.Fleet = f.Name()
 	}
@@ -275,7 +272,7 @@ func Agents(ctx context.Context, a *fw.Agent) ([]AgentView, error) {
 	}
 	out := make([]AgentView, 0, len(profiles))
 	for i, p := range profiles {
-		out = append(out, AgentView{AgentProfile: p, Role: access[i].role, Teams: a.AgentTeamsOf("", p.Name, p.Access), Usage: byAgent[p.Name], Locked: a.ProfileLocked(p.Name)})
+		out = append(out, AgentView{AgentProfile: p, Role: access[i].role, Usage: byAgent[p.Name], Locked: a.ProfileLocked(p.Name)})
 	}
 	return out, nil
 }
@@ -305,7 +302,7 @@ func Agent(ctx context.Context, a *fw.Agent, name string) (AgentView, error) {
 	if err != nil {
 		return AgentView{}, err
 	}
-	v := AgentView{AgentProfile: p, Role: acc[0].role, Teams: a.AgentTeamsOf("", p.Name, p.Access), Locked: a.ProfileLocked(name)}
+	v := AgentView{AgentProfile: p, Role: acc[0].role, Locked: a.ProfileLocked(name)}
 	if v.Abilities, err = Abilities(ctx, a, p); err != nil {
 		return AgentView{}, err
 	}
@@ -454,40 +451,6 @@ func Filter(runs []*fw.Run, agent, state, principal string, limit int) []*fw.Run
 		}
 	}
 	return out
-}
-
-// Values of By, the part of the runs that a list keeps (section 13.6).
-const (
-	ByMe     = "me"     // the runs that the caller started
-	ByTeam   = "team"   // and the runs that a person on a team of the caller started
-	ByOthers = "others" // every other run
-)
-
-// By keeps the runs of one part, for the principal in ctx and its teams.
-// An empty by keeps every run. A context without a principal is the
-// process itself: it started no run and has no team.
-func By(ctx context.Context, a *fw.Agent, runs []*fw.Run, by string) ([]*fw.Run, error) {
-	by = strings.ToLower(strings.TrimSpace(by))
-	switch by {
-	case "":
-		return runs, nil
-	case ByMe, ByTeam, ByOthers:
-	default:
-		return nil, fmt.Errorf("%w: by is %q, not me, team, or others", fw.ErrInvalidRequest, by)
-	}
-	me, teams := "", []string(nil)
-	if p := fw.PrincipalFrom(ctx); p != nil {
-		me, teams = p.Subject, a.TeamsOf(p)
-	}
-	out := make([]*fw.Run, 0, len(runs))
-	for _, r := range runs {
-		mine := me != "" && r.Principal == me
-		near := mine || fw.SharesTeam(r.Teams, teams)
-		if (by == ByMe && mine) || (by == ByTeam && near) || (by == ByOthers && !near) {
-			out = append(out, r)
-		}
-	}
-	return out, nil
 }
 
 // EventLine is one event of a run as a short line that a person reads.

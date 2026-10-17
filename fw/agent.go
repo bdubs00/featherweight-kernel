@@ -57,8 +57,9 @@ type Agent struct {
 	profileStore ProfileStore
 	storeWarn    sync.Once
 
-	obsMu     sync.RWMutex
-	observers []Observer
+	obsMu      sync.RWMutex
+	observers  []Observer
+	annotators []RunAnnotator
 
 	modelsMu sync.Mutex
 	models   map[string]Model
@@ -138,6 +139,7 @@ func New(opts ...Option) (*Agent, error) {
 		prices:       o.prices,
 		clock:        o.clock,
 		observers:    o.observers,
+		annotators:   o.annotators,
 		fleet:        o.fleet,
 		models:       map[string]Model{},
 		noResume:     o.noResume,

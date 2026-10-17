@@ -282,12 +282,10 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			req.Principal = p.Subject
 		}
 	}
-	// The run keeps the teams of the person who starts it (section 13.6).
-	// The Authorize above asked a control plane, so its answer is known.
-	var teams []string
+	// The run keeps the kind of the person who starts it.
 	var kind string
 	if p := PrincipalFrom(ctx); p != nil && p.Subject == req.Principal {
-		teams, kind = a.TeamsOf(p), p.Kind
+		kind = p.Kind
 	}
 	if req.ID == "" {
 		req.ID = NewID()
@@ -301,6 +299,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, fmt.Errorf("%w: the instructions are longer than %d bytes", ErrInvalidRequest, maxInstructionBytes)
 	}
 	var parent *runState
+	var parentRun *Run
 	depth := 0
 	if req.Parent != "" {
 		p, err := k.lookup(req.Parent)
@@ -308,6 +307,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			return nil, fmt.Errorf("%w: parent run %s not found", ErrInvalidRequest, req.Parent)
 		}
 		parent, depth = p, p.depth+1
+		parentRun = p.snapshot()
 		if max := a.cfg.Spawn.MaxDepth; max > 0 && depth > max {
 			return nil, fmt.Errorf("%w: a child at depth %d is deeper than spawn.maxDepth %d", ErrSpawnLimit, depth, max)
 		}
@@ -315,7 +315,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		// see and operate the whole tree.
 		if req.Principal == "" {
 			q := p.queuedData()
-			req.Principal, teams, kind = q.Principal, q.Teams, q.PrincipalKind
+			req.Principal, kind = q.Principal, q.PrincipalKind
 		}
 	}
 	files, changes, err := a.keepFiles(req.Files)
@@ -323,7 +323,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, err
 	}
 	extra := a.extraTools(ctx, req, parent)
-	meta := maps.Clone(req.Metadata)
+	meta := a.annotate(ctx, &req, parentRun, req.Metadata)
 	if req.IdempotencyKey != "" {
 		if meta == nil {
 			meta = map[string]string{}
@@ -343,7 +343,6 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		Parent:        req.Parent,
 		Depth:         depth,
 		Files:         files,
-		Teams:         teams,
 		ExtraTools:    extra,
 	})
 	if err != nil {

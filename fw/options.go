@@ -37,6 +37,13 @@ type options struct {
 	noDefaults bool
 	titles     string // see WithTitles
 	noResume   bool
+	annotators []RunAnnotator
+}
+
+// WithRunAnnotators adds annotators to the registered ones (see
+// RunAnnotator).
+func WithRunAnnotators(fns ...RunAnnotator) Option {
+	return func(o *options) { o.annotators = append(o.annotators, fns...) }
 }
 
 // WithGrantStore keeps the grants of people in s in place of the store

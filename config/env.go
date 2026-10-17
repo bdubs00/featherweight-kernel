@@ -118,8 +118,8 @@ func envStruct(v reflect.Value, prefix, path string, e environ, errs *[]string) 
 			continue
 		}
 		key, inline := yamlKey(f)
-		if key == "-" {
-			continue
+		if key == "-" || (inline && f.Type.Kind() == reflect.Map) {
+			continue // an inline map holds the extension blocks, which no variable sets
 		}
 		name, p := prefix, path
 		if !inline {
@@ -362,7 +362,7 @@ func collectRoutes(t reflect.Type, prefix string, index []int, top bool, out *[]
 			continue
 		}
 		key, inline := yamlKey(f)
-		if key == "-" || (top && !inline && key == "name") {
+		if key == "-" || (top && !inline && key == "name") || (inline && f.Type.Kind() == reflect.Map) {
 			continue
 		}
 		idx := append(append([]int(nil), index...), i)
@@ -649,7 +649,7 @@ func envNames(t reflect.Type, prefix string, out *[]string) {
 			continue
 		}
 		key, inline := yamlKey(f)
-		if key == "-" {
+		if key == "-" || (inline && f.Type.Kind() == reflect.Map) {
 			continue
 		}
 		name := prefix

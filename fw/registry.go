@@ -36,6 +36,8 @@ var registry = struct {
 	authns      map[string]AuthnCtor
 	tlsProvs    map[string]TLSCtor
 	defaults    []func(*Config)
+	annotators  []RunAnnotator
+	extensions  map[string]bool
 }{
 	models:      map[string]ModelCtor{},
 	buses:       map[string]BusCtor{},
@@ -46,6 +48,7 @@ var registry = struct {
 	toolSources: map[string]ToolSourceCtor{},
 	authns:      map[string]AuthnCtor{},
 	tlsProvs:    map[string]TLSCtor{},
+	extensions:  map[string]bool{},
 }
 
 // RegisterModel registers a model provider, for example "anthropic".
@@ -92,6 +95,45 @@ func RegisterDefaults(fn func(*Config)) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.defaults = append(registry.defaults, fn)
+}
+
+// RegisterRunAnnotator registers a RunAnnotator. A package that a program
+// links in calls it in init. New adds the registered annotators to every
+// agent, unless WithoutDefaults leaves them out.
+func RegisterRunAnnotator(fn RunAnnotator) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.annotators = append(registry.annotators, fn)
+}
+
+// RegisteredRunAnnotators lists the registered annotators, in the order of
+// registration.
+func RegisteredRunAnnotators() []RunAnnotator {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	return append([]RunAnnotator(nil), registry.annotators...)
+}
+
+// RegisterExtension claims a top-level key of fw.yaml for a package that a
+// program links in, such as "workbench". The loader keeps the block of a
+// claimed key in Config.Extensions and still refuses every other unknown
+// key. Config.Extension decodes the block.
+func RegisterExtension(name string) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.extensions[name] = true
+}
+
+// RegisteredExtensions lists the claimed top-level keys, sorted.
+func RegisteredExtensions() []string {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	out := make([]string, 0, len(registry.extensions))
+	for n := range registry.extensions {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // RegisterTool registers a built-in tool by name, for example "bash".

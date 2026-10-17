@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -173,7 +172,7 @@ func (a *Agent) setupExternal(ctx context.Context, authzSet, policySet bool) err
 			return err
 		}
 		a.decisionPoints = append(a.decisionPoints, external{use: "access", ext: e, dp: dp})
-		a.authz = &externalAuthz{a: a, dp: dp, ext: e, cache: map[string]cachedDecision{}, teams: map[string][]string{}, agentTeams: map[string][]string{}}
+		a.authz = &externalAuthz{a: a, dp: dp, ext: e, cache: map[string]cachedDecision{}}
 	}
 	if ext := a.cfg.Policy.External; ext != nil && !policySet {
 		e := ext.withDefaults(DefaultPolicyTool)
@@ -274,24 +273,17 @@ type RunRef struct {
 }
 
 // AuthzAnswer is what access.external returns: one decision per check.
-//
-// Teams names the teams of the principal (section 13.6). A nil list leaves
-// the teams that fw knows as they are, and an empty list clears them.
 type AuthzAnswer struct {
-	Teams     []string        `json:"teams,omitempty"`
 	Decisions []AuthzDecision `json:"decisions"`
 }
 
 // AuthzDecision allows or refuses one check. Reason reaches the caller in
 // the 403 problem. TTLMs lets fw reuse the decision for that many
 // milliseconds; zero means no reuse, so a revocation takes effect at once.
-// Teams names the teams of the agent of the check, as AuthzAnswer.Teams
-// does for the principal.
 type AuthzDecision struct {
-	Allow  bool     `json:"allow"`
-	Reason string   `json:"reason,omitempty"`
-	TTLMs  int64    `json:"ttlMs,omitempty"`
-	Teams  []string `json:"teams,omitempty"`
+	Allow  bool   `json:"allow"`
+	Reason string `json:"reason,omitempty"`
+	TTLMs  int64  `json:"ttlMs,omitempty"`
 }
 
 // PolicyRequest is what fw sends to policy.external before a tool call.
@@ -353,10 +345,6 @@ type externalAuthz struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedDecision
-	// The teams that the answers named, by subject and by member/agent.
-	// The latest answer wins, so a cached decision keeps its teams.
-	teams      map[string][]string
-	agentTeams map[string][]string
 }
 
 type cachedDecision struct {
@@ -417,14 +405,8 @@ func (z *externalAuthz) AllowAll(ctx context.Context, p *Principal, checks []Aut
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
-	if ans.Teams != nil {
-		z.remember(z.teams, p.Subject, ans.Teams)
-	}
 	for j, i := range miss {
 		d := ans.Decisions[j]
-		if q := req.Checks[j]; d.Teams != nil && q.Agent != "" {
-			z.remember(z.agentTeams, q.Member+"/"+q.Agent, d.Teams)
-		}
 		if !d.Allow {
 			reason := strings.TrimSpace(d.Reason)
 			if reason == "" {
@@ -440,31 +422,6 @@ func (z *externalAuthz) AllowAll(ctx context.Context, p *Principal, checks []Aut
 		}
 	}
 	return out
-}
-
-// remember keeps the teams of one subject or agent. The maps hold at most
-// maxCachedDecisions entries; past that, they start over.
-func (z *externalAuthz) remember(m map[string][]string, key string, teams []string) {
-	if len(m) >= maxCachedDecisions {
-		clear(m)
-	}
-	m[key] = slices.Clone(teams)
-}
-
-// PrincipalTeams implements TeamTeller with the teams of the latest answer
-// about the principal.
-func (z *externalAuthz) PrincipalTeams(p *Principal) []string {
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	return slices.Clone(z.teams[p.Subject])
-}
-
-// AgentTeams implements TeamTeller with the teams of the latest decision
-// about the agent.
-func (z *externalAuthz) AgentTeams(member, agent string) []string {
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	return slices.Clone(z.agentTeams[member+"/"+agent])
 }
 
 // query turns a check into the facts that the request carries.

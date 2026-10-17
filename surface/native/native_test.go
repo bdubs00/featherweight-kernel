@@ -896,34 +896,3 @@ func TestAttachments(t *testing.T) {
 	resp, b = do(t, "POST", srv.URL+"/v1/runs/"+r.ID+"/messages", `{"content":"`+strings.Repeat("x", MaxBodyBytes)+`"}`)
 	decodeProblem(t, resp, b, http.StatusRequestEntityTooLarge)
 }
-
-// GET /v1/runs?by= keeps a part of the runs, and the total and the glance
-// count that part.
-func TestListRunsByTeam(t *testing.T) {
-	team := tokenMap{
-		"alice-token": {Subject: "alice", Kind: fw.KindUser, Groups: []string{"pay"}},
-		"bob-token":   {Subject: "bob", Kind: fw.KindUser, Groups: []string{"pay"}},
-		"carol-token": {Subject: "carol", Kind: fw.KindUser, Groups: []string{"ops"}},
-	}
-	a := newAgent(t, newScript(endTurn("a"), endTurn("b"), endTurn("c")).model(), fw.WithAuthn(team))
-	srv := serve(t, a)
-	for _, tok := range []string{"alice-token", "bob-token", "carol-token"} {
-		resp, b := do(t, "POST", srv.URL+"/v1/runs", `{"input":"hi","wait":true}`, "Authorization", "Bearer "+tok)
-		decodeRun(t, resp, b, http.StatusOK)
-	}
-	for by, want := range map[string]int{"me": 1, "team": 2, "others": 1, "": 3} {
-		resp, b := do(t, "GET", srv.URL+"/v1/runs?by="+by, "", "Authorization", "Bearer alice-token")
-		var body struct {
-			Runs   []fw.Run `json:"runs"`
-			Total  int      `json:"total"`
-			Glance struct {
-				Finished int `json:"finished"`
-			} `json:"glance"`
-		}
-		if err := json.Unmarshal(b, &body); err != nil || resp.StatusCode != 200 || body.Total != want || len(body.Runs) != want || body.Glance.Finished != want {
-			t.Errorf("by=%q: %d %s", by, resp.StatusCode, b)
-		}
-	}
-	resp, b := do(t, "GET", srv.URL+"/v1/runs?by=everyone", "", "Authorization", "Bearer alice-token")
-	decodeProblem(t, resp, b, http.StatusBadRequest)
-}

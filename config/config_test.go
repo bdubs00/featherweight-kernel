@@ -738,3 +738,47 @@ func TestFind(t *testing.T) {
 		t.Errorf("Find = %q, want $FW_CONFIG", got)
 	}
 }
+
+// A top-level key that a linked package claimed with fw.RegisterExtension
+// lands in Extensions, and Extension decodes it. Every other unknown key is
+// still an error, no variable sets a block, and the masked print keeps it.
+func TestLoadExtensionBlock(t *testing.T) {
+	cleanEnv(t)
+	fw.RegisterExtension("testext")
+	path := writeFile(t, filepath.Join(t.TempDir(), "fw.yaml"), "listen: \":1\"\ntestext:\n  teams: [team-*, ops]\n  depth: 3\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var block struct {
+		Teams []string `yaml:"teams"`
+		Depth int      `yaml:"depth"`
+	}
+	ok, err := cfg.Extension("testext", &block)
+	if err != nil || !ok || len(block.Teams) != 2 || block.Teams[0] != "team-*" || block.Depth != 3 {
+		t.Fatalf("Extension = %v, %v: %+v", ok, err, block)
+	}
+	if ok, err := cfg.Extension("absent", &block); ok || err != nil {
+		t.Fatalf("absent block = %v, %v", ok, err)
+	}
+	var wrong struct {
+		Teams int `yaml:"teams"`
+	}
+	if ok, err := cfg.Extension("testext", &wrong); !ok || err == nil || !strings.Contains(err.Error(), "testext") {
+		t.Fatalf("block of the wrong shape = %v, %v", ok, err)
+	}
+	out, err := Masked(cfg)
+	if err != nil || !strings.Contains(string(out), "testext:") || !strings.Contains(string(out), "team-*") {
+		t.Fatalf("Masked = %v:\n%s", err, out)
+	}
+	for _, name := range EnvNames() {
+		if strings.Contains(name, "TESTEXT") {
+			t.Fatalf("a variable names the block: %s", name)
+		}
+	}
+	// An unclaimed key is still a typo.
+	path = writeFile(t, filepath.Join(t.TempDir(), "fw.yaml"), "listen: \":1\"\nworkbenchh:\n  teams: [a]\n")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "workbenchh") || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("unclaimed block: %v", err)
+	}
+}

@@ -1,11 +1,14 @@
 package fw
 
 import (
+	"fmt"
 	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Config is the resolved configuration of one fw process. Keys match
@@ -43,6 +46,25 @@ type Config struct {
 	Version    string                    `yaml:"-" json:"version,omitempty"`
 	// ConfigFile is the configuration file that the loader read, or "".
 	ConfigFile string `yaml:"-" json:"-"`
+	// Extensions holds the top-level blocks of fw.yaml that a linked package
+	// claimed with RegisterExtension, by key, as the loader read them. The
+	// kernel reads none of them, and no variable sets them. Extension
+	// decodes one.
+	Extensions map[string]yaml.Node `yaml:",inline" json:"-"`
+}
+
+// Extension decodes the block of a claimed top-level key into out, which is
+// a pointer to a struct. It reports whether the file had the block. A
+// block that does not fit out is an error that names the key.
+func (c *Config) Extension(name string, out any) (bool, error) {
+	n, ok := c.Extensions[name]
+	if !ok || n.Kind == 0 {
+		return false, nil
+	}
+	if err := n.Decode(out); err != nil {
+		return true, fmt.Errorf("fw: configuration block %s: %w", name, err)
+	}
+	return true, nil
 }
 
 // AuthConfig selects the Authn plug.

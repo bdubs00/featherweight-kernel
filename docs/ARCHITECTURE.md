@@ -759,7 +759,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | Method and path | Purpose |
 |---|---|
 | `POST /v1/runs` | Create a run. Body fields: `agent`, `input`, `title`, `instructions`, `profile`, `budget`, `metadata`, `wait`, `files` (section 7.10). |
-| `GET /v1/runs` | List runs. `?parent={id}` lists the children of a run. |
+| `GET /v1/runs` | List runs. `?parent={id}` lists the children of a run. `scope`, `member`, `agent`, `state`, `principal`, and `limit` narrow the list. |
 | `GET /v1/runs/{id}` | Get one run. |
 | `GET /v1/runs/{id}/events` | Stream the ledger as server-sent events. `Last-Event-ID` resumes from a sequence number. Under `Accept: application/json`, one page of events with `lines`, the short line of each event, as the MCP tool `run_events` of the workbench gives. |
 | `POST /v1/runs/{id}/messages` | Send a follow-up message. Body fields: `content`, `files`. |
@@ -793,7 +793,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 }
 ```
 
-The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET /v1/whoami` and `GET`, `PUT`, and `DELETE /v1/agents/{name}`.
+The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET`, `PUT`, and `DELETE /v1/agents/{name}`. The workbench serves `GET /v1/whoami`, the caller with its roles and its teams.
 
 An extension adds routes to this surface (section 12.8). The workbench adds the page, the browser sign-in, home, results, transcripts, the builder, the fleet, usage, and connections (the workbench architecture, section 2).
 
@@ -1162,6 +1162,8 @@ Every key is reachable from the environment, maps and named lists included. An o
 
 The entry name ends where the longest known field starts, so `FW_TOOLS_MCP_GIT_MCP_ENDPOINT` names the entry `git_mcp`. An entry from the file matches its variable with case ignored and `-` equal to `_`. A key segment becomes a name in lowercase or a header name in canonical form. It can also become an option name in lower camel case, or a variable name as given. A variable with a known prefix and an unknown field is an error that lists the fields that exist. A typo therefore stops the process, and the process never ignores it.
 
+A package that a program links in can own a top-level block of `fw.yaml`. It claims the key with `fw.RegisterExtension` in `init`, the loader keeps the block in `fw.Config.Extensions`, and `Config.Extension` decodes it into a type of the package. The loader still refuses every unknown key that no package claimed. No variable sets a block, so the package reads its own variables. `fw config` prints the block as it is, so a block holds no secret. The workbench claims the block `workbench` (the workbench architecture, section 8).
+
 A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-default}` from the environment before the file is read. `$$` is one `$`. A reference to an unset variable with no default is an error that names the variable, the key, and the file. Prompt text read from a file does not expand.
 
 ### 12.2 What you can replace
@@ -1192,7 +1194,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 
 ### 12.4 Hooks
 
-A hook is an observer (section 4.4) or a policy (section 7.5). An observer sees everything and changes nothing. A policy decides before a tool runs. Both run in process by default. An out-of-process observer reads the egress subject. An out-of-process policy is a decision point: an MCP tool or a bus responder that answers each decision request (section 13.5). The same form decides authorization.
+A hook is an observer (section 4.4), a policy (section 7.5), or a run annotator. An observer sees everything and changes nothing. A policy decides before a tool runs. A run annotator, `fw.RunAnnotator`, adds metadata to a run when the kernel queues it. The kernel calls it after the authorization of the request, with the context of the caller, the request, and the parent run of a child. The kernel knows nothing about the entries, which a linked package gives a meaning. An entry of the request wins, and a result out of the bounds of `fw.CheckMetadata` adds nothing. A package registers an annotator with `fw.RegisterRunAnnotator` in `init`, and a program passes one with `fw.WithRunAnnotators`. `WithoutDefaults` leaves the registered annotators out. Both run in process by default. An out-of-process observer reads the egress subject. An out-of-process policy is a decision point: an MCP tool or a bus responder that answers each decision request (section 13.5). The same form decides authorization.
 
 ### 12.5 Profiles, instructions, and skills
 
@@ -1214,7 +1216,7 @@ A skill is a directory with a `SKILL.md` file whose front matter names and descr
 
 Each driver registers itself by name at init, for example `fw.RegisterBus("nats", nats.New)`. A third-party Go module adds a driver by being imported. A blank import in `cmd/fw/drivers.go` selects the drivers that the default binary includes. A custom build leaves out a driver by leaving out its import.
 
-A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp`, the tool `propose_agent`, and `titles: model` (the workbench architecture, section 1.1).
+A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp`, the tool `propose_agent`, and `titles: model` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), and `fw.RegisterRunAnnotator` adds a run annotator (section 12.4).
 
 ### 12.7 Out-of-process extension
 
@@ -1313,6 +1315,7 @@ func WithSecrets(s Secrets) Option
 func WithCompactor(c Compactor) Option
 func WithSurfaces(s ...Surface) Option
 func WithObservers(o ...Observer) Option
+func WithRunAnnotators(fns ...RunAnnotator) Option
 func WithModelMiddleware(m ...ModelMiddleware) Option
 func WithToolMiddleware(m ...ToolMiddleware) Option
 func WithProfile(p AgentProfile) Option
@@ -1498,12 +1501,6 @@ The actions are the actions of section 13.2: `agent.view`, `agent.run`, `agent.e
 {"decisions": [{"allow": false, "reason": "only the owner of the root run operates it"}, {"allow": true, "ttlMs": 30000}]}
 ```
 
-An answer can also name teams (section 13.6). `teams` beside `decisions` names the teams of the principal. `teams` in a decision names the teams of the agent of that check. An answer without `teams` leaves the teams that fw knows as they are, and an empty list clears them.
-
-```json
-{"teams": ["payments"], "decisions": [{"allow": true, "teams": ["payments", "platform"]}]}
-```
-
 A policy request describes one tool call: the tool and its flags, the call id, the input, the resolved input (section 7.5), and the run.
 
 ```json
@@ -1559,30 +1556,7 @@ Do not add a second `tools.mcp` entry with the endpoint of a decision point. `fw
 
 ### 13.6 Teams
 
-A team is a group of people and agents that work together. The dashboard of the workbench shows the work of a person and of the person's teams first. The runs of other people sit behind one row. A team groups the view and grants no access: the access blocks of section 13.2, or the control plane of section 13.5, still decide who can do what.
-
-The admins keep the teams upstream, in the identity provider or in the control plane:
-
-| Source | The teams of a person | The teams of an agent |
-|---|---|---|
-| The rules of section 13.2 | The groups of the principal, from the groups claim of OIDC (section 13.1), that match `access.teams` | The groups that the access block of the profile names as `group:<name>` and that match `access.teams` |
-| `access.external` | The `teams` of the answer of the control plane | The `teams` of each decision about that agent |
-
-`access.teams` lists glob patterns over group names, such as `team-*`. An empty list, which is the default, makes every group a team. The variable is `FW_ACCESS_TEAMS`, with commas between the patterns. With `access.external`, fw takes no team from the groups or the access blocks. The control plane is then the single source of the teams too. A team name is an opaque string, so the control plane can use an id or a name.
-
-A run keeps the teams of the person who started it, in `fw.run.queued`. A child run keeps the teams of its parent. The teams of a run therefore stay as they were at the start. Every fleet member reads them from the run record, with no request to the control plane. `whoami` returns the teams of the caller, and each agent view returns the teams of the agent.
-
-The runs lists take `by`, which keeps a part of the runs that the caller can see:
-
-| `by` | The runs |
-|---|---|
-| `me` | The runs that the caller started |
-| `team` | The runs that the caller started, and the runs that a person on a team of the caller started |
-| `others` | Every other run that the caller can see |
-
-The native API takes `?by=team` on `GET /v1/runs`, and the MCP tool `runs_list` of the workbench takes `by`. The sentence and the counts of the answer cover the same runs.
-
-In the workbench, home (`GET /v1/home`) holds the runs of `by=team`. The row and the status line of a run of a teammate name that person, for example "by alice". In the conversation, a message of another person shows the name of that person above it. In the Agents place, the agents that the caller owns come first, then the agents of the caller's teams, then the rest. If other people have runs that the caller can see, a last row on home reads "Runs by others" with their number. It opens their runs, grouped by person. A person with no team sees only their own runs on home and the rest behind that row.
+A team is a group of people and agents that work together. Teams group the view of the workbench and grant no access, so the kernel knows no team. It records the principal that started a run, in `fw.run.queued`, and a run annotator of the workbench adds the teams of that person to the metadata of the run (section 12.4). The workbench architecture, section 8, describes the teams, the configuration block `workbench`, and `by` on the runs lists of the workbench.
 
 ## 14. Repository layout
 
@@ -1651,6 +1625,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The teams revision of 2026-10-17 moved the teams to the workbench, the first step of the hollowing of `fw` (docs/ROADMAP.md, stage 3). The kernel lost `Agent.TeamsOf`, `Agent.AgentTeamsOf`, `access.teams`, the teams in `fw.run.queued` and in the answers of `access.external`, `by` on `GET /v1/runs`, and `GET /v1/whoami`. It gained two hooks for any linked package: a claimed configuration block, through `fw.RegisterExtension` and `Config.Extension` (section 12.1), and the run annotator, through `fw.RegisterRunAnnotator` and `fw.WithRunAnnotators` (section 12.4). The workbench records the teams of a run in its metadata through an annotator, and serves `GET /v1/whoami` and `GET /v1/home/others` (the workbench architecture, section 8).
 
 The ax revision of 2026-10-17 followed upstream ax to commit 8d2ccf3. The metadata endpoints moved to a loopback listener at `127.0.0.1:8099`, and `AX_METADATA_URL` names it (sections 11.1 and 11.3). The status of the agent moved to `GET /v1/status` on the native API (sections 8.2 and 11.8). The manifest types took the keys `createTime` and `ResourcesSpec` of ax commit f0f16ff. The stdin gap of `ax ssh` closed with ax commit 92d297e (section 11.12).
 

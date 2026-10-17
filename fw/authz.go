@@ -46,16 +46,10 @@ type Access struct {
 // block of a profile goes to the control plane as data in each request. A
 // control plane that does not answer refuses every request with
 // ErrAuthzUnavailable.
-//
-// Teams lists glob patterns over group names. A group that matches one is
-// a team (section 13.6), and every group is a team when the list is empty.
-// With External, the control plane names the teams, and Teams does not
-// apply.
 type AccessConfig struct {
 	Default  string                `yaml:"default" json:"default"`
 	Admins   []string              `yaml:"admins,omitempty" json:"admins,omitempty"`
 	Creators []string              `yaml:"creators,omitempty" json:"creators,omitempty"`
-	Teams    []string              `yaml:"teams,omitempty" json:"teams,omitempty"`
 	External *ExternalPolicyConfig `yaml:"external,omitempty" json:"external,omitempty"`
 }
 

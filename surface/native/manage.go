@@ -21,17 +21,6 @@ const (
 	maxEventsLimit     = 1000
 )
 
-// whoami answers GET /v1/whoami with the principal, its role on every
-// agent it can see, and whether it is an admin or can create agents.
-func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
-	who, err := view.WhoamiOf(r.Context(), s.a)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, who)
-}
-
 // status answers GET /v1/status with the state of the agent at a glance:
 // the usage of the runs that the caller can view, the oldest approval that
 // waits, and the counts of runs by state. A control plane polls it, and

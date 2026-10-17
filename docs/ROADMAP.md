@@ -30,9 +30,9 @@ The lab installer now pins ax 8d2ccf3 and the Substrate commit that it names, f6
 
 The package `fw` still holds about 2,800 lines for the workbench: `fleet.go`, `grants.go`, `connect.go`, `teams.go`, `profiles.go`, `title.go`, and parts of `external.go` and `authz.go`. Move them in this order, the smallest and least connected first.
 
-1. Teams: `teams.go`, `Agent.TeamsOf`, and the teams in `fw.run.queued`.
+1. Teams: `teams.go`, `Agent.TeamsOf`, and the teams in `fw.run.queued`. Done on 2026-10-17. The move added two hooks to the kernel for every later step: a claimed configuration block (`fw.RegisterExtension`) and the run annotator (`fw.RegisterRunAnnotator`). `GET /v1/whoami` moved to the workbench with it.
 2. Model titles: `title.go` and `fw.TitlesModel`. Fix the resume classification in `fw/resume.go` at the same time. It reads the last event type instead of the projected state.
-3. Profile writes: `PutProfile`, `DeleteProfile`, the routes `PUT` and `DELETE /v1/agents/{name}`, and `GET /v1/whoami`.
+3. Profile writes: `PutProfile`, `DeleteProfile`, and the routes `PUT` and `DELETE /v1/agents/{name}`.
 4. The fleet: `fw/fleet.go`, `surface/native/fleet.go`, `surface/view/fleet.go`, `telemetry/fleet.go`, and the key `fleet` of the configuration.
 5. Grants and connections: `connect.go`, `grants.go`, `tools/mcp/person.go`, and `tools/mcp/user.go`. The kernel keeps one primitive: a run can pause until a credential arrives from outside. The OAuth flows and the grant store go to the workbench.
 

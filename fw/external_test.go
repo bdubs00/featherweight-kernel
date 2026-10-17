@@ -19,7 +19,6 @@ type controlPlane struct {
 	policy  []PolicyRequest
 	decide  func(p Principal, q AuthzQuery) AuthzDecision
 	verdict func(r PolicyRequest) PolicyAnswer
-	teams   func(p Principal) []string // the teams of the principal, or nil
 }
 
 func (c *controlPlane) serve(t *testing.T, bus Bus, subject string) {
@@ -42,9 +41,6 @@ func (c *controlPlane) serve(t *testing.T, bus Bus, subject string) {
 			_ = json.Unmarshal(raw, &req)
 			c.authz = append(c.authz, req)
 			var ans AuthzAnswer
-			if c.teams != nil {
-				ans.Teams = c.teams(req.Principal)
-			}
 			for _, q := range req.Checks {
 				ans.Decisions = append(ans.Decisions, c.decide(req.Principal, q))
 			}

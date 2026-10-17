@@ -224,7 +224,6 @@ type Run struct {
 	Seq       uint64            `json:"seq"`
 	Origin    string            `json:"origin,omitempty"`
 	Principal string            `json:"principal,omitempty"`
-	Teams     []string          `json:"teams,omitempty"` // the teams of the principal at the start
 	Parent    string            `json:"parent,omitempty"`
 	Depth     int               `json:"depth,omitempty"` // 0 for a top-level run, 1 for its child
 	Metadata  map[string]string `json:"metadata,omitempty"`

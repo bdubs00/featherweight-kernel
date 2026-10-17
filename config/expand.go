@@ -12,8 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
+	"github.com/bdubs00/featherweight-kernel/fw"
 	"gopkg.in/yaml.v3"
 )
 
@@ -209,8 +211,14 @@ func checkKeys(n *yaml.Node, t reflect.Type, errs *[]string) {
 				}
 				ft, ok := fields[k.Value]
 				if !ok {
-					if inlineMap == nil {
+					// An inline map of yaml.Node holds the extension blocks
+					// (fw.Config.Extensions). It takes a claimed key only, and
+					// the package that claimed the key checks the block.
+					if inlineMap == nil || (inlineMap.Elem() == nodeType && !slices.Contains(fw.RegisteredExtensions(), k.Value)) {
 						*errs = append(*errs, fmt.Sprintf("line %d: field %s not found in type %s", k.Line, k.Value, t))
+						continue
+					}
+					if inlineMap.Elem() == nodeType {
 						continue
 					}
 					ft = inlineMap.Elem()
@@ -220,6 +228,9 @@ func checkKeys(n *yaml.Node, t reflect.Type, errs *[]string) {
 		}
 	}
 }
+
+// nodeType is the element type of fw.Config.Extensions.
+var nodeType = reflect.TypeOf(yaml.Node{})
 
 // structKeys maps each yaml key of the struct t to the type of its field,
 // with the fields of an inline struct in place of the struct. The second

@@ -232,7 +232,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 			return
 		}
 		r.Agent, r.Input, r.Origin = d.Agent, d.Input, d.Origin
-		r.Principal, r.Teams, r.Parent, r.Metadata = d.Principal, d.Teams, d.Parent, d.Metadata
+		r.Principal, r.Parent, r.Metadata = d.Principal, d.Parent, d.Metadata
 		r.Depth, r.ExtraTools = d.Depth, d.ExtraTools
 		r.Title = strings.TrimSpace(d.Metadata[MetaTitle])
 		if r.Title == "" {

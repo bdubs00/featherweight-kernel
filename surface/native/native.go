@@ -93,7 +93,6 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/agents/{name}", s.getAgent},
 		{"PUT /v1/agents/{name}", s.putAgent},
 		{"DELETE /v1/agents/{name}", s.deleteAgent},
-		{"GET /v1/whoami", s.whoami},
 		{"GET /v1/status", s.status},
 		{"GET /v1/tools", s.listTools},
 		{"GET /v1/skills", s.listSkills},
@@ -526,11 +525,6 @@ func (s *server) listRuns(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit = n
-	}
-	runs, err = view.By(r.Context(), s.a, runs, q.Get("by"))
-	if err != nil {
-		s.fail(w, r, err)
-		return
 	}
 	matched := view.Filter(runs, q.Get("agent"), q.Get("state"), q.Get("principal"), 0)
 	glance, total := view.GlanceOf(matched, time.Now()), len(matched)

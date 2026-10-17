@@ -270,35 +270,3 @@ func TestBuiltinDefaultAgent(t *testing.T) {
 		t.Fatalf("unknown agent = %v", err)
 	}
 }
-
-// By keeps the runs of the caller, of the caller's teams, or of everyone
-// else.
-func TestByTeams(t *testing.T) {
-	a := newAgent(t)
-	ctx := fw.WithPrincipal(context.Background(), &fw.Principal{Subject: "alice", Kind: fw.KindUser, Groups: []string{"pay"}})
-	runs := []*fw.Run{
-		{ID: "1", Principal: "alice", Teams: []string{"pay"}},
-		{ID: "2", Principal: "bob", Teams: []string{"ops", "pay"}},
-		{ID: "3", Principal: "carol", Teams: []string{"ops"}},
-		{ID: "4", Principal: "dave"},
-	}
-	ids := func(rs []*fw.Run) (s string) {
-		for _, r := range rs {
-			s += r.ID
-		}
-		return s
-	}
-	for by, want := range map[string]string{"": "1234", "me": "1", "team": "12", "others": "34", " Team ": "12"} {
-		got, err := By(ctx, a, runs, by)
-		if err != nil || ids(got) != want {
-			t.Errorf("By(%q) = %s, %v, want %s", by, ids(got), err, want)
-		}
-	}
-	if _, err := By(ctx, a, runs, "everyone"); !errors.Is(err, fw.ErrInvalidRequest) {
-		t.Errorf("an unknown by = %v", err)
-	}
-	// The process itself started no run and has no team.
-	if got, _ := By(context.Background(), a, runs, "others"); ids(got) != "1234" {
-		t.Errorf("others of the process = %s", ids(got))
-	}
-}

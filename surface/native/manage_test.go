@@ -78,25 +78,31 @@ func TestWhoamiAndAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, b := do(t, "GET", srv.URL+"/v1/whoami", "")
-	decodeProblem(t, resp, b, http.StatusUnauthorized)
-
-	var who view.Whoami
-	resp, b = do(t, "GET", srv.URL+"/v1/whoami", "", "Authorization", asAlice)
-	decodeJSON(t, resp, b, http.StatusOK, &who)
+	// The roles of the caller come from view.WhoamiOf, which the workbench
+	// serves at GET /v1/whoami with the teams of the caller. The kernel
+	// serves no whoami route.
+	who, err := view.WhoamiOf(fw.WithPrincipal(testCtx(t), people["alice-token"]), a)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if who.Principal.Subject != "alice" || who.Principal.Groups[0] != "platform" || who.Roles["reviewer"] != "owner" || who.Roles["shared"] != "operator" ||
 		who.Roles["private"] != "" || !who.CanCreate || who.Admin {
 		t.Fatalf("alice = %+v", who)
 	}
-	var bob view.Whoami
-	resp, b = do(t, "GET", srv.URL+"/v1/whoami", "", "Authorization", asBob)
-	decodeJSON(t, resp, b, http.StatusOK, &bob)
+	bob, err := view.WhoamiOf(fw.WithPrincipal(testCtx(t), people["bob-token"]), a)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if bob.Principal.Subject != "bob" || bob.Roles["reviewer"] != "viewer" || len(bob.Roles) != 1 || bob.CanCreate {
 		t.Fatalf("bob = %+v", bob)
 	}
 
+	if resp, b := do(t, "GET", srv.URL+"/v1/whoami", "", "Authorization", asAlice); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /v1/whoami = %d: %s", resp.StatusCode, b)
+	}
+
 	var agents struct{ Agents []view.AgentView }
-	resp, b = do(t, "GET", srv.URL+"/v1/agents", "", "Authorization", asBob)
+	resp, b := do(t, "GET", srv.URL+"/v1/agents", "", "Authorization", asBob)
 	decodeJSON(t, resp, b, http.StatusOK, &agents)
 	if len(agents.Agents) != 1 || agents.Agents[0].Name != "reviewer" || agents.Agents[0].Role != "viewer" || agents.Agents[0].Usage.Runs != 1 || agents.Agents[0].Usage.Tokens != 15 {
 		t.Fatalf("bob agents = %+v", agents)
@@ -270,7 +276,6 @@ func TestAuthzUnavailableIs503(t *testing.T) {
 	srv := serve(t, a)
 	for _, c := range []struct{ method, path, body string }{
 		{"POST", "/v1/runs", `{"input":"hi"}`},
-		{"GET", "/v1/whoami", ""},
 		{"GET", "/v1/agents", ""},
 		{"GET", "/v1/agents/reviewer", ""},
 	} {
