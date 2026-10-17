@@ -299,3 +299,58 @@ func TestFileTLSConfig(t *testing.T) {
 }
 
 func newLocalListener() (net.Listener, error) { return net.Listen("tcp", "127.0.0.1:0") }
+
+func TestRulesRefuseAnotherMember(t *testing.T) {
+	ctx := context.Background()
+	z := NewRulesAuthz(AccessConfig{Admins: []string{"alice"}}, func(string) (AgentProfile, bool) { return AgentProfile{}, false })
+	run := &Run{ID: "r1", Agent: "reviewer", Principal: "alice"}
+	if err := z.Allow(ctx, alice, ActionRunView, Target{Agent: "reviewer", Run: run}); err != nil {
+		t.Fatalf("a local run = %v", err)
+	}
+	// An admin of this process is not an admin of another one, and the
+	// starter of a run is judged by its owner.
+	err := z.Allow(ctx, alice, ActionRunView, Target{Agent: "reviewer", Run: run, Member: "team/other"})
+	if !errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "team/other") {
+		t.Fatalf("a run of another member = %v", err)
+	}
+}
+
+func TestExternalAuthzSendsMemberFacts(t *testing.T) {
+	ctx := testCtx(t)
+	bus := NewMemBus()
+	cp := &controlPlane{decide: func(Principal, AuthzQuery) AuthzDecision { return AuthzDecision{Allow: true} }}
+	cp.serve(t, bus, "fw.authz")
+	a := externalAgent(t, newScript(endTurn("hi")).Model(), bus, nil)
+	if a.AccessMode() != AccessModeExternal {
+		t.Fatalf("access mode = %q", a.AccessMode())
+	}
+	run := &Run{ID: "r2", Agent: "reviewer", Principal: "carol", State: StateInputRequired, Parent: "r1"}
+	errs := a.AuthorizeAll(WithPrincipal(ctx, bob), []AuthzCheck{{Action: ActionRunView, Target: Target{
+		Agent: "reviewer", Run: run, Member: "team/other",
+		Access:  &Access{Viewers: []string{"bob"}},
+		Lineage: []RunRef{{ID: "r1", Agent: "planner", Principal: "carol"}},
+	}}})
+	if errs[0] != nil {
+		t.Fatalf("decision = %v", errs[0])
+	}
+	reqs := cp.authzRequests()
+	if len(reqs) != 1 || len(reqs[0].Checks) != 1 {
+		t.Fatalf("requests = %+v", reqs)
+	}
+	q := reqs[0].Checks[0]
+	if q.Member != "team/other" || q.Agent != "reviewer" || q.Access == nil || q.Access.Viewers[0] != "bob" ||
+		q.Run == nil || q.Run.ID != "r2" || q.Run.Principal != "carol" || len(q.Run.Lineage) != 1 || q.Run.Lineage[0].ID != "r1" {
+		t.Fatalf("check = %+v run = %+v", q, q.Run)
+	}
+}
+
+func TestAccessMode(t *testing.T) {
+	a := newTestAgent(t, newScript(endTurn("hi")).Model())
+	if a.AccessMode() != AccessModeRules {
+		t.Fatalf("default = %q", a.AccessMode())
+	}
+	b := newTestAgent(t, newScript(endTurn("hi")).Model(), WithAuthz(AuthzFunc(func(context.Context, *Principal, string, Target) error { return nil })))
+	if b.AccessMode() != AccessModeCustom {
+		t.Fatalf("WithAuthz = %q", b.AccessMode())
+	}
+}

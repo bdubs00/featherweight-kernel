@@ -3,8 +3,8 @@
 //
 // The route carries no authentication, because a scraper has no token.
 // Keep the route inside the monitoring perimeter. The registry holds the fw
-// metrics of the telemetry package, the fleet view when the agent has a
-// fleet, and the Go runtime and process collectors. See
+// metrics of the telemetry package, the collectors that linked packages
+// register, and the Go runtime and process collectors. See
 // examples/observability for a scrape configuration, alert rules, and a
 // Grafana dashboard.
 package metrics
@@ -80,8 +80,10 @@ func (s *Surface) setup(a *fw.Agent) (*prometheus.Registry, error) {
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
-		telemetry.NewFleetCollector(a),
 	)
+	for _, c := range registeredCollectors() {
+		reg.MustRegister(c(a))
+	}
 	m := telemetry.NewMetrics(reg, a.Prices())
 	m.SetBuildInfo(a.Config().Version, "")
 	m.KnowModels(modelSelectors(a)...)
@@ -135,4 +137,29 @@ type errorLog struct{ log *slog.Logger }
 
 func (l errorLog) Println(v ...any) {
 	l.log.Warn("metrics: serve registry", "error", fmt.Sprint(v...))
+}
+
+// A CollectorCtor builds a collector for an agent. A linked package adds
+// its own series to the registry of this surface by registering one, as
+// the fleet of the workbench does for its gauges.
+type CollectorCtor func(a *fw.Agent) prometheus.Collector
+
+var collectorCtors struct {
+	mu   sync.Mutex
+	list []CollectorCtor
+}
+
+// RegisterCollector registers a collector constructor. A package calls it
+// in init. The surface builds the collector at its first mount for an
+// agent.
+func RegisterCollector(c CollectorCtor) {
+	collectorCtors.mu.Lock()
+	defer collectorCtors.mu.Unlock()
+	collectorCtors.list = append(collectorCtors.list, c)
+}
+
+func registeredCollectors() []CollectorCtor {
+	collectorCtors.mu.Lock()
+	defer collectorCtors.mu.Unlock()
+	return append([]CollectorCtor(nil), collectorCtors.list...)
 }

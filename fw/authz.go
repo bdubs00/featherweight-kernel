@@ -271,3 +271,16 @@ func (a *Agent) AuthorizeAll(ctx context.Context, checks []AuthzCheck) []error {
 
 // Authz returns the authorization plug.
 func (a *Agent) Authz() Authz { return a.authz }
+
+// How a process authorizes, as AccessMode reports it.
+const (
+	AccessModeRules    = "rules"    // the access rules of section 13.2
+	AccessModeExternal = "external" // access.external decides
+	AccessModeCustom   = "custom"   // an Authz from WithAuthz decides
+)
+
+// AccessMode names how this process authorizes: AccessModeRules,
+// AccessModeExternal, or AccessModeCustom. A linked package that tells
+// other processes about this one, such as the fleet of the workbench,
+// publishes it.
+func (a *Agent) AccessMode() string { return a.accessMode }

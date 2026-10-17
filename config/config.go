@@ -296,7 +296,6 @@ func validate(c *fw.Config, servers bool) error {
 	for _, x := range externals(c) {
 		p = append(p, checkExternal(x.key, x.ext)...)
 	}
-	p = append(p, checkFleet(c.Fleet)...)
 	if servers {
 		var ve *ValidationError
 		if errors.As(CheckControlServers(c), &ve) {
@@ -540,47 +539,6 @@ func checkExternal(key string, e *fw.ExternalPolicyConfig) []string {
 	}
 	if e.Bus != "" && strings.ContainsAny(e.Bus, " \t*>") {
 		p = append(p, fmt.Sprintf("%s.bus %q is not a subject: it holds a space or a wildcard", key, e.Bus))
-	}
-	return p
-}
-
-// checkFleet lists the problems of the fleet block: the subject has no
-// empty token and no wildcard, the URL is an ax address or an absolute http
-// or https URL, each forward entry is an http or https glob, and the times
-// are not negative.
-func checkFleet(f fw.FleetConfig) []string {
-	var p []string
-	if subj := f.Subject; subj != "" {
-		for _, t := range strings.Split(subj, ".") {
-			if t == "" || strings.ContainsAny(t, " \t*>") {
-				p = append(p, fmt.Sprintf("fleet.subject %q is not a subject: it holds an empty token, a space, or a wildcard", subj))
-				break
-			}
-		}
-	}
-	if n := f.Name; n != "" && (len(n) > 128 || strings.ContainsAny(n, " \t\r\n")) {
-		p = append(p, fmt.Sprintf("fleet.name %q holds a space or is longer than 128 characters", n))
-	}
-	if raw := f.URL; raw != "" {
-		if target, ok := strings.CutPrefix(raw, "ax:"); ok {
-			space, task, ok := strings.Cut(target, "/")
-			if !ok || space == "" || task == "" || strings.Contains(task, "/") {
-				p = append(p, fmt.Sprintf("fleet.url %q is not ax:<atespace>/<task>", raw))
-			}
-		} else if u, err := url.Parse(raw); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			p = append(p, fmt.Sprintf("fleet.url %q is neither an http or https URL nor ax:<atespace>/<task>", raw))
-		}
-	}
-	for i, g := range f.Forward {
-		if !strings.HasPrefix(g, "http://") && !strings.HasPrefix(g, "https://") {
-			p = append(p, fmt.Sprintf("fleet.forward[%d] %q is not a glob over http or https URLs", i, g))
-		}
-	}
-	if f.Interval < 0 {
-		p = append(p, fmt.Sprintf("fleet.interval %s is negative", f.Interval))
-	}
-	if f.Expire < 0 {
-		p = append(p, fmt.Sprintf("fleet.expire %s is negative", f.Expire))
 	}
 	return p
 }

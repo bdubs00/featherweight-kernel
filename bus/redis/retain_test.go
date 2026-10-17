@@ -39,11 +39,11 @@ func startWatch(t *testing.T, b *Bus, pattern string) (<-chan fw.Event, func()) 
 func TestRetainThenWatch(t *testing.T) {
 	url, _ := serverURL(t)
 	b, root := retainBus(t, url)
-	second, first := event(t, fw.EvFleetRecord), event(t, fw.EvFleetRecord)
+	second, first := event(t, "fw.fleet.record"), event(t, "fw.fleet.record")
 	retain(t, b, root+".members.b", second)
 	retain(t, b, root+".members.a", first)
-	retain(t, b, root+".alive.a", event(t, fw.EvFleetAlive))
-	retain(t, b, root+".members.a.extra", event(t, fw.EvFleetRecord))
+	retain(t, b, root+".alive.a", event(t, "fw.fleet.alive"))
+	retain(t, b, root+".members.a.extra", event(t, "fw.fleet.record"))
 
 	ch, _ := startWatch(t, b, root+".members.*")
 	if got := recv(t, ch); got.ID != first.ID {
@@ -61,9 +61,9 @@ func TestWatchThenRetain(t *testing.T) {
 	ch, _ := startWatch(t, b, root+".members.*")
 	none(t, ch, 100*time.Millisecond)
 
-	first, second := event(t, fw.EvFleetRecord), event(t, fw.EvFleetRecord)
+	first, second := event(t, "fw.fleet.record"), event(t, "fw.fleet.record")
 	retain(t, b, root+".members.a", first)
-	retain(t, b, root+".other.a", event(t, fw.EvFleetRecord))
+	retain(t, b, root+".other.a", event(t, "fw.fleet.record"))
 	retain(t, b, root+".members.b", second)
 	if got := recv(t, ch); got.ID != first.ID {
 		t.Fatalf("got %s first, want %s", got.ID, first.ID)
@@ -78,8 +78,8 @@ func TestRetainReplaces(t *testing.T) {
 	url, _ := serverURL(t)
 	b, root := retainBus(t, url)
 	subject := root + ".members.a"
-	retain(t, b, subject, event(t, fw.EvFleetRecord))
-	newest := event(t, fw.EvFleetRecord)
+	retain(t, b, subject, event(t, "fw.fleet.record"))
+	newest := event(t, "fw.fleet.record")
 	retain(t, b, subject, newest)
 
 	ch, _ := startWatch(t, b, root+".>")
@@ -93,11 +93,11 @@ func TestWatchStop(t *testing.T) {
 	url, _ := serverURL(t)
 	b, root := retainBus(t, url)
 	ch, stop := startWatch(t, b, root+".members.*")
-	retain(t, b, root+".members.a", event(t, fw.EvFleetRecord))
+	retain(t, b, root+".members.a", event(t, "fw.fleet.record"))
 	recv(t, ch)
 	stop()
 	stop() // a second call does nothing
-	retain(t, b, root+".members.a", event(t, fw.EvFleetRecord))
+	retain(t, b, root+".members.a", event(t, "fw.fleet.record"))
 	none(t, ch, 300*time.Millisecond)
 }
 
@@ -115,7 +115,7 @@ func TestRetainSkipsStream(t *testing.T) {
 	}
 	defer stop()
 
-	retain(t, b, subject, event(t, fw.EvFleetRecord))
+	retain(t, b, subject, event(t, "fw.fleet.record"))
 	none(t, sub, 200*time.Millisecond)
 	n, err := b.rdb.Exists(ctx, subject).Result()
 	if err != nil {
@@ -130,7 +130,7 @@ func TestRetainRefusesWildcard(t *testing.T) {
 	url, _ := serverURL(t)
 	b, root := retainBus(t, url)
 	for _, subject := range []string{root + ".*", root + ".>", ""} {
-		if err := b.Retain(context.Background(), subject, event(t, fw.EvFleetRecord)); err == nil {
+		if err := b.Retain(context.Background(), subject, event(t, "fw.fleet.record")); err == nil {
 			t.Errorf("Retain(%q) succeeded, want an error", subject)
 		}
 	}
@@ -143,7 +143,7 @@ func TestWatchDropsUndecodable(t *testing.T) {
 	if err := b.rdb.HSet(ctx, b.retainKey, root+".members.a", "not json").Err(); err != nil {
 		t.Fatal(err)
 	}
-	good := event(t, fw.EvFleetRecord)
+	good := event(t, "fw.fleet.record")
 	retain(t, b, root+".members.b", good)
 	ch, _ := startWatch(t, b, root+".members.*")
 	if got := recv(t, ch); got.ID != good.ID {
@@ -160,7 +160,7 @@ func TestCloseStopsWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	none(t, ch, 100*time.Millisecond)
-	if err := b.Retain(context.Background(), root+".members.a", event(t, fw.EvFleetRecord)); err == nil {
+	if err := b.Retain(context.Background(), root+".members.a", event(t, "fw.fleet.record")); err == nil {
 		t.Fatal("Retain after Close succeeded")
 	}
 	if _, err := b.Watch(context.Background(), root+".>", func(fw.Event) error { return nil }); err == nil {
@@ -180,7 +180,7 @@ func TestWatchOutlivesContext(t *testing.T) {
 	}
 	defer stop()
 	cancel()
-	e := event(t, fw.EvFleetRecord)
+	e := event(t, "fw.fleet.record")
 	retain(t, b, root+".members.a", e)
 	if got := recv(t, ch); got.ID != e.ID {
 		t.Fatalf("got %s, want %s", got.ID, e.ID)

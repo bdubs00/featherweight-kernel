@@ -80,7 +80,13 @@ func cmdDoctor(ctx context.Context, g *globals, args []string) int {
 	d.checkToolSources(ctx, cfg, secrets)
 	d.checkConnections(ctx, cfg, secrets)
 	d.checkBus(ctx, cfg)
-	d.checkFleet(ctx, cfg)
+	for _, c := range registeredDoctorChecks() {
+		if ok, line := c(ctx, cfg, d.timeout); ok {
+			d.ok("%s", line)
+		} else {
+			d.fail("%s", line)
+		}
+	}
 	d.checkLedger(ctx, cfg)
 	d.checkSkills(cfg)
 	if d.failed == 1 {
@@ -715,38 +721,6 @@ func (d *doctor) checkBus(ctx context.Context, cfg *fw.Config) {
 		_ = c.Close()
 	}
 	d.ok("bus: %s opens", cfg.Bus.Driver)
-}
-
-// checkFleet reports the fleet: off, on a bus that only this process sees,
-// or on a shared bus, with the address where other members reach this one.
-func (d *doctor) checkFleet(ctx context.Context, cfg *fw.Config) {
-	f := cfg.Fleet
-	if f.Subject == "" {
-		d.ok("fleet: off; set fleet.subject (FW_FLEET_SUBJECT) to join one")
-		return
-	}
-	if cfg.Bus.Driver == "" || cfg.Bus.Driver == "mem" {
-		d.fail("fleet: fleet.subject is %s, but the bus is mem, so no other process sees this one; set bus.driver", f.Subject)
-		return
-	}
-	bctx, cancel := context.WithTimeout(ctx, d.timeout)
-	defer cancel()
-	retains := false
-	if b, err := fw.OpenBus(bctx, cfg); err == nil {
-		_, retains = b.(fw.Retainer)
-		if c, ok := b.(io.Closer); ok {
-			_ = c.Close()
-		}
-	}
-	keeps := "keeps the last record of each member"
-	if !retains {
-		keeps = "keeps no records, so a new view sees a member after its next record"
-	}
-	reach := "other members can only read this one; set fleet.url to let them act on its runs"
-	if f.URL != "" {
-		reach = "other members reach this one at " + f.URL
-	}
-	d.ok("fleet: %s on the %s bus, which %s; %s", f.Subject, cfg.Bus.Driver, keeps, reach)
 }
 
 // checkLedger appends one terminal event under a temporary run id and

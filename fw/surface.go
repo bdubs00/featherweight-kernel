@@ -197,3 +197,31 @@ func RequireAuth(a *Agent, next http.Handler) http.Handler {
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
+
+type credentialKey struct{}
+
+// WithCredential stores the bearer credential of a request in the context:
+// the value of its Authorization header. A linked package that sends a
+// request on behalf of the caller to another process, such as the fleet
+// of the workbench, reads it. RequireAuth sets it. It never enters a ledger
+// event or a log line.
+func WithCredential(ctx context.Context, authorization string) context.Context {
+	return context.WithValue(ctx, credentialKey{}, authorization)
+}
+
+// CredentialFrom returns the bearer credential in the context, or "".
+func CredentialFrom(ctx context.Context) string {
+	s, _ := ctx.Value(credentialKey{}).(string)
+	return s
+}
+
+// bearerHeader returns the Authorization header of r when it holds a bearer
+// token, else "".
+func bearerHeader(r *http.Request) string {
+	h := strings.TrimSpace(r.Header.Get("Authorization"))
+	scheme, tok, ok := strings.Cut(h, " ")
+	if !ok || !strings.EqualFold(scheme, "bearer") || strings.TrimSpace(tok) == "" {
+		return ""
+	}
+	return h
+}

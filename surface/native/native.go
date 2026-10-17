@@ -73,6 +73,18 @@ type server struct {
 	a          *fw.Agent
 	keepAlive  time.Duration
 	signinPath string // set by an extension that signs a person in
+	relay      Relay  // set by an extension, see Relay
+}
+
+// remote wraps the handler of a route about one run. When the relay knows
+// the run as one of another process, the relay answers the request.
+func (s *server) remote(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.relay != nil && s.relay.Take(w, r) {
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
@@ -364,8 +376,8 @@ func (r *rulesBody) rules() (*fw.Rules, error) {
 }
 
 func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
-	if member := strings.TrimSpace(r.URL.Query().Get("member")); member != "" && s.startOn(w, r, member) {
-		return
+	if s.relay != nil && s.relay.Take(w, r) {
+		return // a start on another process, see Relay
 	}
 	var body createBody
 	if !s.decodeFiles(w, r, &body, func() int { return len(body.Files) }) {
@@ -491,10 +503,6 @@ func accepts(r *http.Request, mediaType string) bool {
 // the query parameter parent the child runs of one run. The parameters
 // agent, state, and principal narrow the list; the state active matches
 // every run that is not finished. The parameter limit bounds the list.
-// With the fleet on, the list holds the runs of every member: the
-// parameter scope=local keeps the runs of this process only, and member
-// keeps the runs of one member. The parameter by keeps the runs of the
-// caller (me), of the caller and the caller's teams (team), or of everyone
 // else (others), as section 13.6 says. The answer also holds total and
 // glance, "At a glance", over every run that matches, before the limit
 // cuts the list.
@@ -503,13 +511,13 @@ func (s *server) listRuns(w http.ResponseWriter, r *http.Request) {
 	var runs []*fw.Run
 	var err error
 	if parent := q.Get("parent"); parent != "" {
-		runs, err = view.Children(r.Context(), s.a, parent)
+		runs, err = s.a.Children(r.Context(), parent)
 		if errors.Is(err, fw.ErrRunNotFound) {
 			problem(w, r, http.StatusNotFound, "no run has the id "+strconv.Quote(parent))
 			return
 		}
 	} else {
-		runs, err = view.Runs(r.Context(), s.a, q.Get("scope"), q.Get("member"))
+		runs, err = s.a.List(r.Context())
 	}
 	if err != nil {
 		s.fail(w, r, err)
@@ -852,12 +860,6 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, r, http.StatusServiceUnavailable, unavailableDetail(err))
 	case errors.Is(err, fw.ErrForbidden):
 		problem(w, r, http.StatusForbidden, forbiddenDetail(err))
-	case errors.Is(err, fw.ErrFleetNoRoute):
-		problem(w, r, http.StatusBadGateway, fleetDetail(err))
-	case errors.Is(err, fw.ErrFleetNoCredential):
-		// The caller is signed in here, so a 401 would be wrong: only the
-		// owner of the run cannot check this caller.
-		problem(w, r, http.StatusForbidden, fleetDetail(err)+"; sign in with a bearer token to act on a run of another member")
 	case errors.Is(err, fw.ErrRunNotFound):
 		problem(w, r, http.StatusNotFound, "no run has the id "+strconv.Quote(r.PathValue("id")))
 	case errors.Is(err, fw.ErrProfileNotFound):

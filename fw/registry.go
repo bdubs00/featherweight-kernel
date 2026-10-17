@@ -37,6 +37,7 @@ var registry = struct {
 	tlsProvs    map[string]TLSCtor
 	defaults    []func(*Config)
 	annotators  []RunAnnotator
+	services    []Service
 	extensions  map[string]bool
 }{
 	models:      map[string]ModelCtor{},
@@ -112,6 +113,23 @@ func RegisteredRunAnnotators() []RunAnnotator {
 	registry.mu.RLock()
 	defer registry.mu.RUnlock()
 	return append([]RunAnnotator(nil), registry.annotators...)
+}
+
+// RegisterService registers a Service. A package that a program links in
+// calls it in init. New starts the registered services after the kernel
+// starts, unless WithoutDefaults or WithoutServices leaves them out.
+func RegisterService(s Service) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.services = append(registry.services, s)
+}
+
+// RegisteredServices lists the registered services, in the order of
+// registration.
+func RegisteredServices() []Service {
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	return append([]Service(nil), registry.services...)
 }
 
 // RegisterExtension claims a top-level key of fw.yaml for a package that a

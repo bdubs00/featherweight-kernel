@@ -114,19 +114,6 @@ func TestApplyToConfig(t *testing.T) {
 	if got := os.Getenv(EnvAtespace); got != "team-a" {
 		t.Errorf("FW_ATESPACE overwritten: %q", got)
 	}
-	if cfg.Fleet.Name != "team-a/reviewer" || cfg.Fleet.URL != "ax:team-a/reviewer" {
-		t.Errorf("fleet name %q, url %q", cfg.Fleet.Name, cfg.Fleet.URL)
-	}
-}
-
-func TestApplyToConfigKeepsFleetIdentity(t *testing.T) {
-	unsetEnv(t, EnvAtespace)
-	cfg := fw.DefaultConfig()
-	cfg.Fleet.Name, cfg.Fleet.URL = "mine", "http://mine:8080"
-	ApplyToConfig(cfg, &Task{Metadata: ObjectMeta{Name: "reviewer", Atespace: "team-a"}}, nil)
-	if cfg.Fleet.Name != "mine" || cfg.Fleet.URL != "http://mine:8080" {
-		t.Errorf("fleet name %q, url %q", cfg.Fleet.Name, cfg.Fleet.URL)
-	}
 }
 
 func TestApplyToConfigKeepsBootstrapProfile(t *testing.T) {

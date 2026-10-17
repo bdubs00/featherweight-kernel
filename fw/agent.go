@@ -68,8 +68,8 @@ type Agent struct {
 
 	decisionPoints []external // access.external and policy.external, see external.go
 
-	fleet      Fleet  // nil when the fleet is off, see fleet.go
-	accessMode string // AccessModeRules, AccessModeExternal, or AccessModeCustom
+	services   []io.Closer // what stops the services, see service.go
+	accessMode string      // AccessModeRules, AccessModeExternal, or AccessModeCustom
 
 	k *kernel // runtime state, see kernel.go
 }
@@ -144,7 +144,6 @@ func New(opts ...Option) (*Agent, error) {
 		clock:      o.clock,
 		observers:  o.observers,
 		annotators: o.annotators,
-		fleet:      o.fleet,
 		models:     map[string]Model{},
 		noResume:   o.noResume,
 	}
@@ -273,7 +272,7 @@ func New(opts ...Option) (*Agent, error) {
 	if err := a.startKernel(ctx); err != nil {
 		return nil, err
 	}
-	if err := a.openFleet(ctx); err != nil {
+	if err := a.startServices(ctx, &o); err != nil {
 		a.shutdownKernel(ctx)
 		return nil, err
 	}
@@ -569,12 +568,8 @@ var ErrDeclined = errors.New("fw: declined by the caller")
 // closeResources closes every tool, tool source, the bus, and the ledger that
 // implements io.Closer. The kernel calls it at the end of shutdown.
 func (a *Agent) closeResources() {
-	// The fleet goes first, because its last record needs the bus.
-	if c, ok := a.fleet.(io.Closer); ok {
-		if err := c.Close(); err != nil {
-			a.log.Warn("close fleet", "error", err)
-		}
-	}
+	// The services go first, because a last message of one needs the bus.
+	a.closeServices()
 	a.closeDecisionPoints()
 	for _, t := range a.tools {
 		if c, ok := t.(io.Closer); ok {

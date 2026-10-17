@@ -68,14 +68,12 @@ func (u Usage) String() string {
 }
 
 // Whoami is the caller: the principal, its role on every agent it can see,
-// and what it can do beyond the agents. Fleet is the member name of this
-// process when the fleet is on (docs/ARCHITECTURE.md section 8.6).
+// and what it can do beyond the agents.
 type Whoami struct {
 	Principal *fw.Principal     `json:"principal"`
 	Roles     map[string]string `json:"roles"`
 	Admin     bool              `json:"admin"`
 	CanCreate bool              `json:"canCreate"`
-	Fleet     string            `json:"fleet,omitempty"`
 }
 
 // String describes the caller on a few lines.
@@ -111,9 +109,6 @@ func (w Whoami) String() string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if w.Fleet != "" {
-		fmt.Fprintf(&b, " This process is the member %s of a fleet; the fleet tool lists the members.", w.Fleet)
-	}
 	if len(names) == 0 {
 		b.WriteString("\nYou can see no agent.")
 		return b.String()
@@ -245,9 +240,6 @@ func WhoamiOf(ctx context.Context, a *fw.Agent) (Whoami, error) {
 	}
 	if w.Principal == nil {
 		w.Principal = &fw.Principal{}
-	}
-	if f := a.Fleet(); f != nil {
-		w.Fleet = f.Name()
 	}
 	for i, p := range profiles {
 		w.Roles[p.Name] = access[i].role
@@ -629,4 +621,14 @@ func ConnectTitle(c fw.ConnectRequest) string {
 		return t
 	}
 	return c.Server
+}
+
+// SortRuns sorts runs newest first, as the kernel lists them.
+func SortRuns(runs []*fw.Run) {
+	sort.SliceStable(runs, func(i, j int) bool {
+		if !runs[i].CreatedAt.Equal(runs[j].CreatedAt) {
+			return runs[i].CreatedAt.After(runs[j].CreatedAt)
+		}
+		return runs[i].ID > runs[j].ID
+	})
 }

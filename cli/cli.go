@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/ax"
@@ -39,6 +40,30 @@ var (
 	// CardJSON returns the A2A agent card.
 	CardJSON func(a *fw.Agent) ([]byte, error)
 )
+
+// A DoctorCheck is one line of fw doctor from a linked package. It reports
+// whether the check passed and the line, without the ok or FAIL mark.
+// Timeout bounds its work, as it bounds the checks of the kernel.
+type DoctorCheck func(ctx context.Context, cfg *fw.Config, timeout time.Duration) (ok bool, line string)
+
+var doctorChecks struct {
+	mu   sync.Mutex
+	list []DoctorCheck
+}
+
+// RegisterDoctorCheck adds a check that fw doctor runs after the checks of
+// the kernel. A package calls it in init, or a binary in its own init.
+func RegisterDoctorCheck(c DoctorCheck) {
+	doctorChecks.mu.Lock()
+	defer doctorChecks.mu.Unlock()
+	doctorChecks.list = append(doctorChecks.list, c)
+}
+
+func registeredDoctorChecks() []DoctorCheck {
+	doctorChecks.mu.Lock()
+	defer doctorChecks.mu.Unlock()
+	return append([]DoctorCheck(nil), doctorChecks.list...)
+}
 
 // AgentsPut and AgentsDelete create, replace, and remove an agent profile
 // for the verb agents. The kernel writes no profile, so they are nil in fw,
@@ -322,8 +347,9 @@ func newAgent(ctx context.Context, cfg *fw.Config, mode agentMode) (*fw.Agent, e
 	opts := []fw.Option{fw.WithConfig(cfg)}
 	var opened fw.Ledger
 	if mode != modeServe {
-		// Only a process that serves is a member that others can reach.
-		cfg.Fleet.Subject = ""
+		// Only a process that serves runs the services, such as a fleet
+		// member that others can reach.
+		opts = append(opts, fw.WithoutServices())
 	}
 	switch mode {
 	case modeStdio:

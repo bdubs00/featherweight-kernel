@@ -30,13 +30,23 @@ type options struct {
 	prices     Prices
 	logger     *slog.Logger
 	clock      Clock
-	fleet      Fleet
 	files      Files
 	grants     GrantStore
 	noDefaults bool
 	noResume   bool
 	annotators []RunAnnotator
+	services   []Service
+	noServices bool
 }
+
+// WithServices adds services to the registered ones (see Service).
+func WithServices(s ...Service) Option {
+	return func(o *options) { o.services = append(o.services, s...) }
+}
+
+// WithoutServices starts no service, registered or given. A verb that runs
+// one piece of work and exits uses it, so the process never joins a fleet.
+func WithoutServices() Option { return func(o *options) { o.noServices = true } }
 
 // WithRunAnnotators adds annotators to the registered ones (see
 // RunAnnotator).

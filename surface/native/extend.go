@@ -4,8 +4,8 @@ package native
 // same server and behind the same authentication. The workbench, for
 // example, adds its page, its sign-in, and its views. An extension gets a
 // Kit with the agent and the helpers of the run routes, so its routes
-// answer errors and forward runs of other fleet members as the run routes
-// do.
+// answer errors as the run routes do. An extension can also set a Relay,
+// which answers a request about a run that another process holds.
 
 import (
 	"net/http"
@@ -67,20 +67,23 @@ func (k *Kit) HandlePublic(pattern string, h http.HandlerFunc) { k.mux.HandleFun
 // surface then carries it in the field signin of its problem document.
 func (k *Kit) SetSigninPath(path string) { k.s.signinPath = path }
 
-// Remote wraps a handler of a route with the path value id. When the run
-// belongs to another member of the fleet, the request goes to that member.
+// Remote wraps a handler of a route with the path value id. When the relay
+// knows the run as one of another process, the relay answers the request.
 func (k *Kit) Remote(next http.HandlerFunc) http.HandlerFunc { return k.s.remote(next) }
 
-// OwnerOf returns the fleet member that owns the run id, or "" for a run of
-// this process. When it returns false, it wrote the error response.
-func (k *Kit) OwnerOf(w http.ResponseWriter, r *http.Request, id string) (string, bool) {
-	return k.s.ownerOf(w, r, id)
+// A Relay answers a request of the native API that names what another
+// process holds: a run of another process, by the path value id of a run
+// route, or a place to start a run, by the query parameter member of POST
+// /v1/runs. Take reports whether it answered the request. The kernel knows
+// nothing about the other processes; the fleet of the workbench registers
+// a relay through SetRelay.
+type Relay interface {
+	Take(w http.ResponseWriter, r *http.Request) bool
 }
 
-// Forward sends the request to the fleet member and relays its answer.
-func (k *Kit) Forward(w http.ResponseWriter, r *http.Request, member string) {
-	k.s.forward(w, r, member)
-}
+// SetRelay sets the relay of the surface. The last extension to set one
+// wins.
+func (k *Kit) SetRelay(rl Relay) { k.s.relay = rl }
 
 // Start starts a run for the caller of the request. When it returns false,
 // it wrote the error response.

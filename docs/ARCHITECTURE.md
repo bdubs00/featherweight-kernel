@@ -759,7 +759,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | Method and path | Purpose |
 |---|---|
 | `POST /v1/runs` | Create a run. Body fields: `agent`, `input`, `title`, `instructions`, `profile`, `budget`, `metadata`, `wait`, `files` (section 7.10). |
-| `GET /v1/runs` | List runs. `?parent={id}` lists the children of a run. `scope`, `member`, `agent`, `state`, `principal`, and `limit` narrow the list. |
+| `GET /v1/runs` | List the runs of this process. `?parent={id}` lists the children of a run. `agent`, `state`, `principal`, and `limit` narrow the list. `GET /v1/fleet/runs` of the workbench lists the runs of a whole fleet. |
 | `GET /v1/runs/{id}` | Get one run. |
 | `GET /v1/runs/{id}/events` | Stream the ledger as server-sent events. `Last-Event-ID` resumes from a sequence number. Under `Accept: application/json`, one page of events with `lines`, the short line of each event, as the MCP tool `run_events` of the workbench gives. |
 | `POST /v1/runs/{id}/messages` | Send a follow-up message. Body fields: `content`, `files`. |
@@ -837,7 +837,7 @@ The MCP server is part of the workbench. `fw-workbench` serves it at `/mcp` over
 
 ### 8.6 Fleet
 
-A fleet is a set of `fw` processes that share one bus and one fleet subject. The fleet driver is part of the workbench (the workbench architecture, section 4). When a program links a fleet driver, the kernel honors its `fw.Fleet`. `Agent.Fleet` then returns the view, and the native routes under `/v1/runs/{id}` forward a request about a run of another member to its owner. The metrics surface reports the fleet gauges (section 10.1). Without a driver, `fleet.subject` gives one warning in the log, and the fleet stays off.
+The fleet is a feature of the workbench (the workbench architecture, section 4), and the kernel knows no fleet. The kernel gives a linked package three hooks for it. A service runs beside the agent for as long as the agent lives (section 12.4). A relay of the native surface answers a request about a run that another process holds (section 12.8). A collector adds gauges to the metrics surface (section 10.1). A fleet member reads the credential of a caller from `fw.CredentialFrom` and acts on the caller's behalf at the member that owns a run. The field `member` of a run object names the process that holds the run when it is not this one; the kernel never sets it.
 
 ## 9. Message queues
 
@@ -955,22 +955,9 @@ type StoreObserver interface {
 
 The kernel calls `ObserveLedgerAppend` after each append to the ledger. It calls `CountBusMessage` for each message that the bus intake receives (`in`) and each message that the bus egress publishes (`out`). `driver` is `ledger.driver` or `bus.driver`. If the configuration names no driver, it is `custom`. The metrics projection implements the interface, which feeds `fw_ledger_append_duration_seconds` and `fw_bus_messages_total`. At each scrape, the metrics surface reads `Agent.ToolSources` and sets `fw_mcp_server_up` for each MCP server.
 
-#### Fleet gauges
+#### Collectors of linked packages
 
-If the agent has a fleet (section 8.6), the metrics surface also reports the fleet view:
-
-| Metric | Type | Labels | Meaning |
-|---|---|---|---|
-| `fw_fleet_member_up` | gauge | `member` | 1 when the member is live, else 0 |
-| `fw_fleet_member_last_seen_timestamp_seconds` | gauge | `member` | The Unix time of the last record or heartbeat of the member |
-| `fw_fleet_runs` | gauge | `member`, `state` | Runs that are not finished, by state: `queued`, `running`, `input-required`, `suspended` |
-| `fw_fleet_approvals_oldest_timestamp_seconds` | gauge | `member` | The Unix time of the request of the oldest approval that waits on the member |
-
-The collector reads `a.Fleet()` at each scrape, so it finds a fleet that starts after the surface mounts. It reads the view without a principal, so it counts every member and every run that the records hold. It sends no request to another member. The first scrape starts the view and can wait up to 2 s for the retained records. If the view fails, the log gets a warning, and the rest of the scrape still works.
-
-Each rollout of a Deployment adds members with new pod names. The gauges therefore forget the members that are gone, so the member label stays bounded. A member that stopped leaves the gauges at once. A member that is not live and silent for longer than `telemetry.FleetForgetAfter`, 24 hours, leaves them too. A member that holds an open run stays, so a sleeping ax Task with open runs stays.
-
-Under ax, scrape only the members that are always on, such as a front with no agents. A scrape through the atenet router wakes a Task that sleeps. A scrape every 30 seconds therefore keeps every Task awake. An always-on member reports a sleeping Task in its fleet gauges, from the last record of that Task. Prometheus therefore sees the whole fleet and never wakes a Task. Two members can report the same member, so a query takes the max or the min for each member.
+A linked package adds its own series to the registry of the metrics surface with `metrics.RegisterCollector`, a constructor that gets the agent at the first mount of the surface. The fleet of the workbench adds the gauges `fw_fleet_member_up`, `fw_fleet_member_last_seen_timestamp_seconds`, `fw_fleet_runs`, and `fw_fleet_approvals_oldest_timestamp_seconds` this way (the workbench architecture, section 4.3). The rules and the dashboard of `examples/observability` name them, so they expect `fw-workbench` on the processes that Prometheus scrapes.
 
 #### Prometheus is not the usage record
 
@@ -1198,7 +1185,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 
 ### 12.4 Hooks
 
-A hook is an observer (section 4.4), a policy (section 7.5), or a run annotator. An observer sees everything and changes nothing. A policy decides before a tool runs. A run annotator, `fw.RunAnnotator`, adds metadata to a run when the kernel queues it. The kernel calls it after the authorization of the request, with the context of the caller, the request, and the parent run of a child. The kernel knows nothing about the entries, which a linked package gives a meaning. An entry of the request wins, and a result out of the bounds of `fw.CheckMetadata` adds nothing. A package registers an annotator with `fw.RegisterRunAnnotator` in `init`, and a program passes one with `fw.WithRunAnnotators`. `WithoutDefaults` leaves the registered annotators out. Both run in process by default. An out-of-process observer reads the egress subject. An out-of-process policy is a decision point: an MCP tool or a bus responder that answers each decision request (section 13.5). The same form decides authorization.
+A hook is an observer (section 4.4), a policy (section 7.5), a run annotator, or a service. An observer sees everything and changes nothing. A policy decides before a tool runs. A run annotator, `fw.RunAnnotator`, adds metadata to a run when the kernel queues it. The kernel calls it after the authorization of the request, with the context of the caller, the request, and the parent run of a child. The kernel knows nothing about the entries, which a linked package gives a meaning. An entry of the request wins, and a result out of the bounds of `fw.CheckMetadata` adds nothing. A package registers an annotator with `fw.RegisterRunAnnotator` in `init`, and a program passes one with `fw.WithRunAnnotators`. `WithoutDefaults` leaves the registered annotators out. A service, `fw.Service`, runs beside the agent for as long as the agent lives: `New` starts it after the kernel starts and gets back what stops it, and shutdown stops the services first, before the decision points, the tools, the bus, and the ledger. A package registers one with `fw.RegisterService`, a program passes one with `fw.WithServices`, and `WithoutServices` starts none, which the verbs that run one piece of work pass. The fleet of the workbench is such a service. Both run in process by default. An out-of-process observer reads the egress subject. An out-of-process policy is a decision point: an MCP tool or a bus responder that answers each decision request (section 13.5). The same form decides authorization.
 
 ### 12.5 Profiles, instructions, and skills
 
@@ -1220,7 +1207,7 @@ A skill is a directory with a `SKILL.md` file whose front matter names and descr
 
 Each driver registers itself by name at init, for example `fw.RegisterBus("nats", nats.New)`. A third-party Go module adds a driver by being imported. A blank import in `cmd/fw/drivers.go` selects the drivers that the default binary includes. A custom build leaves out a driver by leaving out its import.
 
-A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), and `fw.RegisterRunAnnotator` adds a run annotator (section 12.4).
+A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), `fw.RegisterRunAnnotator` adds a run annotator, `fw.RegisterService` adds a service (section 12.4), `metrics.RegisterCollector` adds series to the metrics surface (section 10.1), `cli.RegisterDoctorCheck` adds a line to `fw doctor`, and `Kit.SetRelay` of the native surface sets the relay for the runs of other processes (section 12.8).
 
 ### 12.7 Out-of-process extension
 
@@ -1281,9 +1268,6 @@ func TitleFrom(input string) string
 // Serve mounts every enabled surface on one listener and blocks.
 func (a *Agent) Serve(ctx context.Context) error
 
-// Fleet returns the view of the other members of the fleet, or nil when
-// fleet.subject is empty (section 8.6).
-func (a *Agent) Fleet() Fleet
 
 // Files returns the workspace with the rules of tools.files (section 7.9).
 func (a *Agent) Files() Files
@@ -1331,7 +1315,8 @@ func WithTLS(c *tls.Config) Option
 func WithPrices(p Prices) Option
 func WithLogger(l *slog.Logger) Option
 func WithClock(c Clock) Option
-func WithFleet(f Fleet) Option
+func WithServices(s ...Service) Option
+func WithoutServices() Option
 func WithFiles(f Files) Option
 func WithGrantStore(s GrantStore) Option
 func WithoutDefaults() Option
@@ -1426,7 +1411,7 @@ Each entry names principals in one of five forms:
 
 The process-wide block `access` holds `admins`, who own every agent, `creators`, who can add agents, and `default`. With `default: open`, which is the default, an agent that has no `access` block is open to every authenticated principal as an operator. That is how fw behaved before access existed. With `default: closed`, such an agent is reachable by its admins only. A deployment therefore turns identity on in two steps: set `auth.mode` and `access.admins`, then switch `access.default` to `closed` once every agent names its owners.
 
-The kernel enforces this through the `Authz` plug on every call that carries a principal. A run on an agent needs the operator role, and a read of a run needs the viewer role or the run itself. A decision or a cancel needs the operator role or the run itself, and a profile change needs the owner role. A call that carries no principal comes from the process itself, such as a tool that starts a child run, and is trusted. A target can name another member of the fleet (section 8.6). The default rules refuse such a target, because they do not know the rules of another process. The default `Authz` is the rules above, and `fw.WithAuthz` replaces it with a policy of your own. `access.external` replaces it with a control plane outside the process (section 13.5).
+The kernel enforces this through the `Authz` plug on every call that carries a principal. A run on an agent needs the operator role, and a read of a run needs the viewer role or the run itself. A decision or a cancel needs the operator role or the run itself, and a profile change needs the owner role. A call that carries no principal comes from the process itself, such as a tool that starts a child run, and is trusted. A target can name another process that holds the agent and the run, a member of the fleet of the workbench (the workbench architecture, section 4). The default rules refuse such a target, because they do not know the rules of another process. The default `Authz` is the rules above, and `fw.WithAuthz` replaces it with a policy of your own. `access.external` replaces it with a control plane outside the process (section 13.5).
 
 ### 13.3 Managing agents
 
@@ -1498,7 +1483,7 @@ Every request is a JSON object with `kind` and `version`. The kind is `authz` or
 }
 ```
 
-The actions are the actions of section 13.2: `agent.view`, `agent.run`, `agent.edit`, `agent.delete`, `agent.create`, `run.view`, `run.operate`, and `admin`. `access` is the access block of the profile, as data. A check about an agent or a run of another fleet member also carries `member`, the name of that member (section 8.6). Then `access` and `lineage` come from the record of that member. `run` is set for an action on a run. Its `principal` is the subject that started the run, and `lineage` lists the ancestors of a child run, the parent first. The answer holds one decision per check, in the same order:
+The actions are the actions of section 13.2: `agent.view`, `agent.run`, `agent.edit`, `agent.delete`, `agent.create`, `run.view`, `run.operate`, and `admin`. `access` is the access block of the profile, as data. A check about an agent or a run of another process also carries `member`, the name of that process in the fleet of the workbench (the workbench architecture, section 4). Then `access` and `lineage` come from the record of that member. `run` is set for an action on a run. Its `principal` is the subject that started the run, and `lineage` lists the ancestors of a child run, the parent first. The answer holds one decision per check, in the same order:
 
 ```json
 {"decisions": [{"allow": false, "reason": "only the owner of the root run operates it"}, {"allow": true, "ttlMs": 30000}]}
@@ -1628,6 +1613,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The fleet revision of 2026-10-17 moved the fleet out of the kernel, the fourth step of stage 3. The kernel lost the fleet types, `Agent.Fleet`, `fw.WithFleet`, `fw.RegisterFleet`, the key `fleet` of the configuration, the forwarding of the native routes, the fleet-wide run listing of the view, the fleet gauges, and the fleet line of `fw doctor`. It gained four hooks for every linked package: services (`fw.RegisterService`, `fw.WithServices`, `fw.WithoutServices`), the relay of the native surface (`native.Relay`, `Kit.SetRelay`), collectors of the metrics surface (`metrics.RegisterCollector`), and doctor checks (`cli.RegisterDoctorCheck`). `fw.Retainer`, `fw.WithCredential`, `fw.CredentialFrom`, and `Agent.AccessMode` stay, because a bus, a surface, and the authorization of the kernel define them. The fleet of the workbench reads its block `workbench.fleet` and the variables `FW_WORKBENCH_FLEET_*`.
 
 The profiles revision of 2026-10-17 moved the profile writes to the workbench, the third step of stage 3. The kernel lost `PutProfile`, `DeleteProfile`, `fw.ProfileStore`, `fw.WithProfileStore`, `fw.ProfileLocker`, the routes `PUT` and `DELETE /v1/agents/{name}`, and the verbs `put` and `delete` of `fw agents`. It gained `Agent.SetProfiles`, `Agent.ProfileSet`, a `CheckProfile` that changes nothing, `Config.FileProfiles`, and the hooks `cli.AgentsPut` and `cli.AgentsDelete` (section 13.3). The store of the config package writes the files and judges nothing.
 

@@ -14,3 +14,17 @@ type Bus interface {
 	Subscribe(ctx context.Context, subject string, h func(Event) error) (stop func(), err error)
 	Consume(ctx context.Context, queue string, h func(Event) error) (stop func(), err error)
 }
+
+// Retainer is a Bus that keeps the last event of each subject.
+//
+// Retain replaces the kept event of a subject and delivers the event to
+// every watcher. A retained event never enters the stream of Publish, so a
+// heartbeat does not fill the bus. Watch first delivers the kept event of
+// each subject that matches the pattern, then each new one, until stop.
+// The pattern is a subject with the wildcards of SubjectMatch. The handler
+// runs on one goroutine per watch. The fleet of the workbench keeps the
+// records of its members this way.
+type Retainer interface {
+	Retain(ctx context.Context, subject string, e Event) error
+	Watch(ctx context.Context, pattern string, h func(Event) error) (stop func(), err error)
+}

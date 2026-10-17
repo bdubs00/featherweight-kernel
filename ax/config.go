@@ -59,8 +59,6 @@ func BootstrapTimeout() time.Duration {
 //   - A "bootstrap" profile joins Agents unless one exists. Its empty
 //     access block shows it to access.admins only.
 //   - FW_ATESPACE is set to the atespace of the Task when it is unset.
-//   - fleet.name is "<atespace>/<task>" and fleet.url is
-//     "ax:<atespace>/<task>" when they are empty.
 //
 // The caller sets Listen again after this call to honor a --port flag.
 func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
@@ -118,24 +116,15 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 			Budget: &fw.Budget{Deadline: BootstrapTimeout()},
 			// The process runs this profile itself. An access block with no
 			// entry keeps it out of every list but the one of the admins, so
-			// nobody starts it by mistake from the dashboard or the fleet.
+			// nobody starts it by mistake from the dashboard.
 			Access: &fw.Access{},
 		}
 	}
 
-	atespace, name := Identity(task)
+	atespace, _ := Identity(task)
 	if atespace != "" {
 		if _, set := os.LookupEnv(EnvAtespace); !set {
 			_ = os.Setenv(EnvAtespace, atespace)
-		}
-	}
-	if atespace != "" && name != "" {
-		// The router reaches the Task by this address, and wakes it first.
-		if cfg.Fleet.Name == "" {
-			cfg.Fleet.Name = atespace + "/" + name
-		}
-		if cfg.Fleet.URL == "" {
-			cfg.Fleet.URL = "ax:" + atespace + "/" + name
 		}
 	}
 }

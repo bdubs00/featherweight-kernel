@@ -880,17 +880,6 @@ func doctorSeams(t *testing.T, m fw.Model, sources []fw.ToolSource, srcErr error
 	t.Cleanup(func() { openModel, openToolSources = prevModel, prevSources })
 }
 
-func TestDoctorFleetOnTheMemBus(t *testing.T) {
-	env(t)
-	t.Setenv("ANTHROPIC_API_KEY", "sk-doctor-secret")
-	t.Setenv("FW_FLEET_SUBJECT", "fw.fleet")
-	doctorSeams(t, listingModel{models: []string{"claude-opus-5-5"}}, nil, nil)
-	code, out, _ := run(t, "", "doctor")
-	if code == 0 || !strings.Contains(out, "FAIL  fleet: fleet.subject is fw.fleet, but the bus is mem") {
-		t.Fatalf("exit %d\n%s", code, out)
-	}
-}
-
 func TestDoctorAllOK(t *testing.T) {
 	home := env(t)
 	t.Setenv("FW_TIME_ZONE", "America/Chicago")
@@ -904,11 +893,8 @@ func TestDoctorAllOK(t *testing.T) {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 15 {
-		t.Errorf("%d lines, want 15:\n%s", len(lines), out)
-	}
-	if !strings.Contains(out, "ok    fleet: off; set fleet.subject (FW_FLEET_SUBJECT) to join one\n") {
-		t.Errorf("no fleet line:\n%s", out)
+	if len(lines) != 14 {
+		t.Errorf("%d lines, want 14:\n%s", len(lines), out)
 	}
 	timeLine := regexp.MustCompile(`(?m)^ok    time: America/Chicago, [A-Z][a-z]+day \d{4}-\d{2}-\d{2} \d{2}:\d{2} C[SD]T, notes after 10m$`)
 	if !timeLine.MatchString(out) {

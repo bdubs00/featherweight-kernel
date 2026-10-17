@@ -38,7 +38,6 @@ type Config struct {
 	A2A        A2AConfig                 `yaml:"a2a" json:"a2a"`
 	MCP        MCPSurfaceConfig          `yaml:"mcp" json:"mcp"`
 	AX         AXConfig                  `yaml:"ax" json:"ax"`
-	Fleet      FleetConfig               `yaml:"fleet" json:"fleet"`
 	Grants     GrantsConfig              `yaml:"grants" json:"grants"`
 	Telemetry  TelemetryConfig           `yaml:"telemetry" json:"telemetry"`
 	MaxRuns    int                       `yaml:"maxRuns" json:"maxRuns"`
@@ -583,7 +582,6 @@ func DefaultConfig() *Config {
 			Server: "ax-server.ax-system.svc.cluster.local:8080",
 			Router: "atenet-router.ate-system.svc.cluster.local",
 		},
-		Fleet:     FleetConfig{Interval: DefaultFleetInterval, Expire: DefaultFleetExpire},
 		Telemetry: TelemetryConfig{Metrics: "/metrics", Log: "info"},
 		MaxRuns:   16,
 		Agents:    map[string]AgentProfile{},

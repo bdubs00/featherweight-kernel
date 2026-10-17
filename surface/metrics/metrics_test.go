@@ -154,14 +154,29 @@ func TestRegistered(t *testing.T) {
 	}
 }
 
-func TestNoFleetGauges(t *testing.T) {
+// A collector that a linked package registers appears in the scrape; an
+// agent without one serves none of its series.
+func TestRegisteredCollector(t *testing.T) {
 	a := newAgent(t, fw.DefaultConfig(), metrics.New())
 	h, err := a.Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, body := scrape(t, h, "/metrics"); strings.Contains(body, "fw_fleet_") {
-		t.Error("an agent without a fleet reports fleet gauges")
+	if _, body := scrape(t, h, "/metrics"); strings.Contains(body, "fw_extra_") {
+		t.Error("an agent without a registered collector reports its series")
+	}
+	metrics.RegisterCollector(func(*fw.Agent) prometheus.Collector {
+		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "fw_extra_up", Help: "A gauge of a linked package."})
+		g.Set(1)
+		return g
+	})
+	b := newAgent(t, fw.DefaultConfig(), metrics.New())
+	h, err = b.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, body := scrape(t, h, "/metrics"); !strings.Contains(body, "fw_extra_up 1") {
+		t.Errorf("the registered collector is missing:\n%s", body)
 	}
 }
 
@@ -180,8 +195,9 @@ func (r *recorder) Unregister(prometheus.Collector) bool { return false }
 func TestExamplesUseServedMetrics(t *testing.T) {
 	rec := &recorder{}
 	telemetry.NewMetrics(rec, nil)
-	rec.MustRegister(telemetry.NewFleetCollector(newAgent(t, fw.DefaultConfig(), metrics.New())))
-	served := map[string]bool{}
+	// The workbench adds the fleet gauges through metrics.RegisterCollector,
+	// and the examples name them, so the test knows them.
+	served := map[string]bool{"fw_fleet_member_up": true, "fw_fleet_member_last_seen_timestamp_seconds": true, "fw_fleet_runs": true, "fw_fleet_approvals_oldest_timestamp_seconds": true}
 	fqName := regexp.MustCompile(`fqName: "([^"]+)"`)
 	histogram := map[string]bool{}
 	for _, c := range rec.cs {

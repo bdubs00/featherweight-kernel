@@ -232,8 +232,10 @@ type Run struct {
 	ExtraTools []string  `json:"extraTools,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
-	// Member names the fleet member that owns the run when it is another
-	// process (section 8.6). It is empty for a run of this process.
+	// Member names the process that holds the run when it is not this one.
+	// The kernel never sets it, and the ledger never holds it: a linked
+	// package that shows the runs of other processes, such as the fleet of
+	// the workbench, sets it on the runs that it brings in.
 	Member string `json:"member,omitempty"`
 }
 

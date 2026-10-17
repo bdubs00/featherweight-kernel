@@ -62,10 +62,10 @@ ax suspends a Task that is idle. When a request arrives, the atenet router wakes
 Do these things under ax:
 
 1. Do not scrape an ax Task. Do not add an ax Task to the job `fw`, and do not point a scrape at the atenet router.
-2. Run one or more fw processes that are always on, for example the `fw-front` Deployment of `examples/agentgateway`. Give them the same bus and the same `fleet.subject` as the Tasks.
+2. Run one or more fw processes that are always on, for example the `fw-front` Deployment of `examples/agentgateway`. Give them the same bus and the same `workbench.fleet.subject` as the Tasks.
 3. Scrape only the processes that are always on.
 
-A process with a fleet reports the whole fleet from the records that the bus keeps. It sends no request to the other members. These gauges come from the fleet:
+An `fw-workbench` process with a fleet reports the whole fleet from the records that the bus keeps. It sends no request to the other members. These gauges come from the fleet of the workbench, which adds them to the metrics surface of the kernel; a plain `fw` process serves none of them:
 
 | Metric | Labels | Meaning |
 |---|---|---|

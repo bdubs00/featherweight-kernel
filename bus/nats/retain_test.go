@@ -43,9 +43,9 @@ func startWatch(t *testing.T, b *Bus, pattern string) (<-chan fw.Event, func()) 
 
 func TestRetainThenWatch(t *testing.T) {
 	b, root := retainBus(t, serverURL(t))
-	kept := event(t, fw.EvFleetRecord)
+	kept := event(t, "fw.fleet.record")
 	retain(t, b, root+".members.a", kept)
-	retain(t, b, root+".alive.a", event(t, fw.EvFleetAlive))
+	retain(t, b, root+".alive.a", event(t, "fw.fleet.alive"))
 
 	ch, _ := startWatch(t, b, root+".members.*")
 	if got := recv(t, ch); got.ID != kept.ID {
@@ -59,9 +59,9 @@ func TestWatchThenRetain(t *testing.T) {
 	ch, _ := startWatch(t, b, root+".members.*")
 	none(t, ch, 100*time.Millisecond)
 
-	first, second := event(t, fw.EvFleetRecord), event(t, fw.EvFleetRecord)
+	first, second := event(t, "fw.fleet.record"), event(t, "fw.fleet.record")
 	retain(t, b, root+".members.a", first)
-	retain(t, b, root+".other.a", event(t, fw.EvFleetRecord))
+	retain(t, b, root+".other.a", event(t, "fw.fleet.record"))
 	retain(t, b, root+".members.b", second)
 	if got := recv(t, ch); got.ID != first.ID {
 		t.Fatalf("got %s first, want %s", got.ID, first.ID)
@@ -75,8 +75,8 @@ func TestWatchThenRetain(t *testing.T) {
 func TestRetainReplaces(t *testing.T) {
 	b, root := retainBus(t, serverURL(t))
 	subject := root + ".members.a"
-	retain(t, b, subject, event(t, fw.EvFleetRecord))
-	newest := event(t, fw.EvFleetRecord)
+	retain(t, b, subject, event(t, "fw.fleet.record"))
+	newest := event(t, "fw.fleet.record")
 	retain(t, b, subject, newest)
 
 	ch, _ := startWatch(t, b, root+".>")
@@ -89,11 +89,11 @@ func TestRetainReplaces(t *testing.T) {
 func TestWatchStop(t *testing.T) {
 	b, root := retainBus(t, serverURL(t))
 	ch, stop := startWatch(t, b, root+".members.*")
-	retain(t, b, root+".members.a", event(t, fw.EvFleetRecord))
+	retain(t, b, root+".members.a", event(t, "fw.fleet.record"))
 	recv(t, ch)
 	stop()
 	stop() // a second call does nothing
-	retain(t, b, root+".members.a", event(t, fw.EvFleetRecord))
+	retain(t, b, root+".members.a", event(t, "fw.fleet.record"))
 	none(t, ch, 300*time.Millisecond)
 }
 
@@ -121,7 +121,7 @@ func TestRetainSkipsStream(t *testing.T) {
 	}
 	defer stop()
 
-	retain(t, b, subject, event(t, fw.EvFleetRecord))
+	retain(t, b, subject, event(t, "fw.fleet.record"))
 	none(t, sub, 200*time.Millisecond)
 	after, err := stream.Info(ctx)
 	if err != nil {
@@ -135,7 +135,7 @@ func TestRetainSkipsStream(t *testing.T) {
 func TestRetainRefusesKey(t *testing.T) {
 	b, root := retainBus(t, serverURL(t))
 	for _, subject := range []string{root + ".a b", root + ".a:b", root + ".*", root + "..a", ""} {
-		if err := b.Retain(context.Background(), subject, event(t, fw.EvFleetRecord)); err == nil {
+		if err := b.Retain(context.Background(), subject, event(t, "fw.fleet.record")); err == nil {
 			t.Errorf("Retain(%q) succeeded, want an error", subject)
 		}
 	}
@@ -171,7 +171,7 @@ func TestRetainSharedBucket(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = b.Retain(context.Background(), root+".members.p"+string(rune('0'+i)), event(t, fw.EvFleetRecord))
+			errs[i] = b.Retain(context.Background(), root+".members.p"+string(rune('0'+i)), event(t, "fw.fleet.record"))
 		}()
 	}
 	wg.Wait()
@@ -198,7 +198,7 @@ func TestCloseStopsWatch(t *testing.T) {
 		t.Fatalf("%d watches left after Close", left)
 	}
 	none(t, ch, 100*time.Millisecond)
-	if err := b.Retain(context.Background(), root+".members.a", event(t, fw.EvFleetRecord)); err == nil {
+	if err := b.Retain(context.Background(), root+".members.a", event(t, "fw.fleet.record")); err == nil {
 		t.Fatal("Retain after Close succeeded")
 	}
 	if _, err := b.Watch(context.Background(), root+".>", func(fw.Event) error { return nil }); err == nil {
@@ -217,7 +217,7 @@ func TestWatchOutlivesContext(t *testing.T) {
 	}
 	defer stop()
 	cancel()
-	e := event(t, fw.EvFleetRecord)
+	e := event(t, "fw.fleet.record")
 	retain(t, b, root+".members.a", e)
 	if got := recv(t, ch); got.ID != e.ID {
 		t.Fatalf("got %s, want %s", got.ID, e.ID)
