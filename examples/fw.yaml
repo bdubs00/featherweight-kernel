@@ -123,11 +123,6 @@ bus:
   egressTypes: []               # empty publishes every type
   options: {}                   # driver options; FW_BUS_OPTIONS_<NAME>
 
-grants:                         # where fw keeps the grants that people give it (docs/ARCHITECTURE.md section 7.11)
-  store: file                   # file | memory | a registered driver; FW_GRANTS_STORE
-  dir: ""                       # file: the directory; default <home>/grants
-  key: FW_GRANT_KEY             # the Secrets name of the key that encrypts the file store; without it, a random key in grant.key in dir
-
 tools:
   builtin: [bash, files, http, memory, skill, clock, ask_user, spawn_task, await_task]   # the workbench adds propose_agent
   files:                        # the workspace of the files tool and bash (section 7.9)

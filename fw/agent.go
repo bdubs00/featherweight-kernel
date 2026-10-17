@@ -45,9 +45,11 @@ type Agent struct {
 	tlsConfig *tls.Config
 	prices    Prices
 	clock     Clock
-	grants    GrantStore // the grants of people, see connect.go
-	ready     atomic.Bool
-	noResume  bool
+
+	tokMu        sync.RWMutex
+	personTokens PersonTokens // the tokens of people from a linked package, see connect.go
+	ready        atomic.Bool
+	noResume     bool
 
 	// rulesPolicy is true when policy comes from cfg.Policy.Rules, so
 	// ProfileGrants can name its pattern rules.
@@ -139,7 +141,6 @@ func New(opts ...Option) (*Agent, error) {
 		authn:      o.authn,
 		authz:      o.authz,
 		tlsConfig:  o.tlsConfig,
-		grants:     o.grants,
 		prices:     o.prices,
 		clock:      o.clock,
 		observers:  o.observers,
@@ -260,14 +261,6 @@ func New(opts ...Option) (*Agent, error) {
 	}
 	if a.prices == nil {
 		a.prices = PriceTable(cfg.Prices)
-	}
-	if a.grants == nil {
-		// The file store does no I/O until the first connection.
-		g, err := NewGrantStore(ctx, cfg, a.secrets)
-		if err != nil {
-			return nil, err
-		}
-		a.grants = g
 	}
 	if err := a.startKernel(ctx); err != nil {
 		return nil, err

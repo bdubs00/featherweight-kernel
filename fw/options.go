@@ -31,7 +31,6 @@ type options struct {
 	logger     *slog.Logger
 	clock      Clock
 	files      Files
-	grants     GrantStore
 	noDefaults bool
 	noResume   bool
 	annotators []RunAnnotator
@@ -53,10 +52,6 @@ func WithoutServices() Option { return func(o *options) { o.noServices = true } 
 func WithRunAnnotators(fns ...RunAnnotator) Option {
 	return func(o *options) { o.annotators = append(o.annotators, fns...) }
 }
-
-// WithGrantStore keeps the grants of people in s in place of the store
-// that grants.store names. Tests pass NewMemGrantStore().
-func WithGrantStore(s GrantStore) Option { return func(o *options) { o.grants = s } }
 
 // WithFiles uses another store as the workspace in place of the directory
 // tools.files.root, such as a store in memory. The kernel applies the rules

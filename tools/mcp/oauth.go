@@ -348,6 +348,24 @@ func (o *oauthClient) getJSON(ctx context.Context, u string, v any) error {
 	return fetchJSON(ctx, o.http, u, v)
 }
 
+// fetchJSON fetches a metadata document of at most 1 MiB.
+func fetchJSON(ctx context.Context, hc *http.Client, u string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: %s", req.URL.Redacted(), resp.Status)
+	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(v)
+}
+
 // tokenResponse is a token endpoint reply, success or error.
 type tokenResponse struct {
 	AccessToken      string `json:"access_token"`

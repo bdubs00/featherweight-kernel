@@ -58,9 +58,7 @@ The system prompt names the date and the time zone of the run. The `clock` tool 
 
 ## Acting for a person
 
-By default, an MCP server acts as the agent itself, through one service account. Set `auth.oauth.grant: user` on a `tools.mcp` entry, and the entry acts for the person who started the run. The service then applies the rights of that person. The first call that needs the service pauses the run until the person connects. The workbench serves the Connect card, the connection routes, and the callback, so this feature needs the workbench.
-
-`fw` keeps each grant, a refresh token, in an encrypted store under `<home>/grants`. Set `FW_GRANT_KEY` to hold the key in a secret store. One refresh of a grant runs at a time, and `fw` stores the new refresh token before it uses the new access token. A server that rotates refresh tokens, such as Keycloak with Revoke Refresh Token on, therefore gets each refresh token once. If a restore of an older snapshot brings back an old token, the server refuses it, and the person connects again. Section 7.11 of the architecture has the rules and a Keycloak example.
+By default, an MCP server acts as the agent itself, through one service account. Set `auth.oauth.grant: user` on a `tools.mcp` entry, and the entry acts for the person who started the run. The service then applies the rights of that person. The first call that needs the service pauses the run until the person connects. The kernel keeps no grant and runs no OAuth flow: a linked package gives it the tokens of a person through `fw.PersonTokens` and resumes the paused calls with `Agent.Connected`. The workbench is that package. It keeps the grants, serves the Connect card, the connection routes, and the callback, so this feature needs the workbench. Section 7.11 of the architecture has the primitive, and section 11 of the workbench architecture has the flows and a Keycloak example.
 
 ## Serve
 

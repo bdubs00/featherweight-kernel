@@ -52,7 +52,6 @@ func newSources(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) ([]fw.T
 	log := slog.Default().With("component", "mcp")
 	seen := map[string]bool{}
 	out := make([]fw.ToolSource, 0, len(cfg.Tools.MCP))
-	var b *broker // one per process, shared by every entry with grant user
 	for i, c := range cfg.Tools.MCP {
 		if c.Name == "" {
 			return nil, fmt.Errorf("mcp: tools.mcp[%d]: name is required", i)
@@ -70,32 +69,9 @@ func newSources(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) ([]fw.T
 			return nil, err
 		}
 		s.useSPIFFESocket(cfg)
-		if s.personal {
-			if !slices.Contains(cfg.Auth.Modes(), "oidc") {
-				return nil, fmt.Errorf("mcp: server %q: auth.oauth.grant user acts for the person who started a run, so auth.mode must include oidc", c.Name)
-			}
-			if b == nil {
-				b = newBroker()
-			}
-			if err := s.useUserGrant(cfg.Auth.OIDC, b); err != nil {
-				return nil, fmt.Errorf("mcp: server %q: %w", c.Name, err)
-			}
-		}
 		out = append(out, s)
 	}
 	return out, nil
-}
-
-// useUserGrant sets up an entry with grant user. oidc is auth.oidc, and b
-// is the broker of the process.
-func (s *Server) useUserGrant(oidc *fw.OIDCConfig, b *broker) error {
-	u, err := newUserAuth(s.cfg, oidc, b, s.secrets, s.log)
-	if err != nil {
-		return err
-	}
-	u.now = s.now
-	s.user = u
-	return nil
 }
 
 // useSPIFFESocket points the outbound JWT-SVID at the Workload API socket
@@ -116,10 +92,9 @@ type Server struct {
 	client  *http.Client   // nil for a stdio server
 	rt      *authTransport // nil for a stdio server
 	now     func() time.Time
-	// personal is true for an entry with auth.oauth.grant user. user is its
-	// OAuth setup, which newSources adds (useUserGrant).
+	// personal is true for an entry with auth.oauth.grant user. Its tokens
+	// come from the fw.PersonTokens of the agent (person.go).
 	personal bool
-	user     *userAuth
 	// protocol pins the protocol version for tests. Empty means the SDK
 	// default: 2026-07-28 with a fallback to initialize.
 	protocol string
@@ -468,9 +443,6 @@ func (s *Server) listChanged(context.Context, *sdk.ToolListChangedRequest) {
 // down, or when a new list fails, Tools returns the cached list.
 func (s *Server) Tools(ctx context.Context) ([]fw.Tool, error) {
 	if s.personal {
-		if s.user == nil {
-			return nil, s.errNotSetUp()
-		}
 		return s.personTools(ctx)
 	}
 	s.mu.Lock()
@@ -746,19 +718,10 @@ func (s *Server) Call(ctx context.Context, name string, args json.RawMessage) (f
 		arguments = args
 	}
 	if s.personal {
-		if s.user == nil {
-			return fw.ErrorResult(s.errNotSetUp().Error()), nil
-		}
 		return s.callAsPerson(ctx, name, arguments)
 	}
 	res, _, err := s.callSession(ctx, name, arguments, s.connect, s.forget, nil)
 	return res, err
-}
-
-// errNotSetUp is the error of an entry with grant user that New built
-// without newSources, so it has no broker and no sign-in client.
-func (s *Server) errNotSetUp() error {
-	return fmt.Errorf("mcp: server %s acts for a person, but its grants are not set up", s.cfg.Name)
 }
 
 // callSession runs one tools/call over the session that open returns,

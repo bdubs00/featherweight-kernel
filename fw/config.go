@@ -38,7 +38,6 @@ type Config struct {
 	A2A        A2AConfig                 `yaml:"a2a" json:"a2a"`
 	MCP        MCPSurfaceConfig          `yaml:"mcp" json:"mcp"`
 	AX         AXConfig                  `yaml:"ax" json:"ax"`
-	Grants     GrantsConfig              `yaml:"grants" json:"grants"`
 	Telemetry  TelemetryConfig           `yaml:"telemetry" json:"telemetry"`
 	MaxRuns    int                       `yaml:"maxRuns" json:"maxRuns"`
 	Version    string                    `yaml:"-" json:"version,omitempty"`
@@ -392,8 +391,8 @@ type SPIFFEAuthConfig struct {
 // Grant selects whose authority a call carries. GrantClient, the default,
 // is the client_credentials grant: the agent acts as itself, and ClientID
 // and ClientSecret are required. GrantUser acts for the person who started
-// the run, from a grant that the person connects (docs/ARCHITECTURE.md
-// section 7.11). With GrantUser and no ClientID, the entry uses the client
+// the run, from a grant that the person connects in the workbench
+// (docs/ARCHITECTURE.md section 7.11). With GrantUser and no ClientID, the entry uses the client
 // of the browser sign-in (auth.oidc), so the person connects once for every
 // such entry. With a ClientID, the entry has a client of its own at the
 // authorization server that Issuer names, or that the protected resource
@@ -444,18 +443,6 @@ func (c *OAuthClientConfig) OfflineOf() bool { return c == nil || c.Offline == n
 type TokenExchangeConfig struct {
 	Audience string   `yaml:"audience,omitempty" json:"audience,omitempty"`
 	Scopes   []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
-}
-
-// GrantsConfig says where fw keeps the grants that people give it (see
-// GrantStore). Store is file, the default, memory, or a registered driver.
-// Dir is the directory of the file store, <home>/grants by default. Key is
-// the Secrets name of the key that encrypts the file store, FW_GRANT_KEY
-// by default. Without that secret, the store creates a random key in the
-// file grant.key in Dir.
-type GrantsConfig struct {
-	Store string `yaml:"store,omitempty" json:"store,omitempty"`
-	Dir   string `yaml:"dir,omitempty" json:"dir,omitempty"`
-	Key   string `yaml:"key,omitempty" json:"key,omitempty"`
 }
 
 // PeerConfig is one A2A peer.

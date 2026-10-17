@@ -43,8 +43,9 @@ var (
 
 // A DoctorCheck is one line of fw doctor from a linked package. It reports
 // whether the check passed and the line, without the ok or FAIL mark.
-// Timeout bounds its work, as it bounds the checks of the kernel.
-type DoctorCheck func(ctx context.Context, cfg *fw.Config, timeout time.Duration) (ok bool, line string)
+// Secrets are the secrets of the process, and timeout bounds its work, as
+// it bounds the checks of the kernel.
+type DoctorCheck func(ctx context.Context, cfg *fw.Config, secrets fw.Secrets, timeout time.Duration) (ok bool, line string)
 
 var doctorChecks struct {
 	mu   sync.Mutex
@@ -122,7 +123,7 @@ func verbs() []verb {
 		{"serve", "serve every enabled surface on one listener", cmdServe},
 		{"mcp", "serve the MCP server over standard input and output, as the local principal", cmdMCP},
 		{"init", "write a starter fw.yaml, a default prompt, and the agents and skills directories", cmdInit},
-		{"doctor", "check the configuration, the identity, the credential, the model, the tool sources, the connections, the bus, the ledger, and the skills", cmdDoctor},
+		{"doctor", "check the configuration, the identity, the credential, the model, the tool sources, the bus, the ledger, and the skills", cmdDoctor},
 		{"agents", "list the agent profiles, print one, or put and delete one", cmdAgents},
 		{"whoami", "print the local principal that the commands act as", cmdWhoami},
 		{"tools", "list the tools of every source", cmdTools},

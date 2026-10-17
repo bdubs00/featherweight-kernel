@@ -881,10 +881,6 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, r, http.StatusConflict, err.Error())
 	case errors.Is(err, fw.ErrClosed):
 		problem(w, r, http.StatusServiceUnavailable, "the agent is shutting down")
-	case errors.Is(err, fw.ErrNotConnectable):
-		problem(w, r, http.StatusForbidden, "Only a signed-in person can connect a service.")
-	case errors.Is(err, fw.ErrConnectorNotFound):
-		problem(w, r, http.StatusNotFound, "no service named "+strconv.Quote(r.PathValue("server"))+" acts for a person")
 	default:
 		s.a.Logger().Error("native: request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 		problem(w, r, http.StatusInternalServerError, "the request failed; the server log has the cause")

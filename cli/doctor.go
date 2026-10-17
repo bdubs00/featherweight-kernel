@@ -78,10 +78,9 @@ func cmdDoctor(ctx context.Context, g *globals, args []string) int {
 	secrets := d.checkCredential(ctx, cfg)
 	d.checkModel(ctx, cfg, secrets)
 	d.checkToolSources(ctx, cfg, secrets)
-	d.checkConnections(ctx, cfg, secrets)
 	d.checkBus(ctx, cfg)
 	for _, c := range registeredDoctorChecks() {
-		if ok, line := c(ctx, cfg, d.timeout); ok {
+		if ok, line := c(ctx, cfg, secrets, d.timeout); ok {
 			d.ok("%s", line)
 		} else {
 			d.fail("%s", line)
@@ -624,87 +623,6 @@ func (d *doctor) checkToolSources(ctx context.Context, cfg *fw.Config, secrets f
 			continue
 		}
 		d.ok("tool source %s: %d tools", name, len(tools))
-	}
-}
-
-// checkConnections reports the services that act for a person and the
-// store of their grants (docs/ARCHITECTURE.md section 7.11). It writes
-// nothing: the file store makes its directory and its key on the first
-// connection. A service that no person can connect fails the line.
-func (d *doctor) checkConnections(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) {
-	if secrets == nil {
-		secrets = fw.EnvSecrets{}
-	}
-	var names, signIn []string
-	for _, m := range cfg.Tools.MCP {
-		o := m.Auth.OAuth
-		if o.GrantOf() != fw.GrantUser {
-			continue
-		}
-		names = append(names, m.Name)
-		if strings.TrimSpace(o.ClientID) == "" {
-			signIn = append(signIn, m.Name)
-		}
-	}
-	store, err := d.grantStore(ctx, cfg, secrets)
-	if err != nil {
-		d.fail("connections: %v", err)
-		return
-	}
-	if len(names) == 0 {
-		d.ok("connections: no service acts for a person; grants: %s", store)
-		return
-	}
-	who, verb := strings.Join(names, ", "), "act"
-	if len(names) == 1 {
-		verb = "acts"
-	}
-	if !slices.Contains(cfg.Auth.Modes(), "oidc") {
-		d.fail("connections: %s %s for a person, but auth.mode (FW_AUTH_MODE) has no oidc, so no person can connect", who, verb)
-		return
-	}
-	hasClient := cfg.Auth.OIDC != nil && strings.TrimSpace(cfg.Auth.OIDC.ClientID) != ""
-	if len(signIn) > 0 && !hasClient {
-		use := "use"
-		if len(signIn) == 1 {
-			use = "uses"
-		}
-		d.fail("connections: %s %s the sign-in client, but auth.oidc.clientId (FW_AUTH_OIDC_CLIENT_ID) is not set", strings.Join(signIn, ", "), use)
-		return
-	}
-	note := ""
-	if !hasClient {
-		note = "; browser sign-in is off (FW_AUTH_OIDC_CLIENT_ID), so a person who opens a connect link pastes a token first"
-	}
-	d.ok("connections: %s %s for a person; grants: %s%s", who, verb, store, note)
-}
-
-// grantStore describes the grant store of grants.store and checks that it
-// opens. The file store does no I/O when it opens. The line names the
-// secret of the key, never its value.
-func (d *doctor) grantStore(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) (string, error) {
-	sctx, cancel := context.WithTimeout(ctx, d.timeout)
-	defer cancel()
-	s, err := fw.NewGrantStore(sctx, cfg, secrets)
-	if err != nil {
-		return "", err
-	}
-	if c, ok := s.(io.Closer); ok {
-		_ = c.Close()
-	}
-	switch name := strings.ToLower(strings.TrimSpace(cfg.Grants.Store)); name {
-	case "", fw.GrantStoreFile:
-		home := firstNonEmpty(cfg.Home, fw.DefaultHome())
-		dir := firstNonEmpty(cfg.Grants.Dir, filepath.Join(home, "grants"))
-		key := firstNonEmpty(cfg.Grants.Key, fw.DefaultGrantKey)
-		if v, err := secrets.Get(sctx, key); err == nil && v != "" {
-			return fmt.Sprintf("file %s, key from %s", dir, key), nil
-		}
-		return fmt.Sprintf("file %s, key in %s (set %s to share one key)", dir, filepath.Join(dir, "grant.key"), key), nil
-	case fw.GrantStoreMemory:
-		return "memory, so they end with the process", nil
-	default:
-		return "driver " + name, nil
 	}
 }
 
