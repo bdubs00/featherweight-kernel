@@ -123,6 +123,11 @@ bus:
   egressTypes: []               # empty publishes every type
   options: {}                   # driver options; FW_BUS_OPTIONS_<NAME>
 
+tokens:                         # the tokens of people, from a broker outside this process (docs/ARCHITECTURE.md section 7.11)
+  url: ""                       # the front of the workbench, for example http://fw-front.fw-fleet.svc:8080; empty keeps them off. FW_TOKENS_URL
+  credential: ""                # the Secrets name of the bearer token for the broker; empty is auth.tokenEnv. FW_TOKENS_CREDENTIAL
+  subject: fw.connections       # the bus subject of the notices of the broker. FW_TOKENS_SUBJECT
+
 tools:
   builtin: [bash, files, http, memory, skill, clock, ask_user, spawn_task, await_task]   # the workbench adds propose_agent
   files:                        # the workspace of the files tool and bash (section 7.9)

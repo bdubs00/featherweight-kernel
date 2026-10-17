@@ -57,7 +57,7 @@ type RunInfo struct {
 	CallID string
 	// Principal is the subject of the person or workload that started the
 	// run, which a child run inherits. PrincipalKind is its kind, such as
-	// KindUser. A tool that acts for a person reads both (see Connector).
+	// KindUser. A tool that acts for a person reads both (see PersonTokens).
 	Principal     string
 	PrincipalKind string
 }

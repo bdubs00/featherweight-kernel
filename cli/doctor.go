@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -78,6 +79,7 @@ func cmdDoctor(ctx context.Context, g *globals, args []string) int {
 	secrets := d.checkCredential(ctx, cfg)
 	d.checkModel(ctx, cfg, secrets)
 	d.checkToolSources(ctx, cfg, secrets)
+	d.checkTokens(cfg)
 	d.checkBus(ctx, cfg)
 	for _, c := range registeredDoctorChecks() {
 		if ok, line := c(ctx, cfg, secrets, d.timeout); ok {
@@ -624,6 +626,22 @@ func (d *doctor) checkToolSources(ctx context.Context, cfg *fw.Config, secrets f
 		}
 		d.ok("tool source %s: %d tools", name, len(tools))
 	}
+}
+
+// checkTokens reports where the tokens of people come from: a broker that
+// tokens.url names (docs/ARCHITECTURE.md section 7.11), or nowhere.
+func (d *doctor) checkTokens(cfg *fw.Config) {
+	u := strings.TrimSpace(cfg.Tokens.URL)
+	if u == "" {
+		d.ok("tokens: off; set tokens.url (FW_TOKENS_URL) to get the tokens of people from a broker")
+		return
+	}
+	if p, err := url.Parse(u); err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
+		d.fail("tokens: tokens.url (FW_TOKENS_URL) %q is not an http or https URL", u)
+		return
+	}
+	cred := firstNonEmpty(cfg.Tokens.Credential, cfg.Auth.TokenEnv, "FW_API_TOKEN")
+	d.ok("tokens: from %s, as %s, notices on %s", u, cred, firstNonEmpty(cfg.Tokens.Subject, fw.DefaultTokensSubject))
 }
 
 // checkBus opens the bus and closes it.

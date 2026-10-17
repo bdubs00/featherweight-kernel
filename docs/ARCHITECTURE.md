@@ -623,6 +623,12 @@ The kernel holds one primitive for this: a tool call that acts for a person paus
 
 The kernel checks `grant` and keeps the other keys for the package that keeps the connections, which reads them from the configuration of the agent. The store of the grants is configured there too (the workbench architecture, section 11).
 
+| Key | Variable | Meaning | Default |
+|---|---|---|---|
+| `tokens.url` | `FW_TOKENS_URL` | The address of a token broker, the front of the workbench. Empty keeps the tokens of people off, unless a linked package sets them. | empty |
+| `tokens.credential` | `FW_TOKENS_CREDENTIAL` | The `Secrets` name of the bearer token that this process presents to the broker | `auth.tokenEnv` |
+| `tokens.subject` | `FW_TOKENS_SUBJECT` | The bus subject on which the broker announces a finished connection | `fw.connections` |
+
 #### How a call pauses
 
 1. A call needs a token of the person. `PersonTokens.Token` returns an error that wraps `ErrNotConnected` or `ErrConnectionExpired`, or the service refused the tokens of the person. The MCP client calls `fw.RequestConnect`. The kernel appends `fw.approval.requested` with `connect`: the server, its title, and the reason, `missing` or `expired`. The run moves to `input-required`.
@@ -638,6 +644,14 @@ The MCP client keeps one MCP session per person and server, because a server can
 The tool list of a server is shared. Until a person with a grant lists the tools, the server shows one tool, `<server>.connect`. A call of that tool asks the person to connect, and the real tools appear in the next step.
 
 A run without a person gets an error from such a tool, never the identity of the agent. A workload, the static token, a bus intake, and an anonymous caller have no person.
+
+#### The token broker
+
+A grant has one holder, and a Task is the wrong holder: ax saves the volume of a Task on a suspend, and a restore brings back a refresh token that the server already replaced. In a fleet, the front keeps every grant and runs every refresh, and each Task gets the tokens of a person from it. The kernel package `tokens` is that client. With `tokens.url` set, it is the `PersonTokens` of the process, and it defines the protocol, which the package `connections` of the workbench serves (the workbench architecture, section 11.9).
+
+The client sends `POST /v1/tokens` to the broker with the subject of the person, the server, and the id of the run in the context of the call. It presents the credential of `tokens.credential`, by default the static token of `auth.tokenEnv`, so the broker sees a member of the fleet and never a person. The broker finds the run in its fleet records, checks that the person started it, and answers with the token and its expiry. The client keeps the token until shortly before the expiry, and for five minutes at most. A refusal carries a reason: `not-connected` and `expired` become `ErrNotConnected` and `ErrConnectionExpired`, so the call asks the person to connect, and every other reason is an error for the model. `POST /v1/tokens/reject` drops a token that the service refused, and `POST /v1/tokens/forget` drops the grant when the service kept refusing.
+
+When a connection of a person ends at the broker, the broker publishes `fw.connection.connected` on the bus subject of `tokens.subject`, with the subject and the services that are now connected. The client of each member turns it into `Agent.Connected`, and the paused calls of that person go on. The refresh token never enters a Task. An access token does, and it lives an hour.
 
 #### Restarts
 
@@ -1090,7 +1104,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 | `Prices` | empty | a price table | `prices:` or `fw.Prices` |
 | `Clock` | the system clock | a manual clock for tests, your own | `fw.WithClock` |
 | `ToolLimits` | 256 KB in, 100 KB out, 10 min | your own numbers per tool | `tools.limits:` |
-| `PersonTokens` | none | a linked package that keeps the grants of people, such as the workbench | `Agent.SetPersonTokens` |
+| `PersonTokens` | none | the package `tokens`, a client of a token broker, or a linked package that keeps the grants of people, such as the workbench | `tokens.url:` or `Agent.SetPersonTokens` |
 
 ### 12.3 Middleware
 
@@ -1524,6 +1538,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The token broker revision of 2026-10-17 added the kernel package `tokens`, the first item of stage 4 of docs/ROADMAP.md. With `tokens.url`, a process gets the access tokens of people from a broker, the front of the workbench, through `fw.PersonTokens`, and a notice on the bus resumes its paused calls when a connection ends. The configuration gained the key `tokens`, and `fw doctor` gained the line `tokens`. A `cli.DoctorCheck` of a linked package gets the secrets of the process since this revision.
 
 The connections revision of 2026-10-17 moved the grants and the OAuth flows out of the kernel, the fifth and last step of stage 3. The kernel lost `fw.Grant`, `fw.GrantStore`, the stores, `fw.Connector`, `fw.Connection`, `fw.ConnectStart`, `Agent.Connections`, `Agent.BeginConnect`, `Agent.FinishConnect`, `Agent.Disconnect`, `Agent.Grants`, `fw.WithGrantStore`, the key `grants` of the configuration, and the `connections` line of `fw doctor`. The MCP client keeps the sessions of people and the placeholder tool, and gets the tokens of a person from `fw.PersonTokens`, which a linked package sets with `Agent.SetPersonTokens`. `Agent.Connected` resumes the paused calls when a connection ends. The package `tools/mcp` exports its OAuth helpers for such a package. The workbench package `connections` keeps the grants under `workbench.grants` and `FW_WORKBENCH_GRANTS_*` (the workbench architecture, section 11). The file `fw/grants.go` stays: it projects the tool grants of a profile for the surfaces and has nothing to do with OAuth.
 

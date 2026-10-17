@@ -21,6 +21,7 @@ import (
 	_ "github.com/bdubs00/featherweight-kernel/model/openai"
 	_ "github.com/bdubs00/featherweight-kernel/surface/metrics"
 	_ "github.com/bdubs00/featherweight-kernel/surface/native"
+	_ "github.com/bdubs00/featherweight-kernel/tokens"
 	_ "github.com/bdubs00/featherweight-kernel/tools/a2a"
 	_ "github.com/bdubs00/featherweight-kernel/tools/builtin"
 	_ "github.com/bdubs00/featherweight-kernel/tools/mcp"

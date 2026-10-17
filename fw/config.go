@@ -32,6 +32,7 @@ type Config struct {
 	Compaction CompactionConfig          `yaml:"compaction" json:"compaction"`
 	Time       TimeConfig                `yaml:"time" json:"time"`
 	Spawn      SpawnConfig               `yaml:"spawn" json:"spawn"`
+	Tokens     TokensConfig              `yaml:"tokens" json:"tokens"`
 	Prices     map[string]Price          `yaml:"prices" json:"prices,omitempty"`
 	Agents     map[string]AgentProfile   `yaml:"agents" json:"agents,omitempty"`
 	Surfaces   []string                  `yaml:"surfaces" json:"surfaces"`
@@ -445,6 +446,24 @@ type TokenExchangeConfig struct {
 	Scopes   []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
 }
 
+// TokensConfig names the broker that gives this process the access tokens
+// of people (docs/ARCHITECTURE.md section 7.11). The broker keeps the
+// grants of people and runs the OAuth flows; the front of the workbench is
+// one. URL is its address, an http or https URL. Empty keeps the tokens of
+// people off, unless a linked package sets them on the agent. Credential
+// is the Secrets name of the bearer token that this process presents to the
+// broker; empty uses the static token of auth.tokenEnv. Subject is the bus
+// subject on which the broker announces a finished connection, so a paused
+// call goes on; empty is DefaultTokensSubject.
+type TokensConfig struct {
+	URL        string `yaml:"url,omitempty" json:"url,omitempty"`
+	Credential string `yaml:"credential,omitempty" json:"credential,omitempty"`
+	Subject    string `yaml:"subject,omitempty" json:"subject,omitempty"`
+}
+
+// DefaultTokensSubject is the bus subject of the notices of a token broker.
+const DefaultTokensSubject = "fw.connections"
+
 // PeerConfig is one A2A peer.
 type PeerConfig struct {
 	Name string `yaml:"name" json:"name"`
@@ -562,6 +581,7 @@ func DefaultConfig() *Config {
 		Compaction: CompactionConfig{At: DefaultCompactAt},
 		Time:       TimeConfig{NoteAfter: DefaultNoteAfter},
 		Spawn:      SpawnConfig{MaxDepth: DefaultSpawnDepth, MaxChildren: DefaultSpawnChildren},
+		Tokens:     TokensConfig{Subject: DefaultTokensSubject},
 		Surfaces:   []string{"native", "a2a", "metrics"},
 		A2A:        A2AConfig{Name: "featherweight", Description: "A featherweight agent"},
 		MCP:        MCPSurfaceConfig{Path: "/mcp", Tasks: true, TaskTTL: 24 * time.Hour},
