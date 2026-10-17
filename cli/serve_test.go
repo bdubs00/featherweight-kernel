@@ -173,7 +173,7 @@ func TestServeAXBoot(t *testing.T) {
 	home := filepath.Join(wsPath, ".fw")
 	addr := freeAddr(t)
 
-	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--home", home)
+	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", home)
 	waitFor(t, "http://"+addr+"/readyz", 200)
 
 	// Step 3 prepared the workspace and wrote the marker under the home.
@@ -196,7 +196,7 @@ func TestServeAXBoot(t *testing.T) {
 	if got := fw.TextOf(reqs[1].Messages[0].Content); got != "do the task" || reqs[1].System != "You help." {
 		t.Errorf("command request: system %q input %q", reqs[1].System, got)
 	}
-	// The metadata of the Task is stashed for the axmeta surface.
+	// The metadata of the Task is stashed for the metadata endpoints.
 	if task, _ := ax.Stashed(); task == nil || task.Metadata.Name != "tester" {
 		t.Errorf("stashed task %+v", task)
 	}
@@ -214,7 +214,7 @@ func TestServeAXBoot(t *testing.T) {
 
 	// A second boot finds the marker, skips the goal, and follows the same
 	// command run instead of starting it again.
-	stop = serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--home", home)
+	stop = serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", home)
 	waitFor(t, "http://"+addr+"/readyz", 200)
 	code, out, errOut = stop()
 	if code != 0 {
@@ -234,10 +234,9 @@ func TestServeAXSupervisesCommand(t *testing.T) {
 	out := filepath.Join(dir, "metadata-url")
 	taskFile, wsFile, wsPath := writeManifests(t, dir, `  command: ["sh", "-c", "pwd > `+out+`.dir; echo $AX_METADATA_URL > `+out+`"]`)
 	addr := freeAddr(t)
-	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--home", filepath.Join(wsPath, ".fw"))
+	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", filepath.Join(wsPath, ".fw"))
 	waitFor(t, "http://"+addr+"/readyz", 200)
 
-	_, port, _ := net.SplitHostPort(addr)
 	deadline := time.Now().Add(10 * time.Second)
 	var got []byte
 	for time.Now().Before(deadline) {
@@ -247,8 +246,17 @@ func TestServeAXSupervisesCommand(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if strings.TrimSpace(string(got)) != "http://127.0.0.1:"+port {
-		t.Errorf("AX_METADATA_URL %q", got)
+	// The metadata endpoints answer on a loopback port of their own, not on
+	// the listener of the surfaces, as the stock runner does.
+	metaURL := strings.TrimSpace(string(got))
+	if !strings.HasPrefix(metaURL, "http://127.0.0.1:") || metaURL == "http://"+addr {
+		t.Fatalf("AX_METADATA_URL %q, listener %s", metaURL, addr)
+	}
+	if code, body := get(t, metaURL+"/metadata/v1alpha1/ax/task"); code != 200 || !strings.Contains(body, "name: tester") {
+		t.Errorf("task metadata: %d %q", code, body)
+	}
+	if code, _ := get(t, "http://"+addr+"/metadata/v1alpha1/ax/task"); code != 404 {
+		t.Errorf("the listener of the surfaces serves the metadata: %d", code)
 	}
 	if b, _ := os.ReadFile(out + ".dir"); strings.TrimSpace(string(b)) != wsPath {
 		t.Errorf("working directory %q, want %q", b, wsPath)

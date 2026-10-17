@@ -94,6 +94,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"PUT /v1/agents/{name}", s.putAgent},
 		{"DELETE /v1/agents/{name}", s.deleteAgent},
 		{"GET /v1/whoami", s.whoami},
+		{"GET /v1/status", s.status},
 		{"GET /v1/tools", s.listTools},
 		{"GET /v1/skills", s.listSkills},
 		{"GET /v1/skills/{name}", s.getSkill},

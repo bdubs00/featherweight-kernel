@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -81,9 +80,20 @@ func TestServeAXGuestServices(t *testing.T) {
 	dir := t.TempDir()
 	taskFile, wsFile, wsPath := writeManifests(t, dir, "  debug: true")
 	addr := freeAddr(t)
-	_, port, _ := net.SplitHostPort(addr)
-	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--home", filepath.Join(wsPath, ".fw"))
-	want := wsPath + "\nhttp://127.0.0.1:" + port + "\n"
+	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", filepath.Join(wsPath, ".fw"))
+	// A process gets AX_METADATA_URL, the loopback listener of the metadata
+	// endpoints, which is not the listener of the surfaces.
+	check := func(when, out string, err error) {
+		t.Helper()
+		dir, meta, ok := strings.Cut(strings.TrimSuffix(out, "\n"), "\n")
+		if err != nil || !ok || dir != wsPath || !strings.HasPrefix(meta, "http://127.0.0.1:") || meta == "http://"+addr {
+			t.Errorf("%s: stdout %q, %v; want the workspace and the metadata URL", when, out, err)
+			return
+		}
+		if code, body := get(t, meta+"/metadata/v1alpha1/ax/task"); code != 200 || !strings.Contains(body, "name: tester") {
+			t.Errorf("%s: task metadata at %s: %d %q", when, meta, code, body)
+		}
+	}
 
 	// The workspace goal waits on the model, so the boot is not done, and
 	// ax ssh works already.
@@ -95,15 +105,13 @@ func TestServeAXGuestServices(t *testing.T) {
 	if code, _ := get(t, "http://"+addr+"/readyz"); code != 503 {
 		t.Errorf("readyz during the boot = %d", code)
 	}
-	if out, err := guestExec(t, addr, "pwd; echo $AX_METADATA_URL"); err != nil || out != want {
-		t.Errorf("during the boot: stdout %q, %v; want %q", out, err, want)
-	}
+	out, err := guestExec(t, addr, "pwd; echo $AX_METADATA_URL")
+	check("during the boot", out, err)
 
 	close(m.gate)
 	waitFor(t, "http://"+addr+"/readyz", 200)
-	if out, err := guestExec(t, addr, "pwd; echo $AX_METADATA_URL"); err != nil || out != want {
-		t.Errorf("after the boot: stdout %q, %v; want %q", out, err, want)
-	}
+	out, err = guestExec(t, addr, "pwd; echo $AX_METADATA_URL")
+	check("after the boot", out, err)
 	// The other surfaces still answer on the same port.
 	if code, _ := get(t, "http://"+addr+"/healthz"); code != 200 {
 		t.Errorf("healthz = %d", code)
@@ -125,7 +133,7 @@ func TestServeAXGuestServicesNeedDebug(t *testing.T) {
 	dir := t.TempDir()
 	taskFile, wsFile, wsPath := writeManifests(t, dir, "")
 	addr := freeAddr(t)
-	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--home", filepath.Join(wsPath, ".fw"))
+	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", filepath.Join(wsPath, ".fw"))
 	waitFor(t, "http://"+addr+"/readyz", 200)
 	if out, err := guestExec(t, addr, "echo ran"); err == nil {
 		t.Errorf("a Task without spec.debug ran a process: %q", out)

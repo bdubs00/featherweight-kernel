@@ -97,7 +97,7 @@ Follow the ledger of a run as server-sent events with `GET /v1/runs/{id}/events`
 
 ## Inside google/ax
 
-Point a Task at the `fw:toolbox` image and leave `spec.command` empty. `fw` prepares the workspaces, serves on port 80, and waits for work. Any Task in the cluster is reachable through the atenet router:
+Point a Task at the `fw:toolbox` image and leave `spec.command` empty. `fw` prepares the workspaces, serves on port 80, and waits for work. The metadata endpoints of the runner contract answer on `127.0.0.1:8099` inside the sandbox, at `AX_METADATA_URL`, as the stock runner does. `GET /v1/status` on port 80 gives the state of the agent at a glance. Any Task in the cluster is reachable through the atenet router:
 
 ```
 curl -H 'ate-target-actor: default/reviewer' -H 'Content-Type: application/json' \
@@ -132,9 +132,9 @@ Every driver is a public package. A program that imports a driver registers it. 
 - the tools `tools/builtin`, `tools/mcp`, and `tools/a2a`
 - the buses `bus/nats` and `bus/redis`
 - the authentication `authn/spiffe`
-- the surfaces `surface/native`, `surface/a2a`, `surface/metrics`, and `surface/axmeta`
+- the surfaces `surface/native`, `surface/a2a`, and `surface/metrics`
 
-The packages `ax`, `config`, `telemetry`, and `surface/view` support them. The kernel and the contract are in `fw`, and the verbs of the command line are in `cli`.
+The packages `ax`, `surface/axmeta`, `config`, `telemetry`, and `surface/view` support them. The kernel and the contract are in `fw`, and the verbs of the command line are in `cli`.
 
 ## Building on the kernel
 

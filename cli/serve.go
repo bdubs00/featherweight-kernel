@@ -21,6 +21,7 @@ import (
 	"github.com/bdubs00/featherweight-kernel/ax/guest"
 	"github.com/bdubs00/featherweight-kernel/config"
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/surface/axmeta"
 )
 
 // serveArgs holds the flags of fw serve. The manifest flags match the
@@ -29,6 +30,7 @@ type serveArgs struct {
 	taskFile       string
 	workspaceFiles stringList
 	port           int
+	metadataPort   int
 }
 
 // stringList is a flag that can repeat.
@@ -45,6 +47,7 @@ func cmdServe(ctx context.Context, g *globals, args []string) int {
 	fs.StringVar(&sa.taskFile, "task-file", "", "read the ax Task from this `file` instead of AX_TASK_YAML")
 	fs.Var(&sa.workspaceFiles, "workspace-file", "read ax Workspaces from this `file` instead of AX_WORKSPACES_YAML; repeat for more files")
 	fs.IntVar(&sa.port, "port", 0, "listen on this `port` on every interface; wins over --listen")
+	fs.IntVar(&sa.metadataPort, "metadata-port", axmeta.DefaultPort, "serve the ax metadata endpoints on this loopback `port`; 0 picks a free port")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return flagExit(err)
@@ -145,13 +148,14 @@ type axBoot struct {
 //
 //  1. Start the zombie reaper, which works only as PID 1, and read the
 //     manifests.
-//  2. Listen on :80 (or --listen, or --port) at once, with the boot handler.
-//     If the Task sets spec.debug, the guest services of ax ssh answer from
-//     this point on, so that a stuck boot can be inspected.
+//  2. Stash the manifests for the metadata endpoints. Listen on :80 (or
+//     --listen, or --port) at once with the boot handler, and serve the ax
+//     metadata endpoints on 127.0.0.1:8099 (or --metadata-port). If the
+//     Task sets spec.debug, the guest services of ax ssh answer from this
+//     point on, so that a stuck boot can be inspected.
 //  3. Compute the bindings and prepare each workspace.
 //  4. Load the configuration, which a Workspace file can ship at
-//     /workspace/.fw/fw.yaml, merge the Task into it, and stash the
-//     manifests for the metadata surface.
+//     /workspace/.fw/fw.yaml, and merge the Task into it.
 //  5. Build the agent, which resumes unfinished runs, and run each binding
 //     goal with the bootstrap profile when a model is available.
 //  6. Set ready and swap in the agent handler.
@@ -172,6 +176,7 @@ func serveAX(ctx context.Context, g *globals, sa serveArgs) int {
 		return g.fail("serve", err)
 	}
 	b.bindings = ax.Bindings(b.task, b.workspaces)
+	ax.Stash(b.task, b.workspaces)
 
 	addr := ax.Listen
 	if g.listen != "" {
@@ -184,12 +189,17 @@ func serveAX(ctx context.Context, g *globals, sa serveArgs) int {
 	if err != nil {
 		return g.fail("serve", fmt.Errorf("listen %s: %w", addr, err))
 	}
-	gs := startGuest(b, ln.Addr())
+	meta, err := axmeta.Listen(ctx, sa.metadataPort)
+	if err != nil {
+		_ = ln.Close()
+		return g.fail("serve", err)
+	}
+	gs := startGuest(b, meta.URL())
 	sw := newSwitchHandler(bootHandler())
 	srv := newHTTPServer(ctx, gs.Wrap(sw))
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.Serve(ln) }()
-	slog.Info("fw: ax boot: listening", "addr", ln.Addr().String())
+	slog.Info("fw: ax boot: listening", "addr", ln.Addr().String(), "metadata", meta.URL())
 
 	shutdown := func(a *fw.Agent) {
 		sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -198,6 +208,7 @@ func serveAX(ctx context.Context, g *globals, sa serveArgs) int {
 		// guest services stop before the server.
 		gs.Close()
 		_ = srv.Shutdown(sctx)
+		_ = meta.Close(sctx)
 		if a != nil {
 			a.Close(sctx)
 		}
@@ -226,7 +237,7 @@ func serveAX(ctx context.Context, g *globals, sa serveArgs) int {
 	cmdDone := make(chan struct{})
 	go func() {
 		defer close(cmdDone)
-		g.runTaskCommand(cmdCtx, a, b, ln.Addr())
+		g.runTaskCommand(cmdCtx, a, b, meta.URL())
 	}()
 
 	code := exitOK
@@ -247,8 +258,8 @@ func serveAX(ctx context.Context, g *globals, sa serveArgs) int {
 // startGuest starts the guest services of ax ssh when the Task sets
 // spec.debug, and returns nil otherwise. A failure leaves them off and does
 // not stop the boot, as in the stock runner.
-func startGuest(b *axBoot, addr net.Addr) *guest.Server {
-	gs, err := guest.New(b.task, guest.Options{Workspace: ax.Workdir(b.bindings), MetadataURL: metadataURL(addr)})
+func startGuest(b *axBoot, metadataURL string) *guest.Server {
+	gs, err := guest.New(b.task, guest.Options{Workspace: ax.Workdir(b.bindings), MetadataURL: metadataURL})
 	switch {
 	case err != nil:
 		slog.Error("fw: ax boot: guest services are off", "error", err)
@@ -256,15 +267,6 @@ func startGuest(b *axBoot, addr net.Addr) *guest.Server {
 		slog.Warn("fw: ax boot: spec.debug is true, so the guest services of ax ssh are on. Any caller that reaches the listener can run a process in the sandbox.")
 	}
 	return gs
-}
-
-// metadataURL is the value of AX_METADATA_URL for the listener address.
-func metadataURL(addr net.Addr) string {
-	port := 80
-	if tcp, ok := addr.(*net.TCPAddr); ok {
-		port = tcp.Port
-	}
-	return fmt.Sprintf("http://127.0.0.1:%d", port)
 }
 
 // bootAX runs steps 3 to 5 of the boot sequence on the manifests in b.
@@ -302,7 +304,6 @@ func (g *globals) bootAX(ctx context.Context, b *axBoot, listen string) error {
 	}
 	cfg.Listen = listen
 	cfg.Version = Version
-	ax.Stash(b.task, b.workspaces)
 	g.setLogger(cfg.Telemetry.Log)
 	log = slog.Default() // the configuration can change the level
 	if path != "" {
@@ -329,7 +330,7 @@ func (g *globals) bootAX(ctx context.Context, b *axBoot, listen string) error {
 // runTaskCommand runs step 7 of the boot sequence and returns when the
 // command ends. The caller keeps serving after that, as the stock runner
 // does.
-func (g *globals) runTaskCommand(ctx context.Context, a *fw.Agent, b *axBoot, addr net.Addr) {
+func (g *globals) runTaskCommand(ctx context.Context, a *fw.Agent, b *axBoot, metadataURL string) {
 	log := a.Logger()
 	var argv []string
 	if b.task != nil {
@@ -361,7 +362,7 @@ func (g *globals) runTaskCommand(ctx context.Context, a *fw.Agent, b *axBoot, ad
 			log.Warn("fw: ax: spec.command names a verb that does not run in process; serving", "verb", verb)
 		}
 	default:
-		env := []string{ax.EnvMetadataURL + "=" + metadataURL(addr)}
+		env := []string{ax.EnvMetadataURL + "=" + metadataURL}
 		code, err := ax.Supervise(ctx, argv, ax.Workdir(b.bindings), env, log)
 		if err != nil {
 			log.Error("fw: ax: task command", "error", err)

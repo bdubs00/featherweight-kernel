@@ -273,7 +273,7 @@ agents:                         # profiles; also one file each under <home>/agen
     budget:
       deadline: 10m
 
-surfaces: [native, a2a, metrics]   # ax metadata and guest services mount automatically under ax; the workbench adds mcp
+surfaces: [native, a2a, metrics]   # the workbench adds mcp; under ax, the metadata endpoints and the guest services start on their own
 a2a:
   name: featherweight
   description: A featherweight agent

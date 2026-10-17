@@ -16,13 +16,15 @@ Done on 2026-10-17. Both repositories are on GitHub. The planning documents move
 
 ## Stage 2: follow upstream ax
 
-Upstream google/ax moved twelve commits past ac23328, the commit that the e2e loop pins. Three commits change the runner contract.
+The kernel part is done on 2026-10-17. The lab part, the new pins of the installer, waits for a run against the homelab cluster.
+
+Upstream google/ax moved twelve commits past ac23328, the commit that the e2e loop pinned. Three commits change the runner contract.
 
 1. Commit 22954f6 serves the metadata endpoints on `127.0.0.1:8099`. Port 80 serves only `/healthz`, `/readyz`, and the guest services. Move `surface/axmeta` to a loopback listener and point `AX_METADATA_URL` there. Give the fw status body the path `/v1/status` on the main listener, so the workbench reads it through the router.
 2. Commit f0f16ff renames `creationTimestamp` to `createTime`, `lastTransitionTime` to `updateTime`, and `ResourceReqs` to `ResourcesSpec`. It removes `pendingApproval` and `usage` from `TaskStatus`. Update the YAML types in `ax/` and section 11.8 of `docs/ARCHITECTURE.md`.
 3. Commit 92d297e forwards standard input in `ax ssh`. Remove the gap from sections 11.11 and 11.12 of `docs/ARCHITECTURE.md` and from `README.md`.
 
-Also move the e2e loop to the new ax commit and to the Substrate pin that it names. Under Substrate v0.5.0, an actor with no egress policy gets no DNS. The egress policy must therefore name every host that `fw` calls.
+The lab installer now pins ax 8d2ccf3 and the Substrate commit that it names, f6a1dc7, and applies a patch only when one exists for the chosen Substrate version. The next `make e2e-k3s-install` rebuilds Substrate and ax on the cluster, and the next `make e2e-k3s` proves the kernel against them. Substrate v0.5.0 denies DNS to an actor without an egress policy, so a later move to v0.5.0 must name every host that `fw` calls in the egress policy.
 
 ## Stage 3: move the hooks of the workbench out of fw
 

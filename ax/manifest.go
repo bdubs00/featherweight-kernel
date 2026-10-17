@@ -36,9 +36,9 @@ const (
 
 // ObjectMeta is the metadata of an ax resource.
 type ObjectMeta struct {
-	Name              string `yaml:"name,omitempty" json:"name,omitempty"`
-	Atespace          string `yaml:"atespace,omitempty" json:"atespace,omitempty"`
-	CreationTimestamp string `yaml:"creationTimestamp,omitempty" json:"creationTimestamp,omitempty"`
+	Name       string `yaml:"name,omitempty" json:"name,omitempty"`
+	Atespace   string `yaml:"atespace,omitempty" json:"atespace,omitempty"`
+	CreateTime string `yaml:"createTime,omitempty" json:"createTime,omitempty"`
 }
 
 // Task is the ax Task launch configuration. The status is not part of it.
@@ -54,7 +54,7 @@ type TaskSpec struct {
 	Image      string         `yaml:"image,omitempty" json:"image,omitempty"`
 	Command    []string       `yaml:"command,omitempty" json:"command,omitempty"`
 	Env        []EnvVar       `yaml:"env,omitempty" json:"env,omitempty"`
-	Resources  ResourceReqs   `yaml:"resources,omitempty" json:"resources,omitempty"`
+	Resources  ResourcesSpec  `yaml:"resources,omitempty" json:"resources,omitempty"`
 	Workspaces []WorkspaceRef `yaml:"workspaces,omitempty" json:"workspaces,omitempty"`
 	Debug      bool           `yaml:"debug,omitempty" json:"debug,omitempty"`
 }
@@ -65,8 +65,8 @@ type EnvVar struct {
 	Value string `yaml:"value,omitempty" json:"value,omitempty"`
 }
 
-// ResourceReqs holds the resource requests and limits of a Task.
-type ResourceReqs struct {
+// ResourcesSpec holds the resource requests and limits of a Task.
+type ResourcesSpec struct {
 	Requests ResourceList `yaml:"requests,omitempty" json:"requests,omitempty"`
 	Limits   ResourceList `yaml:"limits,omitempty" json:"limits,omitempty"`
 }

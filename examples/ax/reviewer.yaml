@@ -10,7 +10,8 @@
 #        -d '{"input": "Review pull request 42", "wait": true}' \
 #        http://atenet-router.ate-system.svc.cluster.local/v1/runs
 #
-# The same Task answers A2A at /a2a and MCP at /mcp on the same port.
+# The same Task answers A2A at /a2a on the same port, and GET /v1/status
+# gives its state at a glance. The MCP server comes with fw-workbench.
 #
 # Do not scrape this Task: a scrape through the router wakes it. Scrape an always-on fw of the same fleet (examples/observability).
 

@@ -17,8 +17,6 @@ const (
 	Listen = ":80"
 	// DefaultHome is the fw home on the durable volume.
 	DefaultHome = "/workspace/.fw"
-	// SurfaceName is the name of the surface that serves the ax metadata.
-	SurfaceName = "axmeta"
 	// BootstrapProfile is the name of the profile that runs a binding goal.
 	BootstrapProfile = "bootstrap"
 	// DefaultBootstrapTimeout is the time limit of a goal when
@@ -58,7 +56,6 @@ func BootstrapTimeout() time.Duration {
 //   - Every spec.mcp.servers entry joins Tools.MCP unless an entry with the
 //     same name exists. The fw.yaml entry wins. spec.mcp.registries entries
 //     are logged and skipped.
-//   - "axmeta" joins Surfaces.
 //   - A "bootstrap" profile joins Agents unless one exists. Its empty
 //     access block shows it to access.admins only.
 //   - FW_ATESPACE is set to the atespace of the Task when it is unset.
@@ -108,10 +105,6 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 		for _, r := range ws.Spec.Skills.Registries {
 			log.Warn("ax: skill registries are not supported; skipping", "workspace", ws.Metadata.Name, "provider", r.Provider, "project", r.Project, "query", r.Query)
 		}
-	}
-
-	if !slices.Contains(cfg.Surfaces, SurfaceName) {
-		cfg.Surfaces = append(cfg.Surfaces, SurfaceName)
 	}
 
 	if cfg.Agents == nil {

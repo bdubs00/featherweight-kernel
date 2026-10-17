@@ -32,6 +32,20 @@ func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, who)
 }
 
+// status answers GET /v1/status with the state of the agent at a glance:
+// the usage of the runs that the caller can view, the oldest approval that
+// waits, and the counts of runs by state. A control plane polls it, and
+// under ax the workbench reads it through the atenet router.
+func (s *server) status(w http.ResponseWriter, r *http.Request) {
+	st, err := view.StatusOf(r.Context(), s.a)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, st)
+}
+
 // getAgent answers GET /v1/agents/{name} with one profile, the role of the
 // caller, and the usage of its visible runs.
 func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {

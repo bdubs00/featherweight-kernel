@@ -19,7 +19,6 @@ import (
 	_ "github.com/bdubs00/featherweight-kernel/model/anthropic"
 	_ "github.com/bdubs00/featherweight-kernel/model/gemini"
 	_ "github.com/bdubs00/featherweight-kernel/model/openai"
-	_ "github.com/bdubs00/featherweight-kernel/surface/axmeta"
 	_ "github.com/bdubs00/featherweight-kernel/surface/metrics"
 	_ "github.com/bdubs00/featherweight-kernel/surface/native"
 	_ "github.com/bdubs00/featherweight-kernel/tools/a2a"

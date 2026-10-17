@@ -67,9 +67,6 @@ func TestApplyToConfig(t *testing.T) {
 	if cfg.Tools.MCP[1].Args[0] != "--stdio" {
 		t.Error("MCP args share memory with the manifest")
 	}
-	if n := countOf(cfg.Surfaces, "axmeta"); n != 1 {
-		t.Errorf("Surfaces = %v", cfg.Surfaces)
-	}
 	p, ok := cfg.Agents["bootstrap"]
 	if !ok {
 		t.Fatal("no bootstrap profile")
@@ -111,8 +108,8 @@ func TestApplyToConfig(t *testing.T) {
 	if cfg.Home != "/data/fw" || cfg.Tools.Files.Root != "/workspace/one/src" {
 		t.Errorf("Home, Root = %q, %q", cfg.Home, cfg.Tools.Files.Root)
 	}
-	if len(cfg.Tools.MCP) != 3 || countOf(cfg.Surfaces, "axmeta") != 1 {
-		t.Errorf("second call: MCP %d, Surfaces %v", len(cfg.Tools.MCP), cfg.Surfaces)
+	if len(cfg.Tools.MCP) != 3 {
+		t.Errorf("second call: MCP %d", len(cfg.Tools.MCP))
 	}
 	if got := os.Getenv(EnvAtespace); got != "team-a" {
 		t.Errorf("FW_ATESPACE overwritten: %q", got)
@@ -135,12 +132,13 @@ func TestApplyToConfigKeepsFleetIdentity(t *testing.T) {
 func TestApplyToConfigKeepsBootstrapProfile(t *testing.T) {
 	t.Setenv(EnvBootstrapTimeout, "3m")
 	own := fw.AgentProfile{System: "mine", Tools: []string{"bash"}}
-	cfg := &fw.Config{Agents: map[string]fw.AgentProfile{"bootstrap": own}, Surfaces: []string{"axmeta"}}
+	// The surfaces stay as they are: the metadata endpoints are no surface.
+	cfg := &fw.Config{Agents: map[string]fw.AgentProfile{"bootstrap": own}, Surfaces: []string{"native"}}
 	ApplyToConfig(cfg, nil, Bindings(nil, nil))
 	if !reflect.DeepEqual(cfg.Agents["bootstrap"], own) {
 		t.Errorf("bootstrap = %+v", cfg.Agents["bootstrap"])
 	}
-	if cfg.Tools.Files.Root != "/workspace" || !reflect.DeepEqual(cfg.Surfaces, []string{"axmeta"}) {
+	if cfg.Tools.Files.Root != "/workspace" || !reflect.DeepEqual(cfg.Surfaces, []string{"native"}) {
 		t.Errorf("Root %q, Surfaces %v", cfg.Tools.Files.Root, cfg.Surfaces)
 	}
 
@@ -176,14 +174,4 @@ func TestIdentity(t *testing.T) {
 	if a, n := Identity(nil); a != "" || n != "" {
 		t.Errorf("Identity(nil) = %q, %q", a, n)
 	}
-}
-
-func countOf(list []string, s string) int {
-	n := 0
-	for _, v := range list {
-		if v == s {
-			n++
-		}
-	}
-	return n
 }

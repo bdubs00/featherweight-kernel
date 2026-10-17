@@ -742,10 +742,9 @@ Every surface mounts on one `http.ServeMux`. The listener speaks HTTP/1.1 and h2
 | `/.well-known/agent-card.json`, `/a2a/*` | A2A server | default on |
 | `/metrics` | Prometheus (section 10) | always |
 | `/healthz`, `/readyz` | Health | always |
-| `/metadata/v1alpha1/ax/*`, `/metadata/v1alpha1/fw/*` | ax metadata | under ax |
 | gRPC guest services of `ax ssh` (section 11.12) | ax debug | under ax with `spec.debug: true` |
 
-The workbench mounts more routes on the same listener: `/mcp`, `/ui`, the browser sign-in, and the routes for people (the workbench architecture, section 2).
+The workbench mounts more routes on the same listener: `/mcp`, `/ui`, the browser sign-in, and the routes for people (the workbench architecture, section 2). Under ax, the metadata endpoints of the runner contract answer on a loopback listener of their own, `127.0.0.1:8099`, and not on this one (section 11.3).
 
 ```go
 type Surface interface {
@@ -772,6 +771,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | `GET /v1/tools` | List tools with their specifications. Each entry also has `text`, a plain phrase that says what the tool does. |
 | `GET /v1/skills` | List skills. |
 | `GET /v1/skills/{name}` | The `SKILL.md` text, or JSON with the file list under `Accept: application/json`. |
+| `GET /v1/status` | The state of the agent at a glance: the usage of the runs that the caller can view, the oldest approval that waits, and the counts of runs by state (section 11.8). |
 
 `profile` is an inline profile (section 12.5). Its fields are `system`, `instructions`, `skills`, `tools`, `model`, `effort`, `policy`, and `budget`. `budget`, at the top level and inside the profile, takes the seven limits of section 5.2. Examples of a request that the kernel refuses are an unknown model name and a child past the spawn limits. Such a request gets a 400 or a 409 problem document that names the field.
 
@@ -1005,9 +1005,9 @@ ax starts `/usr/local/bin/ax-task-runner` as PID 1 in every Task container. The 
 | `/workspace` | A durable volume, restored on resume |
 | `GET /readyz` on port 80 | 503 until workspaces are prepared, then 200 |
 | `GET /healthz` on port 80 | 200 once alive |
-| `GET /metadata/v1alpha1/ax/task` | The Task as YAML (optional) |
-| `GET /metadata/v1alpha1/ax/workspaces` | The Workspaces as YAML (optional) |
-| `spec.command` | Started as a supervised child with `AX_METADATA_URL` set |
+| `GET /metadata/v1alpha1/ax/task` on loopback | The Task as YAML (optional). Since ax commit 22954f6, the metadata endpoints answer on a loopback address only, `127.0.0.1:8099` in the stock runner, and not on port 80. |
+| `GET /metadata/v1alpha1/ax/workspaces` on loopback | The Workspaces as YAML (optional) |
+| `spec.command` | Started as a supervised child with `AX_METADATA_URL` set to the loopback address |
 | `SIGTERM` to PID 1 | Stop or suspend. Ten seconds of grace, then `SIGKILL`. |
 | `spec.debug: true` | Guest services over gRPC on port 80, multiplexed with h2c |
 
@@ -1020,13 +1020,13 @@ Two images are built. `fw:static` is `gcr.io/distroless/static` plus the binary,
 ### 11.3 Boot sequence under ax
 
 1. Read `AX_TASK_YAML` and `AX_WORKSPACES_YAML`. Set `FW_HOME` to `/workspace/.fw`.
-2. Listen on port 80. Answer `/healthz` with 200. If the Task sets `spec.debug: true`, start the guest services of `ax ssh` (section 11.12).
+2. Listen on port 80. Answer `/healthz` with 200. Serve the metadata endpoints on `127.0.0.1:8099`, or on the port of `--metadata-port`. If the Task sets `spec.debug: true`, start the guest services of `ax ssh` (section 11.12).
 3. For each workspace binding, in order, write `spec.files`, clone `spec.git`, and create `spec.skills.path`. Skip a binding whose marker exists.
 4. Write the marker at `$FW_HOME/ax/initialized-<path>`.
 5. If the binding has a `goal` and a model credential is present, run the `bootstrap` profile with that goal. The time limit comes from `AX_BOOTSTRAP_TIMEOUT`, default 10 minutes. The marker is written first, so a container killed during the goal does not run the goal again on resume.
 6. Answer `/readyz` with 200.
 7. Resume unfinished runs (section 4.5).
-8. If `spec.command` is empty, serve. If `spec.command` starts with `fw`, run that subcommand in process. Otherwise, start the command as a supervised child with `AX_METADATA_URL` set.
+8. If `spec.command` is empty, serve. If `spec.command` starts with `fw`, run that subcommand in process. Otherwise, start the command as a supervised child with `AX_METADATA_URL` set to the loopback address of step 2.
 
 The stock runner writes its marker under `/ax`, which is not on the durable volume. `fw` writes its marker under `/workspace/.fw`, so a resumed container does not repeat setup. If `fw` finds a marker under `/ax`, it also honors that marker.
 
@@ -1063,17 +1063,17 @@ If the atespace has a Gemini credential, ax injects `GEMINI_API_KEY`. ax does no
 
 ### 11.8 Status for the control plane
 
-The ax `TaskStatus` has fields `usage` (prompt and completion tokens) and `pendingApproval` (id, action, time). ax has no RPC for a runner to fill them yet. `fw` serves `GET /metadata/v1alpha1/fw/status` on port 80 with a JSON body in the same shape:
+ax has no RPC for a runner to report its state, and ax commit f0f16ff removed the fields `usage` and `pendingApproval` from `TaskStatus`, because nothing set or read them. ax keeps the meaning of an agent out of the Task. That layer is the kernel. `fw` serves `GET /v1/status` on its listener, behind the authentication of the native API, with a JSON body:
 
 ```json
 {
   "usage": { "promptTokens": 48210, "completionTokens": 3120 },
   "pendingApproval": { "id": "ap_7f3", "action": "bash: git push", "requestedAt": "2026-10-13T09:14:31Z" },
-  "runs": { "active": 1, "inputRequired": 1 }
+  "runs": { "active": 1, "inputRequired": 1, "total": 12 }
 }
 ```
 
-The ax controller, or any poller, reads it through the router. When ax adds a reporting RPC, a `Reporter` plug pushes the same data.
+The body counts the runs that the caller can view. `pendingApproval` is the oldest approval that waits, or `null`. The workbench, or any poller, reads the body through the atenet router. A later revision adds the idle state of the agent to it, so that a controller can suspend a Task that waits (KERNEL_SPLIT.md, section 3). If ax adds a reporting RPC, a `Reporter` plug pushes the same data.
 
 ### 11.9 Child runs and child tasks
 
@@ -1095,18 +1095,17 @@ Under ax, a later milestone creates a child ax Task through the `ax.v1alpha1.AX`
 
 ### 11.10 Local testing without a cluster
 
-`fw serve --task-file task.yaml --workspace-file ws.yaml` reads the manifests from files instead of the environment. These flags match the stock runner flags. The `--port` flag moves the listener off port 80 for a developer machine.
+`fw serve --task-file task.yaml --workspace-file ws.yaml` reads the manifests from files instead of the environment. These flags match the stock runner flags. The `--port` flag moves the listener off port 80 for a developer machine, and `--metadata-port` moves the metadata endpoints off `127.0.0.1:8099`.
 
 ### 11.11 Gaps in ax today
 
-These gaps exist in ax at the commit read on 2026-10-13. Each one maps to an item on the ax roadmap.
+These gaps exist in ax at commit 8d2ccf3, read on 2026-10-17. Each one maps to an item on the ax roadmap.
 
 - A Task has no goal field. `fw` takes the goal from `FW_GOAL`, from `spec.command`, from a message through the router, or from a queue.
 - The `Model` resource is not delivered to the runner. `fw` reads credentials from the environment (section 11.7).
 - There is no runner-to-control-plane status RPC. `fw` serves a status endpoint instead (section 11.8).
 - A Task has no address of its own. External A2A clients need a header-adding proxy (section 11.4).
 - The stock marker directory `/ax` is not durable. `fw` writes its marker under `/workspace` (section 11.3).
-- `ax ssh` sends no standard input. A bare `ax ssh <task>` starts `/bin/sh` with empty input, and the shell exits at once (section 11.12).
 - Agent Substrate v0.4.0, read on 2026-10-14, suspends a Task with `SIGKILL` after it saves `/workspace`. No `SIGTERM` comes first. `fw` writes no `fw.run.suspended` event, and the working time of a run handles the missing event (section 11.5).
 
 ### 11.12 Guest services and `ax ssh`
@@ -1133,7 +1132,7 @@ The `fw:static` image holds no shell, so `ax ssh <task>` with no command cannot 
 ax ssh reviewer -- fw events <run-id>
 ```
 
-At ax commit ac23328, `ax ssh` sends no standard input. A bare `ax ssh <task>` therefore starts `/bin/sh` with empty input, and the shell exits at once. The process service already takes input through `WriteProcessInput`. A later `ax` that sends input therefore needs no change in `fw`.
+Since ax commit 92d297e, `ax ssh` forwards standard input and Ctrl-C. A bare `ax ssh <task>` therefore opens a shell in the `fw:toolbox` image, and the process service takes the input through `WriteProcessInput`.
 
 ## 12. Malleability
 
@@ -1608,7 +1607,8 @@ tools/mcp/              MCP client as a ToolSource, a decision point, and a Conn
 tools/a2a/              A2A peers as a ToolSource
 bus/nats/ bus/redis/
 surface/native/         the native API for runs and agents, and its extension point
-surface/a2a/ surface/axmeta/ surface/metrics/
+surface/a2a/ surface/metrics/
+surface/axmeta/         the ax metadata endpoints on a loopback listener
 surface/view/           the shapes that the native routes return
 ax/                     runner contract: manifests, workspace setup, supervision
 ax/guest/               the guest services of ax ssh
@@ -1652,6 +1652,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
 
+The ax revision of 2026-10-17 followed upstream ax to commit 8d2ccf3. The metadata endpoints moved to a loopback listener at `127.0.0.1:8099`, and `AX_METADATA_URL` names it (sections 11.1 and 11.3). The status of the agent moved to `GET /v1/status` on the native API (sections 8.2 and 11.8). The manifest types took the keys `createTime` and `ResourcesSpec` of ax commit f0f16ff. The stdin gap of `ax ssh` closed with ax commit 92d297e (section 11.12).
+
 The split of 2026-10-17 divided featherweight-agent into two repositories. This repository, featherweight-kernel, keeps the agent runtime for one ax Task, and its binary is `fw`. The repository featherweight-workbench holds the workbench for people, and its binary is `fw-workbench`. The workbench took the page, the browser sign-in, the routes for people, and the MCP server. It also took the fleet driver, the `oidc` driver, and the tool `propose_agent`. The kernel gained `fw.RegisterDefaults` (section 12.6) and the extension point of the native surface (section 12.8). The command line moved to the public package `cli`. The package `surface/dashboard` became `surface/view`, which holds the shapes that the kernel routes return. The kernel defaults are now the surfaces native, A2A, and metrics, and `titles: input`. The contract of the package `fw` did not change. It still holds the hooks that the workbench drivers use, and the next step moves them out (the workbench architecture, section 7).
 
 The connections revision of 2026-10-16 let an MCP server entry act for the person who started a run (section 7.11). A person connects a service once, in the dashboard or through an MCP client. `fw` keeps the grant in an encrypted store and refreshes it under the rules of RFC 9700. A call that needs a grant pauses the run until the person connects. The native API added `/v1/connections` and the callback `/ui/connect/callback`. MCP added URL-mode elicitation for a connection and the tools `connections` and `disconnect`. `fw doctor` reports the connections.
@@ -1683,7 +1685,7 @@ The safeguards revision of 2026-10-13 came on top of the milestones. It added th
 - The language is Go. ax is Go, the ax runner embedding path is Go, and a static Go binary makes the smallest image.
 - The module path is `github.com/bdubs00/featherweight-kernel`. The workbench module is `github.com/bdubs00/featherweight-workbench`.
 - The Go version is 1.27, to match the ax module.
-- The ax contract comes from the ax repository at the commit read on 2026-10-13. ax is pre-release and expects breaking changes.
+- The ax contract comes from the ax repository at commit 8d2ccf3, read on 2026-10-17. ax is pre-release and expects breaking changes.
 - The A2A version is 1.0. The MCP revision is 2026-07-28. The Go MCP SDK from v1.7.0 targets that revision. It states that it keeps the deprecated features for at least twelve months, and the dual-era behavior depends on that.
 - `fw` implements the ax runner contract itself instead of embedding the ax `runner` package (section 11.2).
 - NATS is the recommended bus. Redis is the zero-new-infrastructure choice on an ax cluster.

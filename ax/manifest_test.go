@@ -97,7 +97,7 @@ func TestParseReviewerExample(t *testing.T) {
 	if !reflect.DeepEqual(task.Spec.Env, wantEnv) {
 		t.Errorf("env = %+v", task.Spec.Env)
 	}
-	wantRes := ResourceReqs{
+	wantRes := ResourcesSpec{
 		Requests: ResourceList{CPU: "500m", Memory: "1Gi"},
 		Limits:   ResourceList{CPU: "2", Memory: "4Gi"},
 	}
