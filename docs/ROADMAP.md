@@ -38,26 +38,26 @@ The package `fw` still holds about 2,800 lines for the workbench: `fleet.go`, `g
 
 After each move, `fw.Config` loses the matching key. The keys `fleet`, `grants`, and `titles` are gone. The keys `access` and `mcp` remain. `access.external` and the roles beyond "who can call this Task" are the next move, and the server surface `mcp` of the workbench still reads its block from the kernel configuration.
 
-## Stage 4: the value of the kernel to ax
+## Stage 4: the shape of a fleet
 
-Do these in order. KERNEL_SPLIT.md, section 3, explains items 2 and 4 to 7. One use case orders them. A person in Claude Code splits a large job into many pieces and sends them to the fleet. Every run acts as that person at the services behind agentgateway, and nothing runs on the laptop.
+KERNEL_SPLIT.md, section 7, defines a worker and a front. This stage makes a fleet take that shape, in the order below. One use case orders it. A person in Claude Code splits a large job into many pieces and sends them to the fleet, every run acts as that person at the services behind agentgateway, and nothing runs on the laptop.
 
-1. The token broker. A grant has one holder, and a Task is the wrong holder, because ax rolls its volume back on a restore. The front, the fw-workbench Deployment outside the sandboxes, keeps every grant and runs every refresh. A Task runs a `fw.PersonTokens` that asks the front for the access token of a person at a server. The request carries the workload identity of the Task, and the front checks that the fleet record of the caller lists a run of that person. The refresh token never enters a sandbox, and an access token lives an hour there. The person connects once, in the dashboard of the front. A finished connection becomes a notice on the bus, and each member turns it into `Agent.Connected`. The package `connections` of the workbench serves the route, and a kernel driver is the client. Done on 2026-10-17: the kernel package `tokens` with the key `tokens`, the routes under `/v1/tokens` on the front, and the notice `fw.connection.connected` on the bus. The lab run against the homelab cluster is still open.
-2. A `Spawner` plug with an ax driver that creates a child Task. Done on 2026-10-17: `spawn.driver: ax`, the event `fw.run.child` in the ledger of the parent, and the principal of a run from a trusted caller on the native API. The lab run is still open, and it needs the ax server and the router in the egress policy of the parent Task.
-3. An enqueue path on the front, so an MCP client puts run requests on the intake queue of a profile. A batch id through the run annotator, so the runs of one job across many Tasks have one name.
-4. The idle state in the status body.
-5. A controller in the workbench that reads the idle state and calls `SuspendTask`.
-6. Budgets from the Task environment.
-7. Build tags for a smaller binary.
+1. The token broker. Done on 2026-10-17: the kernel package `tokens` with the key `tokens`, the routes under `/v1/tokens` on the front, and the notice `fw.connection.connected` on the bus. The front keeps every grant and runs every refresh, and a worker gets the access token of a person for a run of that person. The refresh token never enters a Task.
+2. The `Spawner` plug with the ax driver. Done on 2026-10-17: `spawn.driver: ax` gives each child of `spawn_task` a Task of its own, the ledger of the parent records the child in `fw.run.child`, and a trusted caller names the person of a run on the native API.
+3. The fleet from the platforms. The front reads the Task list of the atespaces that `workbench.fleet.atespaces` names from the ax API, and the state of every run from the egress stream that `workbench.fleet.egress` names. It reads the running Tasks once at start and lives on the stream after that. The fleet record and its heartbeat leave the workers, and a worker is the bare `fw` binary. The members that still publish records stay visible until the last one is gone, and then the record and the `Retainer` go.
+4. The enqueue path and the batch id. The MCP server of the front gets a tool that puts run requests on the intake queue of a profile, and the run annotator gives every run of one job a batch id, so the runs of one job across many Tasks have one name in every list and every metric.
+5. The export of a worker. Metrics go to an OpenTelemetry collector over OTLP, next to the Prometheus pull, with the standard `OTEL_EXPORTER_OTLP_*` variables, and each ledger event goes out as an OTLP log record through an `fw.Observer`. A Task that sleeps stops reporting, and no scrape wakes it. A collector example sits next to `examples/observability/prometheus.yml`. The Operator view of the page gives way to a link to Grafana, and the fleet gauges go.
+6. The acceptance test. A small batch of the driving job runs end to end on the lab cluster, as one person, through Claude Code, the front, the queue, the workers, and the broker. This is the first time the whole chain carries real work, and it decides what else gets cut.
+7. The idle state in the status body, and a controller in the front that reads it and calls `SuspendTask`, so idle Tasks, including the child Tasks of the spawner, stop costing money.
 
-That job is the acceptance test of this stage. A small batch of its pieces runs end to end on the lab cluster, as one person, before the stage ends.
+## Stage 5: the rest of the value to ax
 
-## Stage 5: export instead of view
+KERNEL_SPLIT.md, section 3, explains these items.
 
-1. Push metrics over OTLP, next to the Prometheus pull at `/metrics`. The standard `OTEL_EXPORTER_OTLP_*` variables configure it. A Task that sleeps stops reporting, and no scrape wakes it.
-2. Export each ledger event as an OTLP log record through an `fw.Observer`. The ledger is the trajectory that the ax roadmap asks for at the runner layer.
-3. Add a collector example next to `examples/observability/prometheus.yml`.
-4. Remove the fleet gauges after the OTLP push exists.
+1. Budgets from the Task environment, documented as the ax method.
+2. Build tags for a smaller worker binary.
+3. The move of `access.external` and the roles beyond "who can call this Task" to the front, with the control plane deciding for the whole fleet.
+4. A workload identity for the workers, so the front recognizes a Task without the shared static token, once Substrate ships it.
 
 ## Rules for every stage
 

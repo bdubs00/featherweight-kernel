@@ -140,3 +140,18 @@ These counts are non-test lines on 854ebc4. Their tests move with them.
 | `cmd/fw/internal/cli/identity.go` | 342 |
 
 `fw/external.go` and `fw/authz.go` split between the two modules. They are not in the total.
+
+## 7. The shape of a fleet
+
+Added on 2026-10-17, after the token broker and the spawner. This section defines the two kinds of process of a fleet, and it rules over the sections above where they differ.
+
+A worker is a kernel. It is the `fw` binary in one ax Task, with four settings and no workbench code: `bus.intake`, the queue that it pulls run requests from; `bus.egress`, the subject prefix that it publishes its lifecycle events to, narrowed by `egressTypes`; `tokens.url`, the front that gives it the tokens of people; and the ax identity that it reads from its Task. A worker publishes no record of itself and answers no view. It runs, it pauses for a person, and it tells the bus what happened.
+
+A front is a window. It is the `fw-workbench` binary as a Deployment outside the sandboxes, with no agents of its own, replicated as needed. It reads the list of Tasks from the ax API for membership, addresses, and phases, and the egress stream of the workers for the state of every run, and it keeps that view in memory with the projection of the kernel. It serves people over MCP and the page, forwards an action to the owner of a run through the atenet router, brokers the tokens of people, puts work on the intake queues, and later suspends the idle Tasks. The front never polls a Task for its state, because a request through the router wakes a Task that sleeps; it reads the running Tasks once when it starts, which wakes nobody, and lives on the stream after that.
+
+The platforms keep the state. ax keeps the Tasks. NATS carries the work in and the events out. The ledger in each Task keeps the run. Prometheus, an OpenTelemetry collector, and a trace store keep the numbers and the traces of thousands of runs, and Grafana shows them. The front keeps the grants of people and nothing else of its own. When a decision comes up, the question is which of these places owns the fact, and the code goes there.
+
+Authorization does not change. The front decides what a person sees with the rules of the kernel: a person sees the runs that they started, and the runs of the agents whose access block names them, and `access.external` hands the same question to a control plane with the name of the member. The access blocks of the agents come from the configuration of the front, which is the same `fw.yaml` as the workers run, or from the control plane. ax has no notion of a person, so the front is the one that puts a person in front of the Task list.
+
+What this retires: the fleet record and its heartbeat, which each member computed for the front, and with them the `Retainer` of the bus; the Operator view of the page, which Grafana replaces; and the idea that a process on standard input and output joins a fleet. What this keeps: the fleet view and its forwarding, the token broker, the spawner, the connections, the teams, the titles, and the profile writes, all in the front.
+
