@@ -1,0 +1,100 @@
+# A code review agent as an ax Task running fw.
+#
+#   ax apply -f examples/ax/reviewer.yaml
+#   ax watch task reviewer
+#
+# Send it work from inside the cluster through the atenet router:
+#
+#   curl -H 'ate-target-actor: default/reviewer' \
+#        -H 'Content-Type: application/json' \
+#        -d '{"input": "Review pull request 42", "wait": true}' \
+#        http://atenet-router.ate-system.svc.cluster.local/v1/runs
+#
+# The same Task answers A2A at /a2a and MCP at /mcp on the same port.
+#
+# Do not scrape this Task: a scrape through the router wakes it. Scrape an always-on fw of the same fleet (examples/observability).
+
+apiVersion: ax.io/v1alpha1
+kind: Workspace
+metadata:
+  name: reviewer-ws
+  atespace: default
+spec:
+  git:
+    - name: app
+      repo: "https://github.com/example/app.git"
+      branch: main
+  files:
+    # Files land under the workspace path. fw reads .fw/fw.yaml and .fw/agents/*.yaml.
+    - path: .fw/fw.yaml
+      content: |
+        auth:
+          mode: none            # the atenet router is the perimeter inside the cluster
+        model: anthropic/claude-opus-5-5
+        bus:
+          driver: redis         # reuse the Redis that ax deploys
+          url: redis://redis.ax-system.svc.cluster.local:6379
+          egress: fw.events
+        tools:
+          builtin: [bash, files, http]
+          files:
+            root: /workspace
+    - path: .fw/agents/reviewer.yaml
+      content: |
+        name: reviewer
+        system: |
+          You review pull requests in the repository under /workspace/app.
+          Read the diff, run the tests, and report findings with file and line.
+          Do not push, merge, or change the remote.
+        tools: [bash, files, http, "git.*"]
+        policy:
+          deny: ["bash: git push*", "bash: git merge*"]
+        budget:
+          maxTurns: 100
+          deadline: 30m
+  mcp:
+    servers:
+      - name: git
+        endpoint: "http://git-mcp.default.svc.cluster.local:8080"
+  skills:
+    path: "/workspace/.agents/skills"
+---
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: reviewer
+  atespace: default
+spec:
+  # fw:toolbox carries git and build tools. /usr/local/bin/ax-task-runner is a symlink to fw.
+  image: "ghcr.io/bdubs00/featherweight-kernel:toolbox"
+  # No command: fw serves and waits for work. ax suspends it when idle and the router wakes it.
+  env:
+    - name: FW_AGENT
+      value: reviewer
+    # ax does not deliver Model credentials to the runner yet. See docs/ARCHITECTURE.md section 11.7.
+    - name: ANTHROPIC_API_KEY
+      value: "replace-me"
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  workspaces:
+    - name: reviewer-ws
+      path: /workspace
+      goal: "Install the toolchain that the repository under app/ needs and run its test suite once."
+  debug: false
+---
+apiVersion: ax.io/v1alpha1
+kind: Model
+metadata:
+  name: default-model
+  atespace: default
+spec:
+  provider: anthropic
+  model: claude-opus-5-5
+  secretKey:
+    name: anthropic-api-secret
+    key: ANTHROPIC_API_KEY

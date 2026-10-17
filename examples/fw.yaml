@@ -1,0 +1,302 @@
+# fw.yaml: the configuration manifest for one fw process.
+#
+# Every key has a default, and this file shows each key with that default.
+# Resolution order: Go options, then this file, then FW_* variables.
+#
+# Variables in this file. A value expands ${NAME} and ${NAME:-default} from
+# the environment before fw reads it, and $$ is one $. The default applies
+# when NAME is unset or empty. A reference to an unset variable with no
+# default stops the load with an error that names the variable, the key,
+# and the file. The expanded text is read as if it was written here: a
+# plain ${PORT} that expands to 8080 is a number, and a quoted "${PORT}" is
+# a string. Values that arrive as FW_* variables and prompts read from a
+# file do not expand.
+#
+# Variables in place of this file. A key maps to a variable by uppercasing
+# and joining with underscores: bus.url is FW_BUS_URL, and
+# tools.searchThreshold is FW_TOOLS_SEARCH_THRESHOLD. A list of strings is
+# comma-separated. A map and a named list take the key or the entry name
+# between the prefix and the field:
+#
+#   FW_MODELS_FAST=anthropic/claude-haiku-5-5           sets models.fast
+#   FW_TOOLS_MCP_GIT_ENDPOINT=http://git-mcp:8080/mcp   sets tools.mcp, entry git, endpoint
+#   FW_PROVIDERS_OPENAI_BASE_URL=http://vllm:8000/v1    sets providers.openai.baseUrl
+#   FW_TOOLS_BASH_ENV_NATS_URL=nats://nats:4222         sets tools.bash.env.NATS_URL
+#
+# An entry that this file does not have is created. The entry name ends
+# where the longest known field starts, so FW_TOOLS_MCP_GIT_MCP_ENDPOINT
+# names the entry git_mcp. A key segment becomes a name in lowercase, a
+# header name in canonical form (X_API_KEY is X-Api-Key), an option name in
+# lower camel case (MAX_TOKENS_FIELD is maxTokensField), a variable name
+# as given, or a selector (ANTHROPIC_CLAUDE_OPUS_5_5 is
+# anthropic/claude-opus-5-5) for prices. `fw config` prints the result
+# with secrets masked.
+
+listen: ":8080"                 # ax runner mode forces :80
+home: ""                        # default: /workspace/.fw under ax, ./.fw elsewhere
+
+tls:                            # TLS on the listener; the default is plain HTTP with unencrypted HTTP/2
+  provider: ""                  # "" | file | spiffe: file uses cert and key, spiffe serves the X.509-SVID of the workload
+  cert: ""                      # file: the PEM certificate chain
+  key: ""                       # file: the PEM private key
+  clientCA: ""                  # PEM bundle that signs client certificates; empty is the system roots
+  clientAuth: none              # none | request | require: whether a client presents a certificate
+
+auth:
+  mode: oidc,spiffe,token       # one mode, or several tried in order: token | none | oidc | spiffe. "none" must be explicit; the default is token.
+  tokenEnv: FW_API_TOKEN        # token: the secret that holds the bearer token
+  oidc:                         # oidc: a bearer token from an OpenID Connect issuer; its discovery document gives the keys
+    issuer: https://idp.example.com   # an https:// URL; insecure: true allows http:// for a test
+    audience: [fw]              # accepted aud claims: a client id, or the public URL of this server
+    jwksUrl: ""                 # the key set, when it is not the one in the discovery document
+    groupsClaim: groups         # the claim that fills the groups of the principal; group:<name> entries match them
+    nameClaim: email            # the claim that fills the name of the principal
+    scopes: []                  # the scopes that the protected-resource metadata advertises
+    ca: ""                      # PEM bundle for the issuer; empty is the system roots
+    insecure: false             # allows an http:// issuer, for a test
+    # Browser sign-in at /ui with the authorization code flow and PKCE (docs/ARCHITECTURE.md section 13.1).
+    # clientId: fw-dashboard                          # the client id at the issuer, and a value turns sign-in on. FW_AUTH_OIDC_CLIENT_ID
+    #                                                 # A tools.mcp entry with auth.oauth.grant: user and no clientId uses this client.
+    # clientSecret: FW_OIDC_CLIENT_SECRET             # the secret that holds the client secret. Empty is a public client.
+    # redirectUrl: https://fw.example.com/ui/callback # the callback that the issuer knows. Empty is /ui/callback on the public address.
+  spiffe:                       # spiffe: a JWT-SVID bearer token, or an X.509-SVID client certificate
+    trustDomain: example.org    # the trust domain of the accepted identities, a bare host name
+    bundle: ""                  # a file or URL of the trust bundle in JWKS form; empty reads the Workload API
+    socket: ""                  # the Workload API socket; empty is SPIFFE_ENDPOINT_SOCKET
+    audience: [fw]              # accepted JWT-SVID audiences
+    x509: false                 # accept an X.509-SVID as a client certificate; needs tls.clientAuth
+
+access:                         # who does what; an entry is a subject, a glob, group:<name>, kind:<kind>, issuer:<url>, or "*"
+  default: open                 # open: an agent with no access block is open to every caller as an operator; closed: admins only
+  admins: ["local:*"]           # admins own every agent; local:* is the user that runs fw mcp or fw agents on the host
+  creators: []                  # who can create agents through the API; empty is the admins, plus everyone when default is open
+  teams: []                     # glob patterns over OIDC groups that count as teams; empty makes every group a team; FW_ACCESS_TEAMS (section 13.6)
+  # external: { mcp: control, tool: authorize }   # a control plane decides every request, and the entries above do not apply; FW_ACCESS_EXTERNAL_MCP
+
+model: anthropic/claude-opus-5-5
+models:                         # named selectors that profiles can reference; FW_MODELS_<NAME>
+  fast: anthropic/claude-haiku-5-5
+effort: high                    # low | medium | high | xhigh | max
+
+providers:                      # one connection per provider; FW_PROVIDERS_<NAME>_BASE_URL and the other fields
+  anthropic:
+    baseUrl: ""                 # replaces the endpoint of the provider; empty is the public API
+    apiKeyEnv: ANTHROPIC_API_KEY  # the secret that holds the API key
+  gemini:
+    baseUrl: ""
+    apiKeyEnv: GEMINI_API_KEY
+  openai:
+    baseUrl: ${OPENAI_BASE_URL:-https://api.openai.com/v1}   # a vLLM or Ollama server speaks the same API
+    apiKeyEnv: OPENAI_API_KEY
+    headers: {}                 # extra headers on every request; values resolve through Secrets; FW_PROVIDERS_OPENAI_HEADERS_<NAME>
+    timeout: 0s                 # one request; 0 is the default of the adapter
+    tls:
+      ca: ""                    # PEM bundle; default is the system roots
+      cert: ""                  # client certificate and key for mutual TLS
+      key: ""
+      insecure: false           # development only
+    options:                    # read by the OpenAI adapter; FW_PROVIDERS_OPENAI_OPTIONS_<NAME>
+      reasoning: auto           # auto | on | off: send the reasoning effort
+      maxTokensField: auto      # auto | max_tokens | max_completion_tokens
+      authHeader: ""            # empty sends Authorization: Bearer; a name such as api-key sends the key in that header
+      organization: ""          # the OpenAI-Organization header
+      project: ""               # the OpenAI-Project header
+      promptCacheKey: auto      # auto | on | off: send a prompt_cache_key per run
+      parallelToolCalls: "true" # false asks for one tool call per turn
+      idleTimeout: 120s         # a stream with no event for this long fails
+      mediaTypes: auto          # attachments that the model reads: auto (images, plus PDF for api.openai.com), none, or a list
+
+secrets:
+  driver: env                   # env | vault | gsm
+  options: {}                   # driver options; FW_SECRETS_OPTIONS_<NAME>
+
+ledger:
+  driver: file                  # file | nats | redis | sqlite
+  path: ""                      # file: the directory; default <home>/runs
+  url: ""                       # nats and redis: the server
+  options: {}                   # driver options; FW_LEDGER_OPTIONS_<NAME>
+
+bus:
+  driver: mem                   # mem | nats | redis | kafka
+  url: ""                       # nats://nats:4222, redis://redis:6379, kafka://broker:9092
+  intake: ""                    # queue to pull run requests from, for example fw.jobs.reviewer
+  egress: ""                    # subject prefix to publish ledger events to, for example fw.events
+  egressTypes: []               # empty publishes every type
+  options: {}                   # driver options; FW_BUS_OPTIONS_<NAME>
+
+grants:                         # where fw keeps the grants that people give it (docs/ARCHITECTURE.md section 7.11)
+  store: file                   # file | memory | a registered driver; FW_GRANTS_STORE
+  dir: ""                       # file: the directory; default <home>/grants
+  key: FW_GRANT_KEY             # the Secrets name of the key that encrypts the file store; without it, a random key in grant.key in dir
+
+tools:
+  builtin: [bash, files, http, memory, skill, clock, ask_user, spawn_task, await_task]   # the workbench adds propose_agent
+  files:                        # the workspace of the files tool and bash (section 7.9)
+    root: /workspace
+    deny: [.env, ".env.*", "*.pem", "*.key", .netrc, "**/.git/config"]   # never read or written; .gitignore patterns
+    readOnly: [.git]            # read, never written
+    maxFileBytes: 8388608       # the largest file that is read or written
+  http:
+    allow: ["https://api.github.com/*"]
+  bash:
+    env:                        # variables that every command starts with; values resolve through Secrets; FW_TOOLS_BASH_ENV_<NAME>
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
+    timeout: 0s                 # one command; 0 leaves the limit to tools.limits
+  memory:
+    scope: agent                # agent: notes per profile under <home>/memory/agents/<agent> | shared: one set under <home>/memory/shared
+  limits:                       # every tool call, from the built-in tools, MCP servers, and Go options alike
+    maxInputBytes: 262144       # a larger input does not run
+    maxOutputBytes: 102400      # a larger result keeps its head and its tail
+    timeout: 10m
+    perTool:                    # a tool name or a glob; an exact name wins; FW_TOOLS_LIMITS_PER_TOOL_<NAME>_MAX_OUTPUT_BYTES
+      http:
+        maxOutputBytes: 1048576
+      "git.*":
+        timeout: 2m
+  skills: []                    # directories that hold skills; empty is <home>/skills
+  mcp:                          # merged by name with spec.mcp.servers from the ax Workspace; fw.yaml wins; FW_TOOLS_MCP_<NAME>_ENDPOINT
+    - name: git
+      endpoint: ${GIT_MCP_ENDPOINT:-https://git-mcp.default.svc.cluster.local:8443/mcp}
+      tls:
+        ca: /etc/fw/ca.pem      # PEM bundle; default is the system roots
+        cert: ""                # client certificate and key for mutual TLS
+        key: ""
+        insecure: false         # development only
+      auth:
+        bearer: GIT_MCP_TOKEN   # a Secrets name; sent as Authorization: Bearer
+      headers: {}               # extra headers on every request; values resolve through Secrets
+      timeout: 60s
+      trusted: true             # treat the tool annotations of the server as true
+    - name: billing
+      endpoint: https://mcp.billing.example.com/mcp
+      auth:
+        oauth:                  # OAuth 2.1 client_credentials; discovery per RFC 9728 on the first 401
+          clientId: fw-reviewer
+          clientSecret: BILLING_MCP_CLIENT_SECRET
+          scopes: [invoices:read]
+    - name: fs
+      command: npx              # stdio transport; credentials come from the environment
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+    - name: planner
+      endpoint: https://planner.default.svc.cluster.local:8443/mcp
+      auth:
+        spiffe:                 # sends a JWT-SVID of this workload as the bearer token, so no shared secret is needed
+          audience: planner     # the audience of the JWT-SVID; empty is the endpoint URL
+    # - name: control           # the control plane that access.external and policy.external name; the model never sees the tools of this server
+    #   endpoint: https://control.example.com/mcp
+    #   auth: { spiffe: { audience: control } }
+    # Two entries that act for the person who started the run (docs/ARCHITECTURE.md section 7.11).
+    # A call pauses the run until that person connects the service in the dashboard or through an MCP client.
+    # - name: tickets             # trusts the sign-in issuer of auth.oidc, here Keycloak, so it uses the sign-in client
+    #   title: Tickets            # the name of the service for a person; default is the entry name
+    #   endpoint: https://tickets.example.com/mcp
+    #   auth:
+    #     oauth:
+    #       grant: user           # client (the default) acts as the agent; user acts for the person. FW_TOOLS_MCP_TICKETS_AUTH_OAUTH_GRANT
+    #       exchange:             # RFC 8693 token exchange, for an issuer that ignores the resource parameter, such as Keycloak
+    #         audience: tickets-mcp   # the client id of the MCP server at the issuer
+    # - name: docs                # has an authorization server of its own, found through the RFC 9728 metadata of the server
+    #   title: Docs
+    #   endpoint: https://docs.example.net/mcp
+    #   auth:
+    #     oauth:
+    #       grant: user
+    #       clientId: fw-docs     # the client of fw at that authorization server
+    #       clientSecret: DOCS_MCP_CLIENT_SECRET   # a Secrets name
+    #       issuer: ""            # the authorization server; empty reads the metadata of the MCP server
+    #       scopes: [docs:read]
+    #       offline: true         # ask for offline_access; set false for a server without it, and use authParams
+    #       authParams: {}        # more parameters of the authorization request, such as { access_type: offline, prompt: consent }
+  peers:                        # A2A peers, each becomes the tool ask_<name>; FW_TOOLS_PEERS_<NAME>_AX
+    - name: reviewer
+      ax: default/reviewer      # reached through the atenet router
+    - name: billing
+      card: ${BILLING_CARD_URL:-https://billing.internal/.well-known/agent-card.json}
+  searchThreshold: 24           # above this many tools, use tool search with deferred loading
+
+policy:
+  default: allow
+  ask: [destructive]            # flags or tool names
+  deny: []
+  external: null                # { mcp: control, tool: decide } or { bus: fw.policy, timeout: 5s }; it replaces the rules above, and a profile can only tighten it
+
+budget:
+  maxTurns: 200
+  maxTokens: 2000000
+  maxCostUSD: 0                 # 0 is off; needs prices
+  deadline: 2h                  # working time; time spent waiting for a person, a follow-up, or a wake does not count
+  maxToolCalls: 1000            # tool calls in one run
+  maxCallsPerTurn: 32           # tool calls in one model response
+  maxRepeats: 5                 # the same call this many times in a row fails the run; a cycle of two or three calls counts
+
+compaction:                     # a long run replaces its history with a summary (docs/ARCHITECTURE.md section 5.4)
+  at: 150000                    # estimated tokens of context that start a summary; 0 is off. An overflow error from the model also starts one.
+  model: ""                     # the model of the summary call, a selector or a name from models; empty is the model of the run
+
+titles: input                   # input: the first sentence of the input, with no extra call. model: a short title from compaction.model, else the model of the run; the workbench sets it. FW_TITLES
+
+time:                           # the clock of the agent (docs/ARCHITECTURE.md section 5.8)
+  zone: ""                      # an IANA name such as America/Chicago, or UTC; empty is the zone of the system, UTC in a sandbox; FW_TIME_ZONE
+  noteAfter: 10m                # a gap longer than this since the last model response adds a time note; 0 is off
+
+spawn:                          # child runs through spawn_task
+  maxDepth: 3                   # 1 lets a run start children, 2 lets those start children
+  maxChildren: 16               # child runs that one run can start in its life
+
+prices: {}                      # "anthropic/claude-opus-5-5": { input: 4.00, output: 20.00 } per million tokens
+
+agents:                         # profiles; also one file each under <home>/agents/; FW_AGENTS_<NAME>_MODEL and the other fields
+  default:
+    description: ""             # one line that a listing and a parent run see
+    system: prompts/default.md  # the text, or the path of a file that holds it
+    instructions: []            # more texts, or files, that follow the system prompt in order
+    skills: null                # globs over skill names; null is every skill, [] is none
+    tools: ["*"]                # globs over tool names; empty is every tool
+  reviewer:
+    description: Reviews code changes and reports findings
+    system: prompts/reviewer.md
+    instructions: ["Say when a finding is a guess."]
+    skills: ["review-*"]
+    tools: [files, http, "git.*"]
+    model: fast
+    effort: medium
+    timeZone: America/Chicago   # the zone of the runs of this profile; empty is time.zone
+    policy:
+      ask: []                   # read-only profile, nothing to ask about
+    access:                     # who owns and uses this agent; a profile without it follows access.default
+      owners: ["alice@example.com"]           # manage the profile, and everything below
+      operators: ["group:platform-team"]      # start runs, send follow-ups, approve, cancel
+      viewers: ["spiffe://example.org/ns/prod/*", "kind:workload"]  # read runs and their ledgers
+  bootstrap:                    # used for ax Workspace goals
+    system: prompts/bootstrap.md
+    tools: [bash, files]
+    budget:
+      deadline: 10m
+
+surfaces: [native, a2a, metrics]   # ax metadata and guest services mount automatically under ax; the workbench adds mcp
+a2a:
+  name: featherweight
+  description: A featherweight agent
+  url: ""                       # public base URL on the agent card; default is built from listen
+mcp:                            # the MCP server of the workbench at /mcp (POST only) and over stdio with `fw-workbench mcp`
+  path: /mcp
+  origins: []                   # allowed Origin values; a request without Origin is always allowed
+  expose: ["git.*"]             # local or upstream tools to re-export through /mcp
+  tasks: true                   # advertise io.modelcontextprotocol/tasks so long runs return a task handle (waits for SDK support)
+  # The approval retry state is signed with the secret FW_MCP_STATE_KEY; set it so that
+  # every replica verifies the same signature. Without it each process uses a random key.
+  taskTTL: 24h
+  auth:                         # inherits auth.mode; these keys matter in oauth mode only
+    authorizationServers: []    # served in /.well-known/oauth-protected-resource
+    audience: ""                # canonical URL of this server; default is built from listen and path
+
+ax:
+  server: ax-server.ax-system.svc.cluster.local:8080   # for spawn_task
+  router: atenet-router.ate-system.svc.cluster.local   # for ax: peers
+
+telemetry:
+  metrics: /metrics
+  log: info                     # debug | info | warn | error
+  # OTLP traces use OTEL_EXPORTER_OTLP_ENDPOINT and the other standard OTEL_* variables.
+
+maxRuns: 16                     # runs in flight at once; more wait in the queue

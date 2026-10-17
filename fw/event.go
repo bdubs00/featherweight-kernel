@@ -1,0 +1,365 @@
+package fw
+
+import (
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+// SpecVersion is the CloudEvents version of every ledger event.
+const SpecVersion = "1.0"
+
+// Event is one ledger entry in the CloudEvents 1.0 shape.
+type Event struct {
+	SpecVersion string          `json:"specversion"`
+	ID          string          `json:"id"`
+	Source      string          `json:"source"`
+	Type        string          `json:"type"`
+	Time        time.Time       `json:"time"`
+	Subject     string          `json:"subject"` // the run id
+	Seq         uint64          `json:"seq"`
+	TraceParent string          `json:"traceparent,omitempty"`
+	Data        json.RawMessage `json:"data,omitempty"`
+}
+
+// Event types. The data shape of each is the struct with the matching name.
+const (
+	EvRunQueued         = "fw.run.queued"
+	EvRunStarted        = "fw.run.started"
+	EvMessageReceived   = "fw.message.received"
+	EvTurnStarted       = "fw.turn.started"
+	EvModelRequested    = "fw.model.requested"
+	EvModelResponded    = "fw.model.responded"
+	EvToolRequested     = "fw.tool.requested"
+	EvToolResponded     = "fw.tool.responded"
+	EvToolProgress      = "fw.tool.progress"
+	EvFileChanged       = "fw.file.changed"
+	EvApprovalRequested = "fw.approval.requested"
+	EvApprovalDecided   = "fw.approval.decided"
+	EvContextCompacted  = "fw.context.compacted"
+	EvBudgetExceeded    = "fw.budget.exceeded"
+	EvError             = "fw.error"
+	EvTurnFinished      = "fw.turn.finished"
+	EvRunSuspended      = "fw.run.suspended"
+	EvRunResumed        = "fw.run.resumed"
+	EvRunFinished       = "fw.run.finished"
+	EvLoopDetected      = "fw.loop.detected"
+	EvRunTitled         = "fw.run.titled"
+	// EvToolSend is published on the bus by the send tool. It is not a ledger event.
+	EvToolSend = "fw.tool.send"
+)
+
+// IsTerminal reports whether an event type ends a run.
+func IsTerminal(typ string) bool { return typ == EvRunFinished }
+
+// NewEvent builds an event for a run. Seq and Source are set by the ledger.
+func NewEvent(runID, typ string, data any) (Event, error) {
+	var raw json.RawMessage
+	if data != nil {
+		b, err := json.Marshal(data)
+		if err != nil {
+			return Event{}, fmt.Errorf("fw: marshal %s data: %w", typ, err)
+		}
+		raw = b
+	}
+	return Event{
+		SpecVersion: SpecVersion,
+		ID:          NewID(),
+		Type:        typ,
+		Time:        time.Now().UTC(),
+		Subject:     runID,
+		Data:        raw,
+	}, nil
+}
+
+// MustEvent is NewEvent for data that always marshals.
+func MustEvent(runID, typ string, data any) Event {
+	e, err := NewEvent(runID, typ, data)
+	if err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// Decode unmarshals the event data into v.
+func (e Event) Decode(v any) error {
+	if len(e.Data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(e.Data, v)
+}
+
+// Origins of work.
+const (
+	OriginHTTP = "http"
+	OriginA2A  = "a2a"
+	OriginMCP  = "mcp"
+	OriginBus  = "bus"
+	OriginCLI  = "cli"
+	OriginTool = "tool"
+)
+
+// Run outcomes.
+const (
+	OutcomeCompleted = "completed"
+	OutcomeFailed    = "failed"
+	OutcomeCanceled  = "canceled"
+)
+
+// RunQueuedData is the payload of fw.run.queued. Instructions and Profile
+// come from the request (see RunRequest). Depth is 0 for a top-level run
+// and one more than the depth of the parent for a child run.
+type RunQueuedData struct {
+	Agent        string            `json:"agent"`
+	Input        string            `json:"input"`
+	Instructions string            `json:"instructions,omitempty"`
+	Profile      *AgentProfile     `json:"profile,omitempty"`
+	Budget       *Budget           `json:"budget,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+	Origin       string            `json:"origin"`
+	Principal    string            `json:"principal,omitempty"`
+	// PrincipalKind is the kind of the principal, such as user, when the
+	// caller that started the run is the principal.
+	PrincipalKind string   `json:"principalKind,omitempty"`
+	Parent        string   `json:"parent,omitempty"`
+	Depth         int      `json:"depth,omitempty"`
+	Files         []Block  `json:"files,omitempty"` // file blocks that reference the attachments
+	Teams         []string `json:"teams,omitempty"` // the teams of the principal at the start (section 13.6)
+	// ExtraTools names the tools that the inline profile gives the run
+	// beyond the tool list of its named profile, so every surface can tell
+	// the person.
+	ExtraTools []string `json:"extraTools,omitempty"`
+}
+
+// RunStartedData is the payload of fw.run.started.
+type RunStartedData struct {
+	Model string   `json:"model"`
+	Tools []string `json:"tools"`
+	Brief string   `json:"brief,omitempty"` // the sections that tools add to the system prompt (see Briefer)
+	// TimeZone is the zone of the run for its life: the clock tool and the
+	// time notes read and write times in it (see LoadZone).
+	TimeZone string `json:"timeZone,omitempty"`
+}
+
+// MessageReceivedData is the payload of fw.message.received.
+type MessageReceivedData struct {
+	Role    Role    `json:"role"`
+	Content []Block `json:"content"`
+	Origin  string  `json:"origin"`
+	// Note names the kind of a system message from the kernel: NoteLoop or
+	// NoteTime. It is empty for every other message.
+	Note string `json:"note,omitempty"`
+}
+
+// Kinds of the system messages from the kernel.
+const (
+	NoteLoop = "loop" // the loop guard warns that the model repeats itself
+	NoteTime = "time" // a time note gives the time after a gap
+)
+
+// TurnData is the payload of fw.turn.started and fw.turn.finished.
+type TurnData struct {
+	Turn int `json:"turn"`
+}
+
+// ModelRequestedData is the payload of fw.model.requested.
+type ModelRequestedData struct {
+	Provider             string `json:"provider"`
+	Model                string `json:"model"`
+	Effort               string `json:"effort,omitempty"`
+	EstimatedInputTokens int    `json:"estimatedInputTokens,omitempty"`
+}
+
+// ModelRespondedData is the payload of fw.model.responded.
+type ModelRespondedData struct {
+	Content    []Block         `json:"content"`
+	Raw        json.RawMessage `json:"raw,omitempty"` // provider blocks, unchanged
+	StopReason StopReason      `json:"stopReason"`
+	StopDetail string          `json:"stopDetail,omitempty"`
+	Usage      Usage           `json:"usage"`
+	LatencyMS  int64           `json:"latencyMs"`
+	Provider   string          `json:"provider"`
+	Model      string          `json:"model"`
+}
+
+// ToolRequestedData is the payload of fw.tool.requested.
+type ToolRequestedData struct {
+	Tool   string          `json:"tool"`
+	CallID string          `json:"callId"`
+	Input  json.RawMessage `json:"input"`
+	TaskID string          `json:"taskId,omitempty"` // MCP task handle, when the tool returned one
+}
+
+// ToolRespondedData is the payload of fw.tool.responded.
+type ToolRespondedData struct {
+	CallID    string  `json:"callId"`
+	Tool      string  `json:"tool,omitempty"`
+	Content   []Block `json:"content"`
+	IsError   bool    `json:"isError"`
+	LatencyMS int64   `json:"latencyMs"`
+}
+
+// ToolProgressData is the payload of fw.tool.progress.
+type ToolProgressData struct {
+	CallID   string  `json:"callId"`
+	Progress float64 `json:"progress"`
+	Total    float64 `json:"total,omitempty"`
+	Message  string  `json:"message,omitempty"`
+}
+
+// ApprovalRequestedData is the payload of fw.approval.requested.
+type ApprovalRequestedData struct {
+	ApprovalID   string          `json:"approvalId"`
+	Tool         string          `json:"tool"`
+	CallID       string          `json:"callId,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	Reason       string          `json:"reason,omitempty"`
+	Schema       json.RawMessage `json:"schema,omitempty"`       // form schema when a tool asked a question
+	RequestState string          `json:"requestState,omitempty"` // opaque MCP state to echo back
+	// Connect is set when the call waits for the person to connect a
+	// service (see ConnectRequest). Reason then holds its Message.
+	Connect *ConnectRequest `json:"connect,omitempty"`
+}
+
+// ApprovalDecidedData is the payload of fw.approval.decided.
+type ApprovalDecidedData struct {
+	ApprovalID string          `json:"approvalId"`
+	Decision   string          `json:"decision"` // allow or deny
+	Decider    string          `json:"decider,omitempty"`
+	Note       string          `json:"note,omitempty"`
+	Content    json.RawMessage `json:"content,omitempty"` // form answers when a tool asked a question
+}
+
+// ContextCompactedData is the payload of fw.context.compacted.
+type ContextCompactedData struct {
+	Epoch   int       `json:"epoch"`
+	Summary Block     `json:"summary"`
+	Kept    []Message `json:"kept,omitempty"` // the messages after the summary in the new epoch
+	// Usage counts the tokens of the summary calls, so the usage, the cost,
+	// and the budget of the run include them. Provider and Model name the
+	// model of the last summary call, for the price.
+	Usage    *Usage `json:"usage,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+// RunTitledData is the payload of fw.run.titled: a title of a few words
+// that a model wrote for the run (see TitlesModel). Usage counts the
+// tokens of the title call, so the usage, the cost, and the budget of the
+// run include them. Provider and Model name the model, for the price.
+type RunTitledData struct {
+	Title    string `json:"title"`
+	Usage    *Usage `json:"usage,omitempty"`
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+}
+
+// LoopDetectedData is the payload of fw.loop.detected. The kernel appends
+// it when the model repeats the same tool call, or the same cycle of two or
+// three calls. Count is the number of repeats in a row, and Period is the
+// length of the cycle. Action is "warned" when the kernel told the model
+// that it repeats itself, and "failed" when the run ended for it.
+type LoopDetectedData struct {
+	Tool   string `json:"tool"`
+	Count  int    `json:"count"`
+	Period int    `json:"period"`
+	Action string `json:"action"`
+}
+
+// BudgetExceededData is the payload of fw.budget.exceeded.
+type BudgetExceededData struct {
+	Limit string  `json:"limit"`
+	Value float64 `json:"value"`
+}
+
+// ErrorData is the payload of fw.error.
+type ErrorData struct {
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
+}
+
+// RunSuspendedData is the payload of fw.run.suspended.
+type RunSuspendedData struct {
+	Reason string `json:"reason"`
+}
+
+// RunResumedData is the payload of fw.run.resumed.
+type RunResumedData struct {
+	FromSeq uint64 `json:"fromSeq"`
+}
+
+// RunFinishedData is the payload of fw.run.finished.
+type RunFinishedData struct {
+	Outcome string `json:"outcome"`
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// IDTime returns the time that an id from NewID holds, to the
+// millisecond. It reports false for a string that is not such an id.
+func IDTime(id string) (time.Time, bool) {
+	if len(id) != 26 {
+		return time.Time{}, false
+	}
+	var ms uint64
+	for i := 0; i < 10; i++ {
+		v := strings.IndexByte(crockford, id[i])
+		if v < 0 || (i == 0 && v > 7) {
+			return time.Time{}, false
+		}
+		ms = ms<<5 | uint64(v)
+	}
+	return time.UnixMilli(int64(ms)).UTC(), true
+}
+
+// NewID returns a ULID: 48 bits of milliseconds and 80 random bits, in
+// Crockford base32, so ids sort by time.
+func NewID() string {
+	var b [16]byte
+	ms := uint64(time.Now().UnixMilli())
+	b[0] = byte(ms >> 40)
+	b[1] = byte(ms >> 32)
+	b[2] = byte(ms >> 24)
+	b[3] = byte(ms >> 16)
+	b[4] = byte(ms >> 8)
+	b[5] = byte(ms)
+	if _, err := rand.Read(b[6:]); err != nil {
+		panic(err)
+	}
+	return encodeBase32(b)
+}
+
+const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+func encodeBase32(b [16]byte) string {
+	var out [26]byte
+	out[0] = crockford[(b[0]&224)>>5]
+	out[1] = crockford[b[0]&31]
+	out[2] = crockford[(b[1]&248)>>3]
+	out[3] = crockford[((b[1]&7)<<2)|((b[2]&192)>>6)]
+	out[4] = crockford[(b[2]&62)>>1]
+	out[5] = crockford[((b[2]&1)<<4)|((b[3]&240)>>4)]
+	out[6] = crockford[((b[3]&15)<<1)|((b[4]&128)>>7)]
+	out[7] = crockford[(b[4]&124)>>2]
+	out[8] = crockford[((b[4]&3)<<3)|((b[5]&224)>>5)]
+	out[9] = crockford[b[5]&31]
+	out[10] = crockford[(b[6]&248)>>3]
+	out[11] = crockford[((b[6]&7)<<2)|((b[7]&192)>>6)]
+	out[12] = crockford[(b[7]&62)>>1]
+	out[13] = crockford[((b[7]&1)<<4)|((b[8]&240)>>4)]
+	out[14] = crockford[((b[8]&15)<<1)|((b[9]&128)>>7)]
+	out[15] = crockford[(b[9]&124)>>2]
+	out[16] = crockford[((b[9]&3)<<3)|((b[10]&224)>>5)]
+	out[17] = crockford[b[10]&31]
+	out[18] = crockford[(b[11]&248)>>3]
+	out[19] = crockford[((b[11]&7)<<2)|((b[12]&192)>>6)]
+	out[20] = crockford[(b[12]&62)>>1]
+	out[21] = crockford[((b[12]&1)<<4)|((b[13]&240)>>4)]
+	out[22] = crockford[((b[13]&15)<<1)|((b[14]&128)>>7)]
+	out[23] = crockford[(b[14]&124)>>2]
+	out[24] = crockford[((b[14]&3)<<3)|((b[15]&224)>>5)]
+	out[25] = crockford[b[15]&31]
+	return string(out[:])
+}

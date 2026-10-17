@@ -1,0 +1,117 @@
+# Prometheus alert rules for fw. README.md in this directory explains them.
+#
+# The thresholds are starting points. Change them to fit your agents.
+# Several fw processes of one fleet can report the same member, so the
+# fleet rules take the max or the min over the reporting processes.
+
+groups:
+  - name: fw
+    rules:
+      - alert: FwTargetDown
+        expr: up{job=~"fw|fw-pods"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape fw at {{ $labels.instance }}"
+          description: "The scrape of {{ $labels.instance }} failed for 5 minutes. The process is down, or the network blocks the scrape."
+
+      - alert: FwApprovalWaiting
+        expr: time() - min by (agent) (fw_approvals_oldest_timestamp_seconds) > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An approval of agent {{ $labels.agent }} waits for more than 1 hour"
+          description: "The oldest approval waited {{ $value | humanizeDuration }}. The run does nothing until a person allows or denies the action. Open the dashboard to decide."
+
+      # A member that Prometheus does not scrape, such as an ax Task that
+      # sleeps, reports its approvals through the fleet gauges of the
+      # members that Prometheus scrapes.
+      - alert: FwFleetApprovalWaiting
+        expr: time() - min by (member) (fw_fleet_approvals_oldest_timestamp_seconds) > 3600
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "An approval on fleet member {{ $labels.member }} waits for more than 1 hour"
+          description: "The oldest approval waited {{ $value | humanizeDuration }}. The run does nothing until a person allows or denies the action. Open the dashboard to decide."
+
+      - alert: FwRunFailuresRising
+        expr: |
+          (
+            sum by (agent) (increase(fw_runs_total{outcome="failed"}[30m]))
+              / sum by (agent) (increase(fw_runs_total[30m]))
+          ) > 0.25
+          and sum by (agent) (increase(fw_runs_total{outcome="failed"}[30m])) >= 3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 25% of the runs of agent {{ $labels.agent }} failed in 30 minutes"
+          description: "{{ $value | humanizePercentage }} of the finished runs failed. Read the error of a failed run in the dashboard or with fw events."
+
+      - alert: FwBudgetStops
+        expr: sum by (agent, limit) (increase(fw_budget_exceeded_total{limit!="maxRepeats"}[1h])) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "The budget limit {{ $labels.limit }} stopped runs of agent {{ $labels.agent }}"
+          description: "{{ $value | humanize }} runs stopped at the limit in the last hour. Raise the limit in the profile if the work needs more, or narrow the task."
+
+      - alert: FwLoops
+        expr: sum by (agent) (increase(fw_loops_total{action="failed"}[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The loop guard stopped runs of agent {{ $labels.agent }}"
+          description: "In the last hour, {{ $value | humanize }} runs ended because the model made the same tool call again and again. Read the run to see which call repeated."
+
+      - alert: FwMCPServerDown
+        expr: max by (server) (fw_mcp_server_up) == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The MCP server {{ $labels.server }} does not answer"
+          description: "fw marked the server down after failed requests. The tools of the server fail until it answers again."
+
+      - alert: FwModelErrorRate
+        expr: |
+          (
+            sum by (provider, model) (rate(fw_model_requests_total{outcome="error"}[10m]))
+              / sum by (provider, model) (rate(fw_model_requests_total[10m]))
+          ) > 0.1
+          and sum by (provider, model) (increase(fw_model_requests_total{outcome="error"}[10m])) >= 3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10% of the calls to {{ $labels.provider }}/{{ $labels.model }} fail"
+          description: "{{ $value | humanizePercentage }} of the model calls failed in 10 minutes. Look for a provider outage, a rate limit, or a credential that expired."
+
+      - alert: FwModelLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (provider, model, le) (rate(fw_model_request_duration_seconds_bucket[15m]))
+          ) > 120
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The p95 latency of {{ $labels.provider }}/{{ $labels.model }} is over 2 minutes"
+          description: "The p95 latency is {{ $value | humanizeDuration }}. A large model with a high effort can be slow. Raise the threshold for such a model."
+
+      # A member that is not live and still shows a running run stopped
+      # without a last record, or ax suspended it in the middle of a run.
+      # A Task that sleeps with no running run does not fire this alert.
+      - alert: FwFleetMemberDown
+        expr: |
+          max by (member) (fw_fleet_member_up) == 0
+          and max by (member) (fw_fleet_runs{state="running"}) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fleet member {{ $labels.member }} is not live, but its last record shows running runs"
+          description: "The member sent no record or heartbeat for 3 of its intervals. Its runs make no progress until it starts again. Under ax, a request to the member wakes it."
