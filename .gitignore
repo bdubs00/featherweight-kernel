@@ -3,4 +3,3 @@ bin/
 *.test
 coverage.out
 CLAUDE.md
-e2e/

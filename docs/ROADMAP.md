@@ -12,7 +12,7 @@ The workbench binary is still a runner. It serves inside the sandbox, and it imp
 
 ## Stage 1: bank the work
 
-Done on 2026-10-17. Both repositories are on GitHub. The planning documents moved into `docs/` of each repository. The e2e loop moved into `e2e/` of each checkout, and it stays out of git.
+Done on 2026-10-17. Both repositories are on GitHub. The planning documents moved into `docs/` of each repository. The e2e loop moved into its own repository, featherweight-lab, next to the other two. It tests both binaries over the wire and holds the setup of one machine, so it belongs to neither.
 
 ## Stage 2: follow upstream ax
 
