@@ -38,25 +38,29 @@ The package `fw` still holds about 2,800 lines for the workbench: `fleet.go`, `g
 
 After each move, `fw.Config` loses the matching key. The keys `fleet`, `grants`, and `titles` are gone. The keys `access` and `mcp` remain. `access.external` and the roles beyond "who can call this Task" are the next move, and the server surface `mcp` of the workbench still reads its block from the kernel configuration.
 
-## Stage 4: export instead of view
+## Stage 4: the value of the kernel to ax
+
+Do these in order. KERNEL_SPLIT.md, section 3, explains items 2 and 4 to 7. One use case orders them. A person in Claude Code splits a large job into many pieces and sends them to the fleet. Every run acts as that person at the services behind agentgateway, and nothing runs on the laptop.
+
+1. The token broker. A grant has one holder, and a Task is the wrong holder, because ax rolls its volume back on a restore. The front, the fw-workbench Deployment outside the sandboxes, keeps every grant and runs every refresh. A Task runs a `fw.PersonTokens` that asks the front for the access token of a person at a server. The request carries the workload identity of the Task, and the front checks that the fleet record of the caller lists a run of that person. The refresh token never enters a sandbox, and an access token lives an hour there. The person connects once, in the dashboard of the front. A finished connection becomes a notice on the bus, and each member turns it into `Agent.Connected`. The package `connections` of the workbench serves the route, and a kernel driver is the client.
+2. A `Spawner` plug with an ax driver that creates a child Task.
+3. An enqueue path on the front, so an MCP client puts run requests on the intake queue of a profile. A batch id through the run annotator, so the runs of one job across many Tasks have one name.
+4. The idle state in the status body.
+5. A controller in the workbench that reads the idle state and calls `SuspendTask`.
+6. Budgets from the Task environment.
+7. Build tags for a smaller binary.
+
+That job is the acceptance test of this stage. A small batch of its pieces runs end to end on the lab cluster, as one person, before the stage ends.
+
+## Stage 5: export instead of view
 
 1. Push metrics over OTLP, next to the Prometheus pull at `/metrics`. The standard `OTEL_EXPORTER_OTLP_*` variables configure it. A Task that sleeps stops reporting, and no scrape wakes it.
 2. Export each ledger event as an OTLP log record through an `fw.Observer`. The ledger is the trajectory that the ax roadmap asks for at the runner layer.
 3. Add a collector example next to `examples/observability/prometheus.yml`.
 4. Remove the fleet gauges after the OTLP push exists.
 
-## Stage 5: the value of the kernel to ax
+## Rules for every stage
 
-Do these in order. KERNEL_SPLIT.md, section 3, explains each item.
+Add a page or a view only when the kernel cannot export the same fact to Prometheus, Grafana, an OpenTelemetry collector, or the ax API.
 
-1. The idle state in the status body.
-2. A controller in the workbench that reads the idle state and calls `SuspendTask`.
-3. A `Spawner` plug with an ax driver that creates a child Task.
-4. Budgets from the Task environment.
-5. Build tags for a smaller binary.
-
-## Until stage 3 is done
-
-Add no product feature, change no page, and add no new use of the fleet.
-
-Each stage ends with `go build ./... && go vet ./... && go test ./...` green in both repositories.
+Each stage ends with `go build ./... && go vet ./... && go test ./...` green in both repositories. A stage that changes the runner contract or the fleet also runs the lab against the homelab cluster before the next one begins.
