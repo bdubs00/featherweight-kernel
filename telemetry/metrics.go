@@ -119,7 +119,7 @@ type Metrics struct {
 // runMetrics is what Metrics remembers about one open run.
 type runMetrics struct {
 	agent     string
-	batch     string // the job of the run, from the metadata fw.batch
+	batch     string    // the job of the run, from the metadata fw.batch
 	active    bool      // counted in fw_runs_active
 	since     time.Time // queued, or the first event after the run reopened
 	turns     int
