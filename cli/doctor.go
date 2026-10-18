@@ -80,6 +80,7 @@ func cmdDoctor(ctx context.Context, g *globals, args []string) int {
 	d.checkModel(ctx, cfg, secrets)
 	d.checkToolSources(ctx, cfg, secrets)
 	d.checkTokens(cfg)
+	d.checkTelemetry()
 	d.checkBus(ctx, cfg)
 	for _, c := range registeredDoctorChecks() {
 		if ok, line := c(ctx, cfg, secrets, d.timeout); ok {
@@ -642,6 +643,24 @@ func (d *doctor) checkTokens(cfg *fw.Config) {
 	}
 	cred := firstNonEmpty(cfg.Tokens.Credential, cfg.Auth.TokenEnv, "FW_API_TOKEN")
 	d.ok("tokens: from %s, as %s, notices on %s", u, cred, firstNonEmpty(cfg.Tokens.Subject, fw.DefaultTokensSubject))
+}
+
+// checkTelemetry reports where the metrics, the logs, and the traces go
+// (docs/ARCHITECTURE.md section 10.5): an OTLP collector that the standard
+// variables name, or nowhere beyond the Prometheus route.
+func (d *doctor) checkTelemetry() {
+	var on []string
+	for _, s := range []string{"METRICS", "LOGS", "TRACES"} {
+		if strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) != "" || strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_"+s+"_ENDPOINT")) != "" {
+			on = append(on, strings.ToLower(s))
+		}
+	}
+	if len(on) == 0 {
+		d.ok("telemetry: no OTLP export; set OTEL_EXPORTER_OTLP_ENDPOINT to push the metrics, the logs, and the traces to a collector")
+		return
+	}
+	endpoint := firstNonEmpty(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), os.Getenv("OTEL_EXPORTER_OTLP_"+strings.ToUpper(on[0])+"_ENDPOINT"))
+	d.ok("telemetry: exports %s over OTLP to %s", strings.Join(on, ", "), strings.TrimSpace(endpoint))
 }
 
 // checkBus opens the bus and closes it.

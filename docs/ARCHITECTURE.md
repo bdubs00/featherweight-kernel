@@ -825,7 +825,7 @@ The `metrics` projection maintains this registry. The route `/metrics` carries n
 | Metric | Type | Labels |
 |---|---|---|
 | `fw_runs_total` | counter | `agent`, `outcome` |
-| `fw_runs_queued_total` | counter | `agent`, `origin` (`http`, `a2a`, `mcp`, `bus`, `cli`, `tool`, `other`) |
+| `fw_runs_queued_total` | counter | `agent`, `origin` (`http`, `a2a`, `mcp`, `bus`, `cli`, `tool`, `other`), `batch` |
 | `fw_runs_active` | gauge | `agent` |
 | `fw_run_duration_seconds` | histogram | `agent` |
 | `fw_run_turns` | histogram | `agent` |
@@ -898,7 +898,7 @@ The directory [examples/observability](../examples/observability/README.md) hold
 
 ### 10.2 Traces
 
-The `trace` projection emits OpenTelemetry spans. A run is one span. Each turn is a child span, and each model call and tool call is a child of its turn. The exporter is OTLP, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` variable. The `traceparent` value travels in every ledger event, in every bus message, in the `spawn_task` environment, and in outbound A2A and MCP requests.
+The `trace` projection emits OpenTelemetry spans. A run is one span. Each turn is a child span, and each model call and tool call is a child of its turn. The service `Export` of the package `telemetry` starts the projection when a collector is named (section 10.5). The exporter is OTLP, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` variable. The `traceparent` value travels in every ledger event, in every bus message, in the `spawn_task` environment, and in outbound A2A and MCP requests.
 
 ### 10.3 Logs
 
@@ -907,6 +907,16 @@ Logs are JSON lines on standard error from `log/slog`, so that `fw-workbench mcp
 ### 10.4 Trajectories
 
 A trajectory is the full record of what an agent did. The ledger is the trajectory. The command `fw events <run> --format jsonl` exports it. The ax roadmap names trajectory collection at the runner layer as a goal, and the ledger is that record.
+
+### 10.5 Export over OTLP
+
+A Prometheus scrape is a request, and a request wakes an ax Task that sleeps, so a worker must not be scraped. A worker pushes instead. The package `telemetry` registers the service `Export`, and the standard variables turn it on: `OTEL_EXPORTER_OTLP_ENDPOINT` for every signal, or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` one by one. The transport is OTLP over HTTP, and the exporters read the other `OTEL_EXPORTER_OTLP_*` variables, such as the headers and the certificate. Without a variable, the service starts nothing, and the Prometheus route stays as it is.
+
+The metrics are the series of the Prometheus registry of section 10.1, pushed as they are: the same names, the same labels, and the labels `service.name` and `service.instance.id` of the resource, the latter the `node` of the process. The push runs at the interval of `OTEL_METRIC_EXPORT_INTERVAL`, 60 seconds by default, through the Prometheus bridge of the OpenTelemetry SDK, and it starts as soon as the metrics surface mounts. A Task that sleeps stops pushing, and a collector that keeps the last value of a gauge shows it as it was.
+
+The logs are the ledger: every event of every run goes out as one log record. The body is the data of the event, the event name is its type, and the attributes carry the run id, the sequence number, the agent, the node, and the source. The record carries the trace id and the span id of the run from the `traceparent` of the event, so a trace store and a log store meet on the same ids. A failed run and a budget stop are errors, a loop and a suspend are warnings, and everything else is information. The ledger is the trajectory of section 10.4, and this is how it reaches a collector with no change to ax.
+
+The traces of section 10.2 start through the same service, so one set of variables carries all three signals. `fw doctor` reports which signals go where. The directory `examples/observability` has a collector configuration that receives the three and hands the metrics to Prometheus, the logs to a log store, and the traces to a trace store; Grafana reads the fleet from those, and a front needs no gauge of its own for it.
 
 ## 11. Running inside google/ax
 
@@ -1551,6 +1561,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The export revision of 2026-10-17 added the service `Export` of the package `telemetry` (section 10.5): with the standard `OTEL_EXPORTER_OTLP_*` variables, a process pushes its Prometheus series over OTLP, sends every ledger event as a log record with the trace of its run, and starts the trace projection, which no verb started before. The run counters gained the label `batch`, and `fw doctor` gained the line `telemetry`. The fleet gauges of the workbench and the Operator view of the page go, because Grafana reads the fleet from the collector.
 
 The jobs revision of 2026-10-17 added the metadata key `fw.batch`, the name of the job of a run, which a child inherits, and the filter `batch` of `GET /v1/runs`. A request from the bus intake keeps the principal that it names. The front of the workbench sends a job with `enqueue` and follows it with `batch` (the workbench architecture, section 4.9).
 

@@ -90,7 +90,7 @@ func TestServesRegistryWithoutToken(t *testing.T) {
 		t.Fatalf("status = %d", status)
 	}
 	for _, want := range []string{
-		`fw_runs_total{agent="default",outcome="completed"} 1`,
+		`fw_runs_total{agent="default",batch="",outcome="completed"} 1`,
 		`fw_model_tokens_total{kind="input",model="claude-opus-5-5",provider="anthropic"} 3`,
 		`fw_build_info{commit=`,
 		`go="` + runtime.Version() + `",version="9.9.9"} 1`,
@@ -109,7 +109,7 @@ func TestServesRegistryWithoutToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, body2 := scrape(t, h2, "/metrics"); !strings.Contains(body2, `fw_runs_total{agent="default",outcome="completed"} 1`) {
+	if _, body2 := scrape(t, h2, "/metrics"); !strings.Contains(body2, `fw_runs_total{agent="default",batch="",outcome="completed"} 1`) {
 		t.Error("the second handler does not serve the same registry")
 	}
 	if s.Metrics() == nil || s.Registry() == nil {

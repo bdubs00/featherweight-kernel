@@ -109,6 +109,18 @@ func histogramSum(t *testing.T, g prometheus.Gatherer, name string, labels map[s
 }
 
 func sameLabels(got []*dto.LabelPair, want map[string]string) bool {
+	// The run counters carry the label batch, empty for a run of no job. An
+	// expectation that leaves it out means empty.
+	if _, ok := want["batch"]; !ok {
+		var kept []*dto.LabelPair
+		for _, l := range got {
+			if l.GetName() == "batch" && l.GetValue() == "" {
+				continue
+			}
+			kept = append(kept, l)
+		}
+		got = kept
+	}
 	if len(got) != len(want) {
 		return false
 	}
@@ -126,8 +138,8 @@ func TestRegistryNames(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, nil)
 	// Touch every vector so that each family appears in the output.
-	m.runsTotal.WithLabelValues("a", "completed")
-	m.runsQueued.WithLabelValues("a", fw.OriginHTTP)
+	m.runsTotal.WithLabelValues("a", "completed", "")
+	m.runsQueued.WithLabelValues("a", fw.OriginHTTP, "")
 	m.budgetExceeded.WithLabelValues("a", "maxTurns")
 	m.modelUnpriced.WithLabelValues("p", "m")
 	m.loopsTotal.WithLabelValues("a", "warned")
@@ -156,8 +168,8 @@ func TestRegistryNames(t *testing.T) {
 		typ    dto.MetricType
 		labels []string
 	}{
-		"fw_runs_total":                         {dto.MetricType_COUNTER, []string{"agent", "outcome"}},
-		"fw_runs_queued_total":                  {dto.MetricType_COUNTER, []string{"agent", "origin"}},
+		"fw_runs_total":                         {dto.MetricType_COUNTER, []string{"agent", "batch", "outcome"}},
+		"fw_runs_queued_total":                  {dto.MetricType_COUNTER, []string{"agent", "batch", "origin"}},
 		"fw_budget_exceeded_total":              {dto.MetricType_COUNTER, []string{"agent", "limit"}},
 		"fw_model_unpriced_tokens_total":        {dto.MetricType_COUNTER, []string{"model", "provider"}},
 		"fw_approvals_oldest_timestamp_seconds": {dto.MetricType_GAUGE, []string{"agent"}},

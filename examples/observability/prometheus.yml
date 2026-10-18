@@ -19,8 +19,8 @@ scrape_configs:
   # Static targets: fw processes that are always on, as host:port.
   # Replace the placeholder. Do not list an ax Task here, and do not scrape
   # one through the atenet router: the router wakes a Task that sleeps, so a
-  # scrape every 30 seconds keeps every Task awake. An always-on member
-  # reports the other members of its fleet in the fw_fleet_* gauges.
+  # scrape every 30 seconds keeps every Task awake. A Task pushes to the
+  # collector of otel-collector.yaml instead, and Prometheus scrapes that.
   - job_name: fw
     metrics_path: /metrics
     static_configs:

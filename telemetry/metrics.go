@@ -119,6 +119,7 @@ type Metrics struct {
 // runMetrics is what Metrics remembers about one open run.
 type runMetrics struct {
 	agent     string
+	batch     string // the job of the run, from the metadata fw.batch
 	active    bool      // counted in fw_runs_active
 	since     time.Time // queued, or the first event after the run reopened
 	turns     int
@@ -145,12 +146,12 @@ func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 		prices: prices,
 		runsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fw_runs_total",
-			Help: "Runs that finished, by agent and outcome.",
-		}, []string{"agent", "outcome"}),
+			Help: "Runs that finished, by agent, outcome, and batch, the job of the run from the metadata fw.batch, or empty.",
+		}, []string{"agent", "outcome", "batch"}),
 		runsQueued: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fw_runs_queued_total",
-			Help: "Runs that this process queued, by agent and origin (http, a2a, mcp, bus, cli, tool, other).",
-		}, []string{"agent", "origin"}),
+			Help: "Runs that this process queued, by agent, origin (http, a2a, mcp, bus, cli, tool, other), and batch.",
+		}, []string{"agent", "origin", "batch"}),
 		budgetExceeded: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fw_budget_exceeded_total",
 			Help: "Runs that a budget limit stopped, by agent and limit (maxTurns, maxTokens, maxCostUSD, maxToolCalls, deadline, maxRepeats).",
@@ -487,14 +488,16 @@ func (m *Metrics) Observe(e fw.Event) {
 		}
 		st.since = eventTime(e)
 		var d struct {
-			Origin string `json:"origin"`
+			Origin   string            `json:"origin"`
+			Metadata map[string]string `json:"metadata"`
 		}
 		_ = e.Decode(&d)
 		origin := d.Origin
 		if !origins[origin] {
 			origin = otherLabel
 		}
-		m.runsQueued.WithLabelValues(st.agent, origin).Inc()
+		st.batch = d.Metadata[fw.MetaBatch]
+		m.runsQueued.WithLabelValues(st.agent, origin, st.batch).Inc()
 		return
 	case fw.EvRunFinished:
 		m.finish(e, st)
@@ -709,11 +712,11 @@ func (m *Metrics) finish(e fw.Event, st *runMetrics) {
 	default:
 		outcome = fw.OutcomeFailed
 	}
-	agent := agentOf(e.Source)
+	agent, batch := agentOf(e.Source), ""
 	if st != nil {
-		agent = st.agent
+		agent, batch = st.agent, st.batch
 	}
-	m.runsTotal.WithLabelValues(agent, outcome).Inc()
+	m.runsTotal.WithLabelValues(agent, outcome, batch).Inc()
 	if st == nil {
 		return
 	}

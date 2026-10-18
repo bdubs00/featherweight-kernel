@@ -1,8 +1,6 @@
 # Prometheus alert rules for fw. README.md in this directory explains them.
 #
 # The thresholds are starting points. Change them to fit your agents.
-# Several fw processes of one fleet can report the same member, so the
-# fleet rules take the max or the min over the reporting processes.
 
 groups:
   - name: fw
@@ -23,18 +21,6 @@ groups:
           severity: warning
         annotations:
           summary: "An approval of agent {{ $labels.agent }} waits for more than 1 hour"
-          description: "The oldest approval waited {{ $value | humanizeDuration }}. The run does nothing until a person allows or denies the action. Open the dashboard to decide."
-
-      # A member that Prometheus does not scrape, such as an ax Task that
-      # sleeps, reports its approvals through the fleet gauges of the
-      # members that Prometheus scrapes.
-      - alert: FwFleetApprovalWaiting
-        expr: time() - min by (member) (fw_fleet_approvals_oldest_timestamp_seconds) > 3600
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "An approval on fleet member {{ $labels.member }} waits for more than 1 hour"
           description: "The oldest approval waited {{ $value | humanizeDuration }}. The run does nothing until a person allows or denies the action. Open the dashboard to decide."
 
       - alert: FwRunFailuresRising
@@ -101,17 +87,3 @@ groups:
         annotations:
           summary: "The p95 latency of {{ $labels.provider }}/{{ $labels.model }} is over 2 minutes"
           description: "The p95 latency is {{ $value | humanizeDuration }}. A large model with a high effort can be slow. Raise the threshold for such a model."
-
-      # A member that is not live and still shows a running run stopped
-      # without a last record, or ax suspended it in the middle of a run.
-      # A Task that sleeps with no running run does not fire this alert.
-      - alert: FwFleetMemberDown
-        expr: |
-          max by (member) (fw_fleet_member_up) == 0
-          and max by (member) (fw_fleet_runs{state="running"}) > 0
-        for: 15m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Fleet member {{ $labels.member }} is not live, but its last record shows running runs"
-          description: "The member sent no record or heartbeat for 3 of its intervals. Its runs make no progress until it starts again. Under ax, a request to the member wakes it."

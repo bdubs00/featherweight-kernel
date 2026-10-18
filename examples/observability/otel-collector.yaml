@@ -1,0 +1,59 @@
+# An OpenTelemetry collector for a fleet of fw. README.md in this directory
+# explains it.
+#
+# Every fw process that has OTEL_EXPORTER_OTLP_ENDPOINT set pushes its
+# metrics, its ledger as log records, and its traces here over OTLP HTTP.
+# An ax Task pushes while it runs and stops when it sleeps, so nothing has
+# to scrape it. The collector serves the metrics of every process to
+# Prometheus on port 9464, with service.instance.id as the label instance,
+# so one scrape job covers the whole fleet. The logs and the traces go to
+# the stores that the exporters below name; replace the placeholders.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 5s
+  # The node of the process becomes the label instance of its series.
+  resource:
+    attributes:
+      - key: instance
+        from_attribute: service.instance.id
+        action: upsert
+
+exporters:
+  # Prometheus scrapes this port; add it to prometheus.yml as a static
+  # target. A series of a Task that sleeps keeps its last value for the
+  # expiration below, then disappears.
+  prometheus:
+    endpoint: 0.0.0.0:9464
+    resource_to_telemetry_conversion:
+      enabled: true
+    metric_expiration: 15m
+  # The log store. Loki takes OTLP; replace the address.
+  otlphttp/logs:
+    endpoint: http://loki.monitoring.svc.cluster.local:3100/otlp
+  # The trace store. Tempo takes OTLP; replace the address.
+  otlphttp/traces:
+    endpoint: http://tempo.monitoring.svc.cluster.local:4318
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [resource, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/logs]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/traces]

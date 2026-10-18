@@ -3,6 +3,7 @@
 This directory holds a supported way to watch fw with Prometheus and Grafana. fw has no usage page of its own. Operational reports come from these files:
 
 - `prometheus.yml`: the scrape jobs for fw.
+- `otel-collector.yaml`: an OpenTelemetry collector that receives what the Tasks push and serves their metrics to Prometheus.
 - `alerts.yml`: the alert rules.
 - `grafana/fw.json`: one Grafana dashboard.
 
@@ -62,21 +63,11 @@ ax suspends a Task that is idle. When a request arrives, the atenet router wakes
 Do these things under ax:
 
 1. Do not scrape an ax Task. Do not add an ax Task to the job `fw`, and do not point a scrape at the atenet router.
-2. Run one or more fw processes that are always on, for example the `fw-front` Deployment of `examples/agentgateway`. Give them the same bus and the same `workbench.fleet.subject` as the Tasks.
-3. Scrape only the processes that are always on.
+2. Give every Task the variable `OTEL_EXPORTER_OTLP_ENDPOINT` with the address of an OpenTelemetry collector. The Task then pushes its metrics, its ledger as log records, and its traces, and a Task that sleeps pushes nothing. The egress policy of the Task must allow the collector.
+3. Run the collector with `otel-collector.yaml` from this directory. It receives OTLP and serves the metrics of every Task to Prometheus on one port, so Prometheus scrapes the collector, never a Task.
+4. Scrape the processes that are always on, such as the front, as before.
 
-An `fw-workbench` process with a fleet reports the whole fleet from the records that the bus keeps. It sends no request to the other members. These gauges come from the fleet of the workbench, which adds them to the metrics surface of the kernel; a plain `fw` process serves none of them:
-
-| Metric | Labels | Meaning |
-|---|---|---|
-| `fw_fleet_member_up` | `member` | 1 when the member is live, else 0. A Task that sleeps is not live. |
-| `fw_fleet_member_last_seen_timestamp_seconds` | `member` | The time of the last record or heartbeat of the member. |
-| `fw_fleet_runs` | `member`, `state` | Runs that are not finished, by state: `queued`, `running`, `input-required`, `suspended`. |
-| `fw_fleet_approvals_oldest_timestamp_seconds` | `member` | The request time of the oldest approval that waits on the member. |
-
-A member that sleeps keeps the counts of its last record. The first scrape of a process starts its fleet view, and it can take up to two seconds.
-
-Two processes can report the same member. The dashboard and the rules take the max or the min for each member, so a member counts once.
+The series that a Task pushes carry `service.instance.id`, the node of the Task, so one dashboard shows a fleet by Task. The log records carry the run id, the agent, and the trace id of the run, so a log store and a trace store meet on the same ids. The label `batch` on `fw_runs_total` and `fw_runs_queued_total` names the job of a run, so a panel sums a job across every Task.
 
 ## Load the alert rules
 
@@ -86,16 +77,14 @@ The file `alerts.yml` holds these rules:
 |---|---|
 | `FwTargetDown` | Prometheus cannot scrape an fw process for 5 minutes. |
 | `FwApprovalWaiting` | An approval waits for more than 1 hour on a scraped process. |
-| `FwFleetApprovalWaiting` | An approval waits for more than 1 hour on a fleet member. |
 | `FwRunFailuresRising` | More than 25% of the runs of an agent fail in 30 minutes, with 3 failures or more. |
 | `FwBudgetStops` | A budget limit stops a run. The loop guard has its own alert. |
 | `FwLoops` | The loop guard ends a run because the model repeats a tool call. |
 | `FwMCPServerDown` | fw marks an MCP server down for 5 minutes. |
 | `FwModelErrorRate` | More than 10% of the calls to a model fail in 10 minutes, with 3 failures or more. |
 | `FwModelLatencyHigh` | The p95 latency of a model is over 2 minutes for 15 minutes. |
-| `FwFleetMemberDown` | A fleet member is not live for 15 minutes, and its last record shows a running run. |
 
-The thresholds are starting points. Change them to fit your agents. If you use only the fleet gauges, remove `FwApprovalWaiting`, because `FwFleetApprovalWaiting` covers the same approvals.
+The thresholds are starting points. Change them to fit your agents.
 
 To load the rules, put `alerts.yml` next to `prometheus.yml`. The line `rule_files: [alerts.yml]` in `prometheus.yml` reads it. With the Prometheus Operator, copy the groups into a `PrometheusRule` resource instead. If `promtool` is installed, run `promtool check config prometheus.yml` to test both files.
 
@@ -116,6 +105,6 @@ No label holds a run id, a principal, a prompt, a path, or a URL. These labels h
 - `agent`: the agent profiles of fw, from `fw.yaml` and from the profiles that people create in fw.
 - `tool` and `server`: the tools and the MCP servers that fw resolved. A tool name that the model invents becomes `unknown`.
 - `provider` and `model`: the models of the configuration keep their names. A run can name another model in an inline profile. Up to 32 such models keep their names, and the others share the name `other`.
-- `member`: the names of the fleet members, which the deployment sets.
+- `batch`: the job of a run, from the metadata `fw.batch`, which `enqueue` of the workbench sets; empty for a run of no job.
 
 The other labels, such as `outcome`, `origin`, `limit`, `kind`, and `state`, hold values from fixed lists.
