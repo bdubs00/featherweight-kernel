@@ -38,13 +38,24 @@ type Spawner interface {
 	Cancel(ctx context.Context, member, id string) error
 }
 
-// Forker is a Spawner that can start a branch of a run in another process
-// (fork.go). It receives the parent run, the events that the branch keeps,
-// with the fw.run.queued event already adjusted for the branch, and the
-// request. It returns the branch as the other process reports it and the
-// member that holds it, as Spawn does.
+// Forker is a Spawner that can run a branch of a run in another process
+// (fork.go), in two steps, because the other process takes a while to run
+// and the caller of Fork does not wait for it.
+//
+// Place chooses or creates the process for a branch of the parent run and
+// returns its member name, as Spawn does. It returns as soon as the process
+// exists, for example once the child Task is created. The kernel then
+// records the branch as a child of the source under the id of the request
+// and answers the caller.
+//
+// Branch sends the kept events to that member, with the fw.run.queued event
+// already adjusted for the branch, and returns the branch as the other
+// process reports it, under req.ID. It returns when the process has the
+// branch or when it cannot have it. On an error it leaves no process
+// behind. A canceled ctx ends the start.
 type Forker interface {
-	Fork(ctx context.Context, parent *Run, events []Event, req ForkRequest) (*Run, string, error)
+	Place(ctx context.Context, parent *Run) (string, error)
+	Branch(ctx context.Context, member string, events []Event, req ForkRequest) (*Run, error)
 }
 
 // SpawnerCtor builds a Spawner from the configuration.
@@ -114,11 +125,37 @@ func inheritBatch(meta map[string]string, parent *Run) map[string]string {
 	return out
 }
 
-// childRef is where a remote child lives.
+// childRef is where a remote child lives. A branch that its process does
+// not have yet carries its start.
 type childRef struct {
 	parent string
 	member string
 	depth  int
+	start  *branchStart
+}
+
+// branchStart is the start of a branch in another process (fork.go). The
+// kernel knows the branch before that process has it, and answers for it
+// from run until then.
+type branchStart struct {
+	done   chan struct{}      // closed when the start ends, well or not
+	cancel context.CancelFunc // ends the start
+	run    *Run               // the branch as this process knows it until the start ends
+}
+
+// starting returns the branch as this process knows it while its start is
+// still open, and false after the start ended.
+func (ref childRef) starting() (*Run, bool) {
+	if ref.start == nil {
+		return nil, false
+	}
+	select {
+	case <-ref.start.done:
+		return nil, false
+	default:
+		r := cloneRun(ref.start.run)
+		return r, true
+	}
 }
 
 // NewRunRequest builds a request from an input and options.
@@ -338,11 +375,15 @@ func (a *Agent) decorateChild(r *Run, ref childRef) {
 }
 
 // getRemote returns a remote child through the spawner, authorized as Get
-// authorizes a run of this process.
+// authorizes a run of this process. A branch whose start is still open is
+// answered from this process.
 func (a *Agent) getRemote(ctx context.Context, id string, ref childRef) (*Run, error) {
-	r, err := a.spawner.Get(ctx, ref.member, id)
-	if err != nil {
-		return nil, err
+	r, ok := ref.starting()
+	if !ok {
+		var err error
+		if r, err = a.spawner.Get(ctx, ref.member, id); err != nil {
+			return nil, err
+		}
 	}
 	a.decorateChild(r, ref)
 	if err := a.Authorize(ctx, ActionRunView, Target{Agent: r.Agent, Run: r}); err != nil {

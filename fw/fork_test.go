@@ -3,6 +3,7 @@ package fw
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -100,12 +101,19 @@ func TestForkInAnotherProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fork with spawn: %v", err)
 	}
-	if b.Member != "other" || b.Metadata[MetaForkOf] != src.ID {
+	if b.Member != "other" || b.Metadata[MetaForkOf] != src.ID || b.Parent != src.ID || b.ID == "" {
 		t.Fatalf("branch = %+v", b)
 	}
+	// The source answers for the branch until the other process has it.
+	if r, err := a.Get(ctx, b.ID); err != nil || r.ID != b.ID || r.Member != "other" {
+		t.Fatalf("Get of the branch while it starts = %+v, %v", r, err)
+	}
 	got, err := a.WaitFor(ctx, b.ID, func(r *Run) bool { return r.State.Terminal() })
-	if err != nil || got.Output != "elsewhere" {
+	if err != nil || got.Output != "elsewhere" || got.Member != "other" {
 		t.Fatalf("branch in the other process = %+v, %v", got, err)
+	}
+	if kids, err := a.Children(ctx, src.ID); err != nil || len(kids) != 1 || kids[0].ID != b.ID {
+		t.Fatalf("children of the source = %+v, %v", kids, err)
 	}
 	evs, _ := readAll(ctx, a.ledger, src.ID)
 	recorded := false
@@ -118,7 +126,91 @@ func TestForkInAnotherProcess(t *testing.T) {
 	if !recorded {
 		t.Fatal("the source did not record the branch as a child")
 	}
-	if list, _ := other.List(ctx); len(list) != 1 || list[0].Output != "elsewhere" || list[0].Metadata[MetaForkOf] != src.ID {
+	if list, _ := other.List(ctx); len(list) != 1 || list[0].ID != b.ID || list[0].Output != "elsewhere" || list[0].Metadata[MetaForkOf] != src.ID {
+		t.Fatalf("the other process holds %+v", list)
+	}
+	// The same branch sent again is the branch that the other process has.
+	evs, _ = readAll(ctx, other.ledger, b.ID)
+	again, err := other.ForkEvents(ctx, evs[:1], ForkRequest{ID: b.ID})
+	if err != nil || again.ID != b.ID {
+		t.Fatalf("the branch sent again = %+v, %v", again, err)
+	}
+	if list, _ := other.List(ctx); len(list) != 1 {
+		t.Fatalf("the other process holds %d runs after the repeat", len(list))
+	}
+}
+
+// A branch whose process never takes it is recorded in the source process
+// as failed, with the reason, and the source stops counting it as a child
+// in another process.
+func TestForkInAnotherProcessThatFails(t *testing.T) {
+	other := newTestAgent(t, newScript(endTurn("elsewhere")).Model())
+	sp := &otherSpawner{other: other, branchErr: errors.New("the Task is Pending after 10m")}
+	a := newTestAgent(t, newScript(endTurn("here")).Model(), WithSpawner(sp))
+	ctx := testCtx(t)
+	src, err := a.Start(ctx, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.WaitFor(ctx, src.ID, func(r *Run) bool { return r.State.Terminal() }); err != nil {
+		t.Fatal(err)
+	}
+	b, err := a.Fork(ctx, src.ID, ForkRequest{Input: "elsewhere", Spawn: true})
+	if err != nil {
+		t.Fatalf("Fork with spawn: %v", err)
+	}
+	got, err := a.WaitFor(ctx, b.ID, func(r *Run) bool { return r.State.Terminal() })
+	if err != nil || got.State != StateFailed || !strings.Contains(got.Error, "did not start in other") || !strings.Contains(got.Error, "Pending after 10m") {
+		t.Fatalf("branch that did not start = %+v, %v", got, err)
+	}
+	if got.Metadata[MetaForkOf] != src.ID || got.Member != "" {
+		t.Fatalf("the record of the branch = %+v", got)
+	}
+	if list, _ := other.List(ctx); len(list) != 0 {
+		t.Fatalf("the other process holds %+v", list)
+	}
+	if _, ok := a.remoteChild(b.ID); ok {
+		t.Fatal("the source still counts the branch as a child in another process")
+	}
+	// Place that fails is an error of Fork itself, and nothing is recorded.
+	sp.placeErr = errors.New("no room")
+	if _, err := a.Fork(ctx, src.ID, ForkRequest{Spawn: true}); err == nil || !strings.Contains(err.Error(), "no room") {
+		t.Fatalf("Fork with a Place that fails = %v", err)
+	}
+}
+
+// Cancel during the start of a branch ends the start, and the branch is
+// recorded as canceled.
+func TestForkInAnotherProcessCanceledWhileItStarts(t *testing.T) {
+	other := newTestAgent(t, newScript(endTurn("elsewhere")).Model())
+	sp := &otherSpawner{other: other, branchWait: make(chan struct{})}
+	a := newTestAgent(t, newScript(endTurn("here")).Model(), WithSpawner(sp))
+	ctx := testCtx(t)
+	src, err := a.Start(ctx, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.WaitFor(ctx, src.ID, func(r *Run) bool { return r.State.Terminal() }); err != nil {
+		t.Fatal(err)
+	}
+	b, err := a.Fork(ctx, src.ID, ForkRequest{Input: "elsewhere", Spawn: true})
+	if err != nil {
+		t.Fatalf("Fork with spawn: %v", err)
+	}
+	if r, err := a.Get(ctx, b.ID); err != nil || r.State != StateQueued {
+		t.Fatalf("the branch while it starts = %+v, %v", r, err)
+	}
+	if err := a.Decide(ctx, b.ID, ApprovalDecision{ApprovalID: "x", Decision: "allow"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Decide while the branch starts = %v", err)
+	}
+	if err := a.Cancel(ctx, b.ID); err != nil {
+		t.Fatalf("Cancel while the branch starts: %v", err)
+	}
+	got, err := a.Get(ctx, b.ID)
+	if err != nil || got.State != StateCanceled {
+		t.Fatalf("the canceled branch = %+v, %v", got, err)
+	}
+	if list, _ := other.List(ctx); len(list) != 0 {
 		t.Fatalf("the other process holds %+v", list)
 	}
 }

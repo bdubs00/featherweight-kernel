@@ -185,52 +185,77 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 	return run, "ax:" + actor, nil
 }
 
-// Fork implements fw.Forker: it creates a child Task as Spawn does and
-// starts the branch there with the kept events, through POST /v1/runs/fork
-// of the child. The branch has a workspace of its own, the one of the new
-// Task, so two branches never see each other's files.
-func (s *Spawner) Fork(ctx context.Context, parent *fw.Run, events []fw.Event, req fw.ForkRequest) (*fw.Run, string, error) {
+// Place implements fw.Forker: it creates a child Task for a branch, as
+// Spawn does, and returns its member name at once. The branch has a
+// workspace of its own, the one of the new Task, so two branches never see
+// each other's files.
+func (s *Spawner) Place(ctx context.Context, parent *fw.Run) (string, error) {
 	task, _ := Stashed()
 	if task == nil {
-		return nil, "", errors.New("ax: this process is not an ax Task, so it cannot start a child Task")
+		return "", errors.New("ax: this process is not an ax Task, so it cannot start a child Task")
 	}
 	atespace, name := Identity(task)
 	if atespace == "" || name == "" {
-		return nil, "", errors.New("ax: the Task of this process has no atespace or no name")
+		return "", errors.New("ax: the Task of this process has no atespace or no name")
 	}
 	child, err := childName(name)
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
 	client, err := s.ax()
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
 	spec := s.childTask(task, atespace, child, parent)
 	if _, err := client.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: spec}); err != nil {
-		return nil, "", fmt.Errorf("ax: create the child Task %s/%s: %w", atespace, child, err)
+		return "", fmt.Errorf("ax: create the child Task %s/%s: %w", atespace, child, err)
 	}
 	s.log.Info("child Task created for a branch", "atespace", atespace, "task", child, "parent", parent.ID)
+	return "ax:" + atespace + "/" + child, nil
+}
+
+// Branch implements fw.Forker: it waits until the child Task of Place runs
+// and starts the branch there with the kept events, through POST
+// /v1/runs/fork of the child, under the id of the request. A Task that does
+// not run, or that does not take the branch, is deleted.
+func (s *Spawner) Branch(ctx context.Context, member string, events []fw.Event, req fw.ForkRequest) (*fw.Run, error) {
+	actor, err := actorOf(member)
+	if err != nil {
+		return nil, err
+	}
+	atespace, child, _ := strings.Cut(actor, "/")
+	task, _ := Stashed()
+	if task == nil {
+		return nil, errors.New("ax: this process is not an ax Task, so it cannot start a child Task")
+	}
+	_, name := Identity(task)
+	client, err := s.ax()
+	if err != nil {
+		return nil, err
+	}
 	if err := s.awaitRunning(ctx, client, atespace, child); err != nil {
 		s.deleteTask(client, atespace, child)
-		return nil, "", err
+		return nil, err
 	}
-	actor := atespace + "/" + child
 	if req.Metadata == nil {
 		req.Metadata = map[string]string{}
 	}
 	req.Metadata[fw.MetaParentMember] = "ax:" + atespace + "/" + name
-	body, err := json.Marshal(map[string]any{"events": events, "input": req.Input, "model": req.Model, "metadata": req.Metadata})
+	body, err := json.Marshal(map[string]any{"id": req.ID, "events": events, "input": req.Input, "model": req.Model, "metadata": req.Metadata})
 	if err != nil {
 		s.deleteTask(client, atespace, child)
-		return nil, "", fmt.Errorf("ax: encode the branch: %w", err)
+		return nil, fmt.Errorf("ax: encode the branch: %w", err)
 	}
-	run, err := s.startOn(ctx, actor, "/v1/runs/fork", body, "fork:"+parent.ID+":"+actor)
+	run, err := s.startOn(ctx, actor, "/v1/runs/fork", body, "fork:"+req.ID)
 	if err != nil {
 		s.deleteTask(client, atespace, child)
-		return nil, "", err
+		return nil, err
 	}
-	return run, "ax:" + actor, nil
+	if run.ID != req.ID {
+		s.deleteTask(client, atespace, child)
+		return nil, fmt.Errorf("ax: the child %s took the branch as the run %s, not %s", actor, run.ID, req.ID)
+	}
+	return run, nil
 }
 
 // childName makes the name of a child Task from the name of its parent and

@@ -443,6 +443,20 @@ func (a *Agent) WaitFor(ctx context.Context, id string, done func(*Run) bool) (*
 	rs, err := a.k.lookup(id)
 	if err != nil {
 		if ref, ok := a.remoteChild(id); ok {
+			if r, ok := ref.starting(); ok {
+				// The branch is on its way to its process. Wait for the
+				// start to end, then ask again: the branch is then in that
+				// process, or recorded here as failed.
+				if done(r) {
+					return r, nil
+				}
+				select {
+				case <-ref.start.done:
+					return a.WaitFor(ctx, id, done)
+				case <-ctx.Done():
+					return r, ctx.Err()
+				}
+			}
 			r, err := a.spawner.WaitFor(ctx, ref.member, id, func(r *Run) bool {
 				a.decorateChild(r, ref)
 				return done(r)
@@ -486,10 +500,13 @@ func (a *Agent) Children(ctx context.Context, id string) ([]*Run, error) {
 		}
 	}
 	for cid, ref := range a.remoteChildren(id) {
-		r, err := a.spawner.Get(ctx, ref.member, cid)
-		if err != nil {
-			a.log.Warn("read a remote child", "run", cid, "member", ref.member, "error", err)
-			continue
+		r, ok := ref.starting()
+		if !ok {
+			var err error
+			if r, err = a.spawner.Get(ctx, ref.member, cid); err != nil {
+				a.log.Warn("read a remote child", "run", cid, "member", ref.member, "error", err)
+				continue
+			}
 		}
 		a.decorateChild(r, ref)
 		kids = append(kids, r)
@@ -756,6 +773,9 @@ func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error
 			if err := a.Authorize(ctx, ActionRunOperate, Target{Agent: r.Agent, Run: r}); err != nil {
 				return err
 			}
+			if _, ok := ref.starting(); ok {
+				return fmt.Errorf("%w: the branch %s has not started in %s yet, so it has no approval to decide", ErrInvalidRequest, id, ref.member)
+			}
 			return a.spawner.Decide(ctx, ref.member, id, d)
 		}
 		return err
@@ -835,6 +855,17 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 			}
 			if err := a.Authorize(ctx, ActionRunOperate, Target{Agent: r.Agent, Run: r}); err != nil {
 				return err
+			}
+			if _, ok := ref.starting(); ok {
+				// The start ends, and the branch is recorded here as
+				// canceled. Wait for that record, so the next Get sees it.
+				ref.start.cancel()
+				select {
+				case <-ref.start.done:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				return nil
 			}
 			return a.spawner.Cancel(ctx, ref.member, id)
 		}

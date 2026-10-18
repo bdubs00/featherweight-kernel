@@ -71,6 +71,17 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 			unfinished = append(unfinished, rs)
 		}
 	}
+	// A branch that never reached its process is recorded here as failed
+	// (fork.go), after the source recorded it as a child. The record here
+	// wins, so the child is not asked about a run that it does not have.
+	k.mu.Lock()
+	for id, ref := range k.remote {
+		if _, ok := k.runs[id]; ok {
+			delete(k.remote, id)
+			k.kids[ref.parent]--
+		}
+	}
+	k.mu.Unlock()
 	sort.SliceStable(unfinished, func(i, j int) bool {
 		return unfinished[i].run.CreatedAt.Before(unfinished[j].run.CreatedAt)
 	})

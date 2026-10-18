@@ -26,6 +26,11 @@ const (
 
 // ForkRequest describes a branch of a run.
 type ForkRequest struct {
+	// ID is the id of the branch. Empty gives a new id. The kernel sets it
+	// before it asks a Forker to start the branch in another process, so
+	// the source knows the branch before that process has it, and the
+	// process takes the branch under this id.
+	ID string `json:"id,omitempty"`
 	// Seq is the sequence number of the last event of the source that the
 	// branch keeps. Zero keeps every event.
 	Seq uint64 `json:"seq,omitempty"`
@@ -39,7 +44,8 @@ type ForkRequest struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 	// Spawn runs the branch in another process through the Spawner of the
 	// agent, which must be a Forker. The source records the branch as a
-	// child, so Get and WaitFor reach it there.
+	// child, so Get and WaitFor reach it there. Fork returns as soon as the
+	// process is placed; the branch is queued until that process has it.
 	Spawn bool `json:"spawn,omitempty"`
 	// Origin records where the branch came from, such as OriginHTTP.
 	Origin string `json:"-"`
@@ -54,7 +60,16 @@ type ForkRequest struct {
 // goes on at once, as a resumed run does: a model request without an
 // answer is sent again, a pending approval waits for its decision. The
 // caller needs ActionRunOperate on the source and ActionAgentRun on its
-// agent. With req.Spawn, the branch runs in another process (Forker).
+// agent.
+//
+// With req.Spawn, the branch runs in another process: the Forker places it,
+// the source records it as a child with its member, and Fork returns the
+// branch as queued, with Member set. The start goes on in the background:
+// the Forker sends the kept events once the process runs. Until then Get
+// answers from this process, WaitFor waits for the start, and Cancel ends
+// it. A start that fails, or that Cancel ended, is recorded in this
+// process as a failed or a canceled run under the id of the branch, with
+// the reason, so nothing is lost without a trace.
 func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, error) {
 	k := a.k
 	if k.isDraining() {
@@ -99,26 +114,79 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	}
 	k.kids[src]++
 	k.mu.Unlock()
-	child, member, err := forker.Fork(ctx, rs.snapshot(), kept, req)
-	if err != nil || child == nil || child.ID == "" || member == "" {
+	member, err := forker.Place(ctx, rs.snapshot())
+	if err != nil || member == "" {
 		k.mu.Lock()
 		k.kids[src]--
 		k.mu.Unlock()
 		if err == nil {
-			err = errors.New("fw: the spawner returned no branch")
+			err = errors.New("fw: the spawner placed the branch nowhere")
 		}
 		return nil, err
 	}
-	ref := childRef{parent: src, member: member, depth: depth}
-	if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: child.ID, Member: member}); err != nil {
-		a.log.Warn("record a remote branch", "run", src, "branch", child.ID, "member", member, "error", err)
+	req.ID = NewID()
+	qe, err := NewEvent(req.ID, EvRunQueued, q)
+	if err != nil {
+		return nil, err
+	}
+	qe.Time = a.now().UTC()
+	placeholder := ProjectRun([]Event{qe}, a.prices)
+	// The start outlives the request of the caller, and Cancel ends it.
+	bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder}
+	ref := childRef{parent: src, member: member, depth: depth, start: start}
+	a.decorateChild(placeholder, ref)
+	if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: req.ID, Member: member}); err != nil {
+		a.log.Warn("record a remote branch", "run", src, "branch", req.ID, "member", member, "error", err)
 	}
 	k.mu.Lock()
-	k.remote[child.ID] = ref
+	k.remote[req.ID] = ref
 	k.mu.Unlock()
-	a.decorateChild(child, ref)
-	a.log.Info("run branched in another process", "run", src, "branch", child.ID, "member", member, "seq", req.Seq)
-	return child, nil
+	a.log.Info("run branched in another process", "run", src, "branch", req.ID, "member", member, "seq", req.Seq)
+	go a.startBranch(bctx, forker, ref, q, kept, req)
+	return cloneRun(placeholder), nil
+}
+
+// startBranch sends a branch to its process and ends its start. A branch
+// that the process does not take is recorded here instead, as failed with
+// the reason, or as canceled when Cancel ended the start, under the id of
+// the branch; the source keeps its fw.run.child event, and the record here
+// wins (resume.go).
+func (a *Agent) startBranch(ctx context.Context, forker Forker, ref childRef, q RunQueuedData, kept []Event, req ForkRequest) {
+	k := a.k
+	defer ref.start.cancel()
+	child, err := forker.Branch(ctx, ref.member, kept, req)
+	switch {
+	case err == nil && (child == nil || child.ID != req.ID):
+		err = errors.New("fw: the spawner started another run than the branch")
+	case err == nil:
+		k.mu.Lock()
+		close(ref.start.done)
+		k.mu.Unlock()
+		a.log.Info("branch started in another process", "branch", req.ID, "member", ref.member)
+		return
+	}
+	outcome, reason := "failed", fmt.Sprintf("the branch did not start in %s: %v", ref.member, err)
+	if ctx.Err() != nil {
+		outcome, reason = "canceled", "the start of the branch in "+ref.member+" was canceled"
+	}
+	a.log.Warn("branch did not start in another process", "branch", req.ID, "member", ref.member, "outcome", outcome, "error", err)
+	brs := k.newRunState(req.ID, q.Agent, "")
+	brs.queued = q
+	k.mu.Lock()
+	k.runs[req.ID] = brs
+	delete(k.remote, req.ID)
+	k.kids[ref.parent]--
+	k.mu.Unlock()
+	if _, err := a.emit(nil, brs, EvRunQueued, q); err != nil {
+		a.log.Error("record a branch that did not start", "branch", req.ID, "error", err)
+	}
+	if _, err := a.emit(nil, brs, EvRunFinished, RunFinishedData{Outcome: outcome, Error: reason}); err != nil {
+		a.log.Error("record a branch that did not start", "branch", req.ID, "error", err)
+	}
+	k.mu.Lock()
+	close(ref.start.done)
+	k.mu.Unlock()
 }
 
 // ForkEvents makes a branch from events that another process kept: the
@@ -155,6 +223,21 @@ func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest)
 	}
 	if req.Origin != "" {
 		q.Origin = req.Origin
+	}
+	if req.ID != "" {
+		if _, ok := IDTime(req.ID); !ok {
+			return nil, fmt.Errorf("%w: %q is not an id of a run", ErrInvalidRequest, req.ID)
+		}
+		if rs, err := a.k.lookup(req.ID); err == nil {
+			// The same branch sent again, for example after a lost answer,
+			// is the branch that this process has. Another run under the id
+			// is a conflict.
+			have := rs.queuedData().Metadata
+			if have[MetaForkOf] == q.Metadata[MetaForkOf] && have[MetaForkSeq] == q.Metadata[MetaForkSeq] {
+				return rs.snapshot(), nil
+			}
+			return nil, fmt.Errorf("%w: a run with the id %s exists", ErrInvalidRequest, req.ID)
+		}
 	}
 	return a.appendBranch(q, events, req)
 }
@@ -228,7 +311,10 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 // or the launch of the branch.
 func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*Run, error) {
 	k := a.k
-	id := NewID()
+	id := req.ID
+	if id == "" {
+		id = NewID()
+	}
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
 	k.mu.Lock()

@@ -15,6 +15,10 @@ import (
 type otherSpawner struct {
 	other *Agent
 
+	placeErr   error         // Place fails with it
+	branchErr  error         // Branch fails with it
+	branchWait chan struct{} // Branch waits for it first
+
 	mu   sync.Mutex
 	reqs []RunRequest
 }
@@ -32,14 +36,31 @@ func (s *otherSpawner) Spawn(ctx context.Context, _ *Run, req RunRequest) (*Run,
 	return r, "other", nil
 }
 
-// Fork starts the branch in the other agent from the kept events, as the
-// native API of another process does for a trusted caller.
-func (s *otherSpawner) Fork(ctx context.Context, _ *Run, events []Event, req ForkRequest) (*Run, string, error) {
-	r, err := s.other.ForkEvents(ctx, events, req)
-	if err != nil {
-		return nil, "", err
+// Place names the other agent as the process of a branch. A test that sets
+// placeErr gets that error instead.
+func (s *otherSpawner) Place(context.Context, *Run) (string, error) {
+	if s.placeErr != nil {
+		return "", s.placeErr
 	}
-	return r, "other", nil
+	return "other", nil
+}
+
+// Branch starts the branch in the other agent from the kept events, as the
+// native API of another process does for a trusted caller. A test that sets
+// branchErr gets that error instead, and one that sets branchWait waits for
+// that channel or the context first, as a child Task that boots would.
+func (s *otherSpawner) Branch(ctx context.Context, _ string, events []Event, req ForkRequest) (*Run, error) {
+	if s.branchWait != nil {
+		select {
+		case <-s.branchWait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if s.branchErr != nil {
+		return nil, s.branchErr
+	}
+	return s.other.ForkEvents(ctx, events, req)
 }
 
 func (s *otherSpawner) Get(ctx context.Context, _, id string) (*Run, error) {

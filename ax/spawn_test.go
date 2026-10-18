@@ -168,8 +168,12 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 		f.keys = append(f.keys, r.Header.Get("Idempotency-Key"))
 		f.body = body
 		f.mu.Unlock()
+		id, _ := body["id"].(string)
+		if id == "" {
+			id = "01BRANCH"
+		}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "01BRANCH", "agent": "default", "state": "running", "usage": map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "agent": "default", "state": "running", "usage": map[string]any{}})
 	})
 	mux.HandleFunc("GET /v1/runs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if !guard(w, r) {
@@ -584,29 +588,37 @@ func childProcessAgent(t *testing.T) (*fw.Agent, fw.Ledger) {
 // joinAnyListOf joins a list of strings for one assertion.
 func joinAnyListOf(list []string) string { return strings.Join(list, ",") }
 
-// Fork creates a child Task as Spawn does and starts the branch there from
-// the kept events, with its own idempotency key.
+// Place creates a child Task as Spawn does and names it at once; Branch
+// then starts the branch there from the kept events, under the id of the
+// request, with an idempotency key of its own.
 func TestForkCreatesAChildTaskAndStartsTheBranch(t *testing.T) {
 	ctx := context.Background()
 	ax := newFakeAX(t)
 	router := newFakeRouter(t)
 	s := newSpawnerUnderTest(t, ax, router)
 	parent := &fw.Run{ID: "01PARENT", Depth: 0}
-	events := []fw.Event{{Type: fw.EvRunQueued, Subject: "01PARENT", Seq: 1, Data: json.RawMessage(`{"agent":"default","input":"hello"}`)}, {Type: fw.EvRunStarted, Subject: "01PARENT", Seq: 2, Data: json.RawMessage(`{}`)}}
-	run, member, err := s.Fork(ctx, parent, events, fw.ForkRequest{Input: "try another way"})
+	member, err := s.Place(ctx, parent)
 	if err != nil {
-		t.Fatalf("Fork: %v", err)
+		t.Fatalf("Place: %v", err)
 	}
-	if run.ID != "01BRANCH" || !strings.HasPrefix(member, "ax:team/migrator-") {
-		t.Fatalf("run = %+v, member %q", run, member)
+	if !strings.HasPrefix(member, "ax:team/migrator-") {
+		t.Fatalf("member %q", member)
 	}
 	if tasks := ax.created(); len(tasks) != 1 {
 		t.Fatalf("tasks = %d", len(tasks))
 	}
+	events := []fw.Event{{Type: fw.EvRunQueued, Subject: "01PARENT", Seq: 1, Data: json.RawMessage(`{"agent":"default","input":"hello"}`)}, {Type: fw.EvRunStarted, Subject: "01PARENT", Seq: 2, Data: json.RawMessage(`{}`)}}
+	run, err := s.Branch(ctx, member, events, fw.ForkRequest{ID: "01BRANCHID", Input: "try another way"})
+	if err != nil {
+		t.Fatalf("Branch: %v", err)
+	}
+	if run.ID != "01BRANCHID" {
+		t.Fatalf("run = %+v", run)
+	}
 	router.mu.Lock()
 	defer router.mu.Unlock()
 	evs, _ := router.body["events"].([]any)
-	if len(evs) != 2 || router.body["input"] != "try another way" || len(router.keys) != 1 || !strings.HasPrefix(router.keys[0], "fork:01PARENT:team/migrator-") {
+	if len(evs) != 2 || router.body["input"] != "try another way" || router.body["id"] != "01BRANCHID" || len(router.keys) != 1 || router.keys[0] != "fork:01BRANCHID" {
 		t.Fatalf("the child got body %v with keys %v", router.body, router.keys)
 	}
 }

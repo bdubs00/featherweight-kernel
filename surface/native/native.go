@@ -743,7 +743,12 @@ func (s *server) fork(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.writeRun(w, r, http.StatusOK, run.ID)
+	status := http.StatusOK
+	if body.Spawn {
+		// The branch is placed, and its process takes it in the background.
+		status = http.StatusAccepted
+	}
+	s.writeRun(w, r, status, run.ID)
 }
 
 // MaxForkBodyBytes bounds the body of POST /v1/runs/fork, which carries the
@@ -761,6 +766,7 @@ func (s *server) forkEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		ID       string            `json:"id"`
 		Events   []fw.Event        `json:"events"`
 		Input    string            `json:"input"`
 		Model    string            `json:"model"`
@@ -769,7 +775,7 @@ func (s *server) forkEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeLimit(w, r, &body, MaxForkBodyBytes) {
 		return
 	}
-	run, err := s.a.ForkEvents(r.Context(), body.Events, fw.ForkRequest{Input: body.Input, Model: body.Model, Metadata: body.Metadata, Origin: fw.OriginHTTP})
+	run, err := s.a.ForkEvents(r.Context(), body.Events, fw.ForkRequest{ID: body.ID, Input: body.Input, Model: body.Model, Metadata: body.Metadata, Origin: fw.OriginHTTP})
 	if err != nil {
 		s.fail(w, r, err)
 		return
