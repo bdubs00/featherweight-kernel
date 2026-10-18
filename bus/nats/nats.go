@@ -2,9 +2,7 @@
 //
 // Publish stores each event in one JetStream stream. Subscribe is a core NATS
 // subscription: fan-out with no durability. Consume is a durable JetStream
-// pull consumer with at-least-once delivery. Retain and Watch implement
-// fw.Retainer with a JetStream key-value bucket that keeps the last event
-// of each subject.
+// pull consumer with at-least-once delivery.
 package nats
 
 import (
@@ -71,14 +69,9 @@ type Bus struct {
 
 	ensureMu sync.Mutex // serializes stream changes
 
-	retainBucket string             // the key-value bucket of Retain
-	retainMu     sync.Mutex         // guards kv
-	kv           jetstream.KeyValue // the bucket, found or created on first use
-
 	mu        sync.Mutex
 	subjects  []string // the subjects that the stream captures
 	consumers map[*consumer]struct{}
-	watches   map[*watch]struct{}
 	closed    bool
 }
 
@@ -99,8 +92,6 @@ var errNotConnected = errors.New("nats: not connected yet")
 //     environment by fw.EnvSecrets
 //   - concurrency: the number of messages that one Consume handles at a time
 //     (default 4)
-//   - retainBucket: the key-value bucket of Retain and Watch (default
-//     FW_RETAINED). The bus creates it on first use with a history of one.
 func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	if cfg == nil {
 		return nil, errors.New("nats: no config")
@@ -115,20 +106,12 @@ func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	if stream == "" {
 		stream = defaultStream
 	}
-	bucket := strings.TrimSpace(opt["retainBucket"])
-	if bucket == "" {
-		bucket = defaultRetainBucket
-	}
-	if !validBucket.MatchString(bucket) {
-		return nil, fmt.Errorf("nats: option retainBucket %q holds a character other than a letter, a digit, - or _", bucket)
-	}
 	b := &Bus{
-		stream:       stream,
-		retainBucket: bucket,
-		concurrency:  conc,
-		fetchWait:    defaultFetchWait,
-		ackWait:      ackWait,
-		consumers:    map[*consumer]struct{}{},
+		stream:      stream,
+		concurrency: conc,
+		fetchWait:   defaultFetchWait,
+		ackWait:     ackWait,
+		consumers:   map[*consumer]struct{}{},
 	}
 	b.SetLogger(slog.Default())
 
@@ -220,7 +203,7 @@ func (b *Bus) SetLogger(l *slog.Logger) {
 
 func (b *Bus) logger() *slog.Logger { return b.log.Load() }
 
-// Close stops every consumer loop and every watch and closes the
+// Close stops every consumer loop and closes the
 // connection. It does not wait for consumer handlers in flight. A message
 // whose handler is still running is redelivered after the ack wait.
 func (b *Bus) Close() error {
@@ -234,16 +217,9 @@ func (b *Bus) Close() error {
 	for c := range b.consumers {
 		cs = append(cs, c)
 	}
-	ws := make([]*watch, 0, len(b.watches))
-	for w := range b.watches {
-		ws = append(ws, w)
-	}
 	b.mu.Unlock()
 	for _, c := range cs {
 		c.signal()
-	}
-	for _, w := range ws {
-		w.stop()
 	}
 	for _, c := range cs {
 		<-c.done

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"sort"
 	"strings"
 	"sync"
 )
@@ -154,14 +153,12 @@ func (l *MemLedger) Runs(_ context.Context) iter.Seq2[string, error] {
 	}
 }
 
-// MemBus delivers events inside one process. It implements Retainer.
+// MemBus delivers events inside one process.
 type MemBus struct {
-	mu      sync.RWMutex
-	subs    map[string][]*memSub
-	cons    map[string][]*memSub
-	rr      map[string]int
-	kept    map[string]Event // the retained event of each subject
-	watches map[*memWatch]struct{}
+	mu   sync.RWMutex
+	subs map[string][]*memSub
+	cons map[string][]*memSub
+	rr   map[string]int
 }
 
 type memSub struct {
@@ -173,99 +170,9 @@ type memSub struct {
 // NewMemBus returns an in-process bus.
 func NewMemBus() *MemBus {
 	return &MemBus{
-		subs:    map[string][]*memSub{},
-		cons:    map[string][]*memSub{},
-		rr:      map[string]int{},
-		kept:    map[string]Event{},
-		watches: map[*memWatch]struct{}{},
-	}
-}
-
-// Retain implements Retainer.
-func (b *MemBus) Retain(_ context.Context, subject string, e Event) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.kept[subject] = e
-	for w := range b.watches {
-		if SubjectMatch(w.pattern, subject) {
-			w.push(e)
-		}
-	}
-	return nil
-}
-
-// Watch implements Retainer. The kept events arrive first, sorted by
-// subject, then each new one, in order.
-func (b *MemBus) Watch(_ context.Context, pattern string, h func(Event) error) (func(), error) {
-	w := &memWatch{pattern: pattern, h: h, wake: make(chan struct{}, 1), done: make(chan struct{})}
-	b.mu.Lock()
-	subjects := make([]string, 0, len(b.kept))
-	for subj := range b.kept {
-		if SubjectMatch(pattern, subj) {
-			subjects = append(subjects, subj)
-		}
-	}
-	sort.Strings(subjects)
-	for _, subj := range subjects {
-		w.push(b.kept[subj])
-	}
-	b.watches[w] = struct{}{}
-	b.mu.Unlock()
-	go w.run()
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			b.mu.Lock()
-			delete(b.watches, w)
-			b.mu.Unlock()
-			close(w.done)
-		})
-	}, nil
-}
-
-// memWatch is one Watch: a queue that one goroutine drains in order.
-type memWatch struct {
-	pattern string
-	h       func(Event) error
-	mu      sync.Mutex
-	queue   []Event
-	wake    chan struct{}
-	done    chan struct{}
-}
-
-func (w *memWatch) push(e Event) {
-	w.mu.Lock()
-	w.queue = append(w.queue, e)
-	w.mu.Unlock()
-	select {
-	case w.wake <- struct{}{}:
-	default:
-	}
-}
-
-func (w *memWatch) run() {
-	for {
-		select {
-		case <-w.done:
-			return
-		case <-w.wake:
-		}
-		for {
-			w.mu.Lock()
-			if len(w.queue) == 0 {
-				w.mu.Unlock()
-				break
-			}
-			e := w.queue[0]
-			w.queue = w.queue[1:]
-			w.mu.Unlock()
-			select {
-			case <-w.done:
-				return
-			default:
-			}
-			_ = w.h(e)
-		}
+		subs: map[string][]*memSub{},
+		cons: map[string][]*memSub{},
+		rr:   map[string]int{},
 	}
 }
 

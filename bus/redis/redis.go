@@ -3,9 +3,7 @@
 // Each subject is one Redis stream with the same key, and one Pub/Sub
 // channel with the same name. Publish adds the event to both. Subscribe
 // listens on the channels: fan-out with no durability. Consume reads the
-// stream through a consumer group with at-least-once delivery. Retain and
-// Watch implement fw.Retainer with one hash that keeps the last event of
-// each subject.
+// stream through a consumer group with at-least-once delivery.
 package redis
 
 import (
@@ -64,7 +62,6 @@ var errClosed = errors.New("redis: bus is closed")
 type Bus struct {
 	rdb         *redis.Client
 	group       string
-	retainKey   string // the hash of Retain and the prefix of its channels
 	maxlen      int64
 	concurrency int
 	name        string // the consumer name: host name and process id
@@ -91,8 +88,6 @@ type Bus struct {
 //     100000)
 //   - concurrency: the number of messages that one Consume handles at a time
 //     (default 4)
-//   - retainKey: the hash of Retain and Watch (default fw:retained). Retain
-//     also publishes on the channels "<retainKey>:<subject>".
 func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	if cfg == nil {
 		return nil, errors.New("redis: no config")
@@ -110,10 +105,6 @@ func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	if group == "" {
 		group = defaultGroup
 	}
-	retainKey := strings.TrimSpace(opt["retainKey"])
-	if retainKey == "" {
-		retainKey = defaultRetainKey
-	}
 	raw := cfg.Bus.URL
 	if raw == "" {
 		raw = defaultURL
@@ -129,7 +120,6 @@ func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	b := &Bus{
 		rdb:         redis.NewClient(ropt),
 		group:       group,
-		retainKey:   retainKey,
 		maxlen:      int64(maxlen),
 		concurrency: conc,
 		name:        host + "-" + strconv.Itoa(os.Getpid()),

@@ -28,7 +28,7 @@ func TestOpenWhileTheServerIsDown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cfg := fw.DefaultConfig()
-	cfg.Bus = fw.BusConfig{Driver: "nats", URL: fmt.Sprintf("nats://127.0.0.1:%d", port), Intake: "down.jobs", Egress: "down.events", Options: map[string]string{"stream": "DOWN", "retainBucket": "down"}}
+	cfg.Bus = fw.BusConfig{Driver: "nats", URL: fmt.Sprintf("nats://127.0.0.1:%d", port), Intake: "down.jobs", Egress: "down.events", Options: map[string]string{"stream": "DOWN"}}
 
 	start := time.Now()
 	b, err := Open(ctx, cfg)

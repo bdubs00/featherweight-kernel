@@ -788,16 +788,7 @@ type Bus interface {
 
 `Subscribe` is fan-out. `Consume` is a durable queue with at-least-once delivery. The handler returns `nil` to acknowledge a message and an error to request redelivery. Every message on the bus is a CloudEvents JSON object with the envelope from section 4.1.
 
-A driver can also keep the last event of each subject. Such a driver implements `Retainer`:
-
-```go
-type Retainer interface {
-    Retain(ctx context.Context, subject string, e Event) error
-    Watch(ctx context.Context, pattern string, h func(Event) error) (stop func(), err error)
-}
-```
-
-`Retain` replaces the kept event of a subject and delivers the event to every watcher. `Watch` first delivers the kept event of each subject that matches the pattern, and then each new one. A retained event never enters the stream of `Publish`, so a heartbeat does not fill the bus. The fleet driver of the workbench uses `Retainer` (the workbench architecture, section 4.2). The drivers `mem`, `nats`, and `redis` implement it.
+The bus has no other contract. An earlier revision let a driver keep the last event of each subject for the records of the fleet; the fleet reads the platforms now (the workbench architecture, section 4), so that contract went.
 
 ### 9.2 Drivers
 
@@ -1584,6 +1575,8 @@ The node revision of 2026-10-17 gave every ledger event the field `node`, the na
 The spawner revision of 2026-10-17 put `spawn_task` behind the `Spawner` plug (docs/ROADMAP.md, section 3). `Agent.SpawnChild` starts a child in this process or through the spawner, the ledger of the parent records a remote child in `fw.run.child`, and the run methods of the agent reach a remote child through the spawner. The driver `ax` of the package `ax` creates a child Task over the ax gRPC API and drives its run through the atenet router. The native API lets a trusted caller name the person of a run with `principal` and `principalKind`, and `RunRequest` gained `PrincipalKind`. The module depends on `github.com/google/ax` for the generated API.
 
 The token broker revision of 2026-10-17 added the kernel package `tokens` (docs/ROADMAP.md, section 3). With `tokens.url`, a process gets the access tokens of people from a broker, the front of the workbench, through `fw.PersonTokens`, and a notice on the bus resumes its paused calls when a connection ends. The configuration gained the key `tokens`, and `fw doctor` gained the line `tokens`. A `cli.DoctorCheck` of a linked package gets the secrets of the process since this revision.
+
+The records revision of 2026-10-18 removed `fw.Retainer` from the bus contract, with the retained events of the `mem`, `nats`, and `redis` drivers and the options `retainBucket` and `retainKey`. The fleet of the workbench reads the ax API and the egress stream, and a worker publishes nothing about itself (the workbench architecture, section 4).
 
 The connections revision of 2026-10-17 moved the grants and the OAuth flows out of the kernel, the fifth and last step of stage 3. The kernel lost `fw.Grant`, `fw.GrantStore`, the stores, `fw.Connector`, `fw.Connection`, `fw.ConnectStart`, `Agent.Connections`, `Agent.BeginConnect`, `Agent.FinishConnect`, `Agent.Disconnect`, `Agent.Grants`, `fw.WithGrantStore`, the key `grants` of the configuration, and the `connections` line of `fw doctor`. The MCP client keeps the sessions of people and the placeholder tool, and gets the tokens of a person from `fw.PersonTokens`, which a linked package sets with `Agent.SetPersonTokens`. `Agent.Connected` resumes the paused calls when a connection ends. The package `tools/mcp` exports its OAuth helpers for such a package. The workbench package `connections` keeps the grants under `workbench.grants` and `FW_WORKBENCH_GRANTS_*` (the workbench architecture, section 11). The file `fw/grants.go` stays: it projects the tool grants of a profile for the surfaces and has nothing to do with OAuth.
 
