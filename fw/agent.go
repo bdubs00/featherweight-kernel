@@ -71,7 +71,7 @@ type Agent struct {
 	zoneMu sync.Mutex
 	zones  map[string]zoneEntry // time zones by name, see clock.go
 
-	decisionPoints []external // access.external and policy.external, see external.go
+	decisionPoints []external // policy.external and the points of linked packages, see external.go
 
 	services   []io.Closer // what stops the services, see service.go
 	accessMode string      // AccessModeRules, AccessModeExternal, or AccessModeCustom
@@ -195,19 +195,25 @@ func New(opts ...Option) (*Agent, error) {
 			return nil, err
 		}
 	}
-	switch {
-	case a.authz != nil:
-		a.accessMode = AccessModeCustom
-	case cfg.Access.External != nil:
-		a.accessMode = AccessModeExternal
-	default:
-		a.accessMode = AccessModeRules
+	a.accessMode = AccessModeCustom
+	if a.authz == nil && o.authzFrom != nil {
+		z, mode, err := o.authzFrom(a)
+		if err != nil {
+			return nil, err
+		}
+		if z != nil {
+			a.authz = z
+			if mode != "" {
+				a.accessMode = mode
+			}
+		}
 	}
-	if err := a.setupExternal(ctx, a.authz != nil, a.policy != nil); err != nil {
+	if err := a.setupExternal(ctx, a.policy != nil); err != nil {
 		return nil, err
 	}
 	if a.authz == nil {
 		a.authz = NewRulesAuthz(cfg.Access, a.ProfileNamed)
+		a.accessMode = AccessModeRules
 	}
 	if a.tlsConfig == nil && cfg.TLS.Provider != "" {
 		if a.tlsConfig, err = NewTLSConfig(ctx, cfg, a.secrets); err != nil {

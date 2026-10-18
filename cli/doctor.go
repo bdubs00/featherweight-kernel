@@ -439,7 +439,7 @@ func certNames(c *x509.Certificate) []string {
 // note, because fw run and fw agents then need a role on each agent.
 func (d *doctor) checkAccess(cfg *fw.Config) {
 	if accessExternal(cfg) {
-		d.ok("access: access.external hands every decision to %s; access.default, access.admins, and access.creators do not apply, and the access block of each profile goes to it as data", controlPlane(cfg))
+		d.ok("access: %s decides for every caller; access.default, access.admins, and access.creators do not apply, and the access block of each profile goes to it as data", controlPlane(cfg))
 		return
 	}
 	closed := accessClosed(cfg)
@@ -463,12 +463,13 @@ func (d *doctor) checkAccess(cfg *fw.Config) {
 }
 
 // checkExternal prints one line for each external decision point:
-// access.external and policy.external. It builds an agent that reaches no
-// model and no tool source, and asks each decision point whether it is
-// ready. A decision point on the bus has no probe, so its line says that
-// fw doctor cannot make sure that it answers.
+// policy.external, and the control plane of a linked package, such as
+// workbench.access.external. It builds an agent that reaches no model and
+// no tool source, and asks each decision point whether it is ready. A
+// decision point on the bus has no probe, so its line says that fw doctor
+// cannot make sure that it answers.
 func (d *doctor) checkExternal(ctx context.Context, cfg *fw.Config) {
-	if cfg.Access.External == nil && cfg.Policy.External == nil {
+	if cfg.Policy.External == nil && !accessExternal(cfg) {
 		return
 	}
 	c := *cfg // newAgent changes the bus settings, and the bus check reads them

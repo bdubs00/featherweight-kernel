@@ -391,11 +391,12 @@ func newAgent(ctx context.Context, cfg *fw.Config, mode agentMode) (*fw.Agent, e
 }
 
 // localBus returns the option of an in-memory bus for a verb that only
-// reads or manages, unless an external decision point (access.external or
-// policy.external) answers on the bus. Then the verb keeps the configured
-// bus, without intake and egress, so that the control plane hears it.
+// reads or manages, unless an external decision point (policy.external, or
+// the control plane of a linked package) answers on the bus. Then the verb
+// keeps the configured bus, without intake and egress, so that the control
+// plane hears it.
 func localBus(cfg *fw.Config) []fw.Option {
-	for _, e := range []*fw.ExternalPolicyConfig{cfg.Access.External, cfg.Policy.External} {
+	for _, e := range []*fw.ExternalPolicyConfig{externalAccess(cfg), cfg.Policy.External} {
 		if e != nil && e.Transport() == "bus" {
 			cfg.Bus.Egress = ""
 			return nil

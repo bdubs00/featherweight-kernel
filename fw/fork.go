@@ -147,6 +147,23 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	return cloneRun(placeholder), nil
 }
 
+// Starting counts the branches of this process whose start in another
+// process is still open. The status of the process is not idle while one
+// is, so a controller does not put the process to sleep before its child
+// has the branch.
+func (a *Agent) Starting() int {
+	k := a.k
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n := 0
+	for _, ref := range k.remote {
+		if _, ok := ref.starting(); ok {
+			n++
+		}
+	}
+	return n
+}
+
 // startBranch sends a branch to its process and ends its start. A branch
 // that the process does not take is recorded here instead, as failed with
 // the reason, or as canceled when Cancel ended the start, under the id of

@@ -47,10 +47,9 @@ type Access struct {
 // control plane that does not answer refuses every request with
 // ErrAuthzUnavailable.
 type AccessConfig struct {
-	Default  string                `yaml:"default" json:"default"`
-	Admins   []string              `yaml:"admins,omitempty" json:"admins,omitempty"`
-	Creators []string              `yaml:"creators,omitempty" json:"creators,omitempty"`
-	External *ExternalPolicyConfig `yaml:"external,omitempty" json:"external,omitempty"`
+	Default  string   `yaml:"default" json:"default"`
+	Admins   []string `yaml:"admins,omitempty" json:"admins,omitempty"`
+	Creators []string `yaml:"creators,omitempty" json:"creators,omitempty"`
 }
 
 // Actions that the kernel authorizes.
@@ -218,16 +217,21 @@ type BatchAuthz interface {
 	AllowAll(ctx context.Context, p *Principal, checks []AuthzCheck) []error
 }
 
-// lineageAuthz is an Authz that decides about a child run from its lineage
-// by itself, so Authorize does not ask again for the ancestors.
-type lineageAuthz interface{ decidesLineage() }
+// LineageAuthz is an Authz that decides about a child run from its lineage
+// itself, such as the control-plane authorization of the workbench, which
+// sends the ancestors of a run in each check. Authorize then does not ask
+// again for the ancestors after a refusal.
+type LineageAuthz interface {
+	Authz
+	DecidesLineage()
+}
 
 // Authorize asks the Authz of the agent whether the principal in ctx can do
 // the action. A context without a principal is a call from the process
 // itself and is allowed. An action on a child run is also allowed when the
 // same action is allowed on an ancestor, so whoever sees a run sees the
-// whole tree under it. An external decision point (access.external)
-// decides that rule itself from the lineage in its request.
+// whole tree under it. A LineageAuthz decides that rule itself from the
+// lineage in its request.
 func (a *Agent) Authorize(ctx context.Context, action string, t Target) error {
 	return a.AuthorizeAll(ctx, []AuthzCheck{{Action: action, Target: t}})[0]
 }
@@ -248,7 +252,7 @@ func (a *Agent) AuthorizeAll(ctx context.Context, checks []AuthzCheck) []error {
 			out[i] = a.authz.Allow(ctx, p, c.Action, c.Target)
 		}
 	}
-	if _, ok := a.authz.(lineageAuthz); ok {
+	if _, ok := a.authz.(LineageAuthz); ok {
 		return out
 	}
 	for i, c := range checks {
@@ -275,12 +279,11 @@ func (a *Agent) Authz() Authz { return a.authz }
 // How a process authorizes, as AccessMode reports it.
 const (
 	AccessModeRules    = "rules"    // the access rules of section 13.2
-	AccessModeExternal = "external" // access.external decides
-	AccessModeCustom   = "custom"   // an Authz from WithAuthz decides
+	AccessModeExternal = "external" // a control plane outside the process decides, through an Authz from WithAuthzFrom
+	AccessModeCustom   = "custom"   // an Authz from WithAuthz, or from WithAuthzFrom without a mode, decides
 )
 
 // AccessMode names how this process authorizes: AccessModeRules,
-// AccessModeExternal, or AccessModeCustom. A linked package that tells
-// other processes about this one, such as the fleet of the workbench,
-// publishes it.
+// AccessModeExternal, or AccessModeCustom. The view of the workbench reads
+// it to decide as this process decides.
 func (a *Agent) AccessMode() string { return a.accessMode }

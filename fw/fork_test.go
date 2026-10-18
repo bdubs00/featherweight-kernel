@@ -200,6 +200,9 @@ func TestForkInAnotherProcessCanceledWhileItStarts(t *testing.T) {
 	if r, err := a.Get(ctx, b.ID); err != nil || r.State != StateQueued {
 		t.Fatalf("the branch while it starts = %+v, %v", r, err)
 	}
+	if a.Starting() != 1 {
+		t.Fatalf("Starting = %d while the branch starts", a.Starting())
+	}
 	if err := a.Decide(ctx, b.ID, ApprovalDecision{ApprovalID: "x", Decision: "allow"}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("Decide while the branch starts = %v", err)
 	}
@@ -212,6 +215,9 @@ func TestForkInAnotherProcessCanceledWhileItStarts(t *testing.T) {
 	}
 	if list, _ := other.List(ctx); len(list) != 0 {
 		t.Fatalf("the other process holds %+v", list)
+	}
+	if a.Starting() != 0 {
+		t.Fatalf("Starting = %d after the start ended", a.Starting())
 	}
 }
 

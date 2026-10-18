@@ -285,9 +285,8 @@ func (g *globals) bootAX(ctx context.Context, b *axBoot, listen string) error {
 		path = config.FindIn(home)
 	}
 	// ApplyToConfig below adds the MCP servers of the Workspace to
-	// tools.mcp. access.external.mcp and policy.external.mcp can name one
-	// of them, so the load skips that check, and CheckControlServers runs
-	// after the merge.
+	// tools.mcp. policy.external.mcp can name one of them, so the load
+	// skips that check, and CheckControlServers runs after the merge.
 	cfg, err := config.LoadBeforeMerge(path, func(c *fw.Config) {
 		g.override(c)
 		if c.Home == "" {

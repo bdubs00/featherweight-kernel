@@ -494,7 +494,8 @@ type PolicyConfig struct {
 // ExternalPolicyConfig routes decisions to a decision point out of process
 // (see DecisionPoint). It sets exactly one of MCP and Bus. MCP names an
 // entry of tools.mcp, and Tool names its tool: "authorize" for
-// access.external and "decide" for policy.external by default. The model
+// the control plane of the workbench and "decide" for policy.external by
+// default. The model
 // never sees the tools of that server. Bus is the subject that receives a
 // fw.decision.requested event. Timeout bounds one request, 5s by default.
 type ExternalPolicyConfig struct {

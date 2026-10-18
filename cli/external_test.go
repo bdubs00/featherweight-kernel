@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
@@ -60,13 +62,79 @@ func (c *busControlPlane) seen() []string {
 	return append([]string(nil), c.subjects...)
 }
 
-// externalEnv prepares an environment whose access goes to a control
-// plane on a shared in-memory bus.
+// planeAuthz is the smallest authorization plug over a decision point, as
+// the workbench builds one: it sends the checks of one call in one request
+// and refuses when the control plane does not answer.
+type planeAuthz struct {
+	a       *fw.Agent
+	dp      fw.DecisionPoint
+	timeout time.Duration
+}
+
+func (z *planeAuthz) DecidesLineage() {}
+
+func (z *planeAuthz) Allow(ctx context.Context, p *fw.Principal, action string, t fw.Target) error {
+	return z.AllowAll(ctx, p, []fw.AuthzCheck{{Action: action, Target: t}})[0]
+}
+
+func (z *planeAuthz) AllowAll(ctx context.Context, p *fw.Principal, checks []fw.AuthzCheck) []error {
+	out := make([]error, len(checks))
+	req := fw.AuthzRequest{Kind: fw.DecisionAuthz, Version: fw.DecisionVersion, Principal: *p}
+	for _, c := range checks {
+		agent := c.Target.Agent
+		if agent == "" && c.Target.Run != nil {
+			agent = c.Target.Run.Agent
+		}
+		req.Checks = append(req.Checks, fw.AuthzQuery{Action: c.Action, Agent: agent, Run: z.a.RunFacts(c.Target.Run)})
+	}
+	body, _ := json.Marshal(req)
+	ctx, cancel := context.WithTimeout(ctx, z.timeout)
+	defer cancel()
+	raw, err := z.dp.Decide(ctx, body)
+	var ans fw.AuthzAnswer
+	if err == nil {
+		if json.Unmarshal(raw, &ans) != nil || len(ans.Decisions) != len(checks) {
+			err = errors.New("a bad answer")
+		}
+	}
+	for i := range out {
+		switch {
+		case err != nil:
+			out[i] = fmt.Errorf("%w: %v", fw.ErrAuthzUnavailable, err)
+		case !ans.Decisions[i].Allow:
+			out[i] = fmt.Errorf("%w: %s", fw.ErrForbidden, ans.Decisions[i].Reason)
+		}
+	}
+	return out
+}
+
+// extTimeout is the timeout of the control plane of externalEnv. A test
+// sets it short to see a control plane that does not answer.
+var extTimeout = 2 * time.Second
+
+// externalEnv prepares an environment whose authorization goes to a control
+// plane on a shared in-memory bus, as the workbench sets it up: the hook
+// ExternalAccess names the control plane, and the options of every agent
+// build the plug over a decision point.
 func externalEnv(t *testing.T, allow func(fw.Principal, fw.AuthzQuery) bool, opts ...fw.Option) *busControlPlane {
 	t.Helper()
 	bus := fw.NewMemBus()
-	env(t, append([]fw.Option{fw.WithBus(bus)}, opts...)...)
-	t.Setenv("FW_ACCESS_EXTERNAL_BUS", "fw.authz")
+	ext := func() *fw.ExternalPolicyConfig {
+		return &fw.ExternalPolicyConfig{Bus: "fw.authz", Timeout: extTimeout}
+	}
+	build := func(a *fw.Agent) (fw.Authz, string, error) {
+		dp, err := a.NewDecisionPoint(context.Background(), "workbench.access", *ext())
+		if err != nil {
+			return nil, "", err
+		}
+		return &planeAuthz{a: a, dp: dp, timeout: extTimeout}, fw.AccessModeExternal, nil
+	}
+	env(t, append([]fw.Option{fw.WithBus(bus), fw.WithAuthzFrom(build)}, opts...)...)
+	ExternalAccess = func(*fw.Config) *fw.ExternalPolicyConfig { return ext() }
+	t.Cleanup(func() {
+		ExternalAccess = nil
+		extTimeout = 2 * time.Second
+	})
 	cp := &busControlPlane{allow: allow}
 	if allow != nil {
 		cp.serve(t, bus, "fw.authz")
@@ -81,8 +149,8 @@ func TestRunAsksTheControlPlaneForTheLocalUser(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "hello back") {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
-	// access.default is open, but with access.external the local user
-	// still reaches the control plane.
+	// access.default is open, but with a control plane the local user
+	// still reaches it.
 	want := localPrincipal().Subject
 	seen := cp.seen()
 	if len(seen) == 0 || seen[0] != want {
@@ -95,14 +163,14 @@ func TestRunNamesARefusalOfTheControlPlane(t *testing.T) {
 		fw.WithModel(&scriptModel{resps: []*fw.Response{endTurn("never")}}))
 	code, _, errOut := run(t, "", "run", "hello")
 	if code == 0 || !strings.Contains(errOut, "the control plane says no") ||
-		!strings.Contains(errOut, "the bus subject fw.authz refused it; access.admins and the access blocks do not apply while access.external is set") {
+		!strings.Contains(errOut, "the bus subject fw.authz refused it; access.admins and the access blocks do not apply while a control plane decides") {
 		t.Fatalf("exit %d\n%s", code, errOut)
 	}
 }
 
 func TestRunNamesAControlPlaneThatDoesNotAnswer(t *testing.T) {
 	externalEnv(t, nil, fw.WithModel(&scriptModel{resps: []*fw.Response{endTurn("never")}}))
-	t.Setenv("FW_ACCESS_EXTERNAL_TIMEOUT", "50ms")
+	extTimeout = 50 * time.Millisecond
 	code, _, errOut := run(t, "", "run", "hello")
 	if code == 0 || !strings.Contains(errOut, "the control plane did not answer: make sure that the bus subject fw.authz is reachable; fw doctor checks it") {
 		t.Fatalf("exit %d\n%s", code, errOut)
@@ -115,14 +183,14 @@ func TestWhoamiAsksTheControlPlane(t *testing.T) {
 	})
 	code, out, errOut := run(t, "", "whoami")
 	if code != 0 || !strings.Contains(out, "admin: true\n") ||
-		!strings.Contains(out, "acts: always; access.external hands every decision to the bus subject fw.authz") {
+		!strings.Contains(out, "acts: always; the bus subject fw.authz decides for every caller") {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
 }
 
 func TestWhoamiWithoutAnAnswer(t *testing.T) {
 	externalEnv(t, nil)
-	t.Setenv("FW_ACCESS_EXTERNAL_TIMEOUT", "50ms")
+	extTimeout = 50 * time.Millisecond
 	code, out, errOut := run(t, "", "whoami")
 	if code != 1 || !strings.Contains(out, "subject: "+localPrincipal().Subject) || !strings.Contains(out, "admin: unknown\n") ||
 		!strings.Contains(errOut, "the control plane did not answer") {
@@ -172,8 +240,8 @@ func TestDoctorExternal(t *testing.T) {
 	t.Setenv("FW_POLICY_EXTERNAL_MCP", "control")
 	_, out, _ := run(t, "", "doctor")
 	for _, want := range []string{
-		"ok    access: access.external hands every decision to the bus subject fw.authz; access.default, access.admins, and access.creators do not apply, and the access block of each profile goes to it as data\n",
-		"ok    access.external: decided by the bus subject fw.authz; this transport has no probe, so fw doctor cannot make sure that it answers\n",
+		"ok    access: the bus subject fw.authz decides for every caller; access.default, access.admins, and access.creators do not apply, and the access block of each profile goes to it as data\n",
+		"ok    workbench.access.external: decided by the bus subject fw.authz; this transport has no probe, so fw doctor cannot make sure that it answers\n",
 		"ok    policy.external: decided by the tool decide of the MCP server control, which is ready\n",
 	} {
 		if !strings.Contains(out, want) {

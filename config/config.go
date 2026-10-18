@@ -48,9 +48,8 @@ func LoadWith(path string, override func(*fw.Config)) (*fw.Config, error) {
 
 // LoadBeforeMerge is LoadWith for a caller that adds tools.mcp entries
 // after the load, such as fw serve under ax, which merges the MCP servers
-// of the Workspace. It skips the check that access.external.mcp and
-// policy.external.mcp name an entry of tools.mcp, because the entry can
-// come from the merge. The caller runs CheckControlServers after the merge.
+// of the Workspace. It skips the check that policy.external.mcp names an
+// entry of tools.mcp, because the entry can come from the merge. The caller runs CheckControlServers after the merge.
 func LoadBeforeMerge(path string, override func(*fw.Config)) (*fw.Config, error) {
 	return loadChecked(path, override, os.Environ(), false)
 }
@@ -270,10 +269,9 @@ func (e *ValidationError) Error() string {
 // lists every problem, or nil.
 func Validate(c *fw.Config) error { return validate(c, true) }
 
-// CheckControlServers makes sure that access.external.mcp and
-// policy.external.mcp name an entry of tools.mcp. It returns one
-// *ValidationError, or nil. Validate runs it too. A caller of
-// LoadBeforeMerge runs it after it adds its entries.
+// CheckControlServers makes sure that policy.external.mcp names an entry
+// of tools.mcp. It returns one *ValidationError, or nil. Validate runs it
+// too. A caller of LoadBeforeMerge runs it after it adds its entries.
 func CheckControlServers(c *fw.Config) error {
 	var p []string
 	for _, x := range externals(c) {
@@ -515,9 +513,11 @@ type external struct {
 	ext *fw.ExternalPolicyConfig
 }
 
-// externals returns access.external and policy.external, set or not.
+// externals returns the external decision points of the kernel, set or
+// not: policy.external. The control plane of the workbench is in its own
+// block, and the workbench checks it.
 func externals(c *fw.Config) []external {
-	return []external{{"access.external", c.Access.External}, {"policy.external", c.Policy.External}}
+	return []external{{"policy.external", c.Policy.External}}
 }
 
 // checkExternal lists the problems of one external decision point: it

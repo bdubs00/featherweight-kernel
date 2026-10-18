@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,11 +78,11 @@ func (c *controlPlane) policyRequests() []PolicyRequest {
 	return append([]PolicyRequest(nil), c.policy...)
 }
 
-// externalAgent builds an agent whose access and policy go to the bus.
+// externalAgent builds an agent whose policy goes to the bus.
 func externalAgent(t *testing.T, m Model, bus Bus, mutate func(*Config), opts ...Option) *Agent {
 	t.Helper()
 	cfg := DefaultConfig()
-	cfg.Access.External = &ExternalPolicyConfig{Bus: "fw.authz", Timeout: 2 * time.Second}
+	cfg.Policy.External = &ExternalPolicyConfig{Bus: "fw.policy", Timeout: 2 * time.Second}
 	if mutate != nil {
 		mutate(cfg)
 	}
@@ -93,138 +94,97 @@ var (
 	bob   = &Principal{Subject: "bob", Kind: KindUser}
 )
 
-func TestExternalAuthzDecides(t *testing.T) {
-	ctx := testCtx(t)
-	bus := NewMemBus()
-	cp := &controlPlane{decide: func(p Principal, q AuthzQuery) AuthzDecision {
-		if p.Subject == "alice" {
-			return AuthzDecision{Allow: true}
-		}
-		return AuthzDecision{Reason: "only the platform group runs agents"}
-	}}
-	cp.serve(t, bus, "fw.authz")
-	a := externalAgent(t, newScript(endTurn("hi")).Model(), bus, func(c *Config) {
-		// The local rules would refuse alice and allow bob. The control
-		// plane is the only source of truth, so they do not apply.
-		c.Access.Default = "closed"
-		c.Access.Admins = []string{"bob"}
-	})
-	r, err := a.Run(WithPrincipal(ctx, alice), "hi")
-	mustState(t, r, err, StateCompleted)
-	_, err = a.Start(WithPrincipal(ctx, bob), "hi")
-	if !errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "only the platform group runs agents") {
-		t.Fatalf("bob = %v", err)
-	}
-	reqs := cp.authzRequests()
-	if len(reqs) < 2 || reqs[0].Kind != DecisionAuthz || reqs[0].Version != DecisionVersion || reqs[0].Principal.Subject != "alice" ||
-		len(reqs[0].Checks) != 1 || reqs[0].Checks[0].Action != ActionAgentRun || reqs[0].Checks[0].Agent != "default" {
-		t.Fatalf("requests = %+v", reqs)
-	}
-	// A call from the process itself carries no principal and never asks.
-	n := len(cp.authzRequests())
-	if _, err := a.List(ctx); err != nil || len(cp.authzRequests()) != n {
-		t.Fatalf("an internal call asked the control plane: %v", err)
-	}
+// busAuthz is the smallest authorization plug over a decision point, as the
+// workbench builds one: it sends one AuthzRequest per check and refuses
+// when the control plane does not answer. It decides about the lineage
+// itself, so the kernel does not ask again for the ancestors.
+type busAuthz struct {
+	a  *Agent
+	dp DecisionPoint
 }
 
-func TestExternalAuthzBatchesAndSendsLineage(t *testing.T) {
+func (z *busAuthz) DecidesLineage() {}
+
+func (z *busAuthz) Allow(ctx context.Context, p *Principal, action string, t Target) error {
+	agent := t.Agent
+	if agent == "" && t.Run != nil {
+		agent = t.Run.Agent
+	}
+	req := AuthzRequest{Kind: DecisionAuthz, Version: DecisionVersion, Principal: *p,
+		Checks: []AuthzQuery{{Action: action, Agent: agent, Run: z.a.RunFacts(t.Run)}}}
+	body, _ := json.Marshal(req)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	raw, err := z.dp.Decide(ctx, body)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrAuthzUnavailable, err)
+	}
+	var ans AuthzAnswer
+	if json.Unmarshal(raw, &ans) != nil || len(ans.Decisions) != 1 {
+		return fmt.Errorf("%w: a bad answer", ErrAuthzUnavailable)
+	}
+	if !ans.Decisions[0].Allow {
+		return fmt.Errorf("%w: %s", ErrForbidden, ans.Decisions[0].Reason)
+	}
+	return nil
+}
+
+// WithAuthzFrom builds the plug from the agent, so a plug that needs the
+// bus and the configuration of the agent, such as the control-plane
+// authorization of the workbench, plugs in through one option. The agent
+// reports the mode that the builder names, closes the decision point, and
+// probes it for fw doctor. A LineageAuthz is not asked again for the
+// ancestors of a run after a refusal.
+func TestWithAuthzFrom(t *testing.T) {
 	ctx := testCtx(t)
 	bus := NewMemBus()
+	var asked atomic.Int32
 	cp := &controlPlane{decide: func(p Principal, q AuthzQuery) AuthzDecision {
-		// The control plane implements the tree rule itself: the one who
-		// started the root run can view every run under it.
-		if q.Run == nil {
-			return AuthzDecision{Allow: true}
+		asked.Add(1)
+		if q.Run != nil && q.Run.ID != "" && p.Subject == "bob" {
+			return AuthzDecision{Reason: "bob reads no run"}
 		}
-		owner := q.Run.Principal
-		if n := len(q.Run.Lineage); n > 0 {
-			owner = q.Run.Lineage[n-1].Principal
-		}
-		return AuthzDecision{Allow: owner == p.Subject}
+		return AuthzDecision{Allow: p.Subject == "alice" || p.Subject == "bob"}
 	}}
 	cp.serve(t, bus, "fw.authz")
-	a := externalAgent(t, newScript(endTurn("p"), endTurn("c"), endTurn("x")).Model(), bus, nil)
+	build := func(a *Agent) (Authz, string, error) {
+		dp, err := a.NewDecisionPoint(context.Background(), "workbench.access", ExternalPolicyConfig{Bus: "fw.authz"})
+		if err != nil {
+			return nil, "", err
+		}
+		return &busAuthz{a: a, dp: dp}, AccessModeExternal, nil
+	}
+	cfg := DefaultConfig()
+	cfg.Access.Default = "closed" // the rules would refuse alice; the plug decides instead
+	a := newTestAgent(t, newScript(endTurn("p"), endTurn("c")).Model(), WithConfig(cfg), WithBus(bus), WithAuthzFrom(build))
+	if a.AccessMode() != AccessModeExternal {
+		t.Fatalf("mode = %q", a.AccessMode())
+	}
+	st := a.ProbeExternal(ctx)
+	if len(st) != 1 || st[0].Use != "workbench.access" || st[0].Probed || st[0].Target != "the bus subject fw.authz" {
+		t.Fatalf("status = %+v", st)
+	}
 	parent, err := a.Run(WithPrincipal(ctx, alice), "parent")
 	mustState(t, parent, err, StateCompleted)
 	child, err := a.Run(ctx, "child", WithParent(parent.ID))
 	mustState(t, child, err, StateCompleted)
-	other, err := a.Run(ctx, "other", WithPrincipalName("bob"))
-	mustState(t, other, err, StateCompleted)
-
-	before := len(cp.authzRequests())
-	runs, err := a.List(WithPrincipal(ctx, alice))
-	if err != nil {
-		t.Fatal(err)
-	}
-	reqs := cp.authzRequests()[before:]
-	if len(reqs) != 1 || len(reqs[0].Checks) != 3 {
-		t.Fatalf("listing sent %d requests: %+v", len(reqs), reqs)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("alice sees %d runs, want the parent and the child", len(runs))
-	}
-	for _, q := range reqs[0].Checks {
-		if q.Run.ID == child.ID && (len(q.Run.Lineage) != 1 || q.Run.Lineage[0].ID != parent.ID || q.Run.Lineage[0].Principal != "alice") {
-			t.Fatalf("child facts = %+v", q.Run)
-		}
-	}
-	// A refusal is final: fw does not ask again for the ancestors.
-	before = len(cp.authzRequests())
-	if _, err := a.Get(WithPrincipal(ctx, bob), child.ID); !errors.Is(err, ErrForbidden) {
+	// A refusal about the child is final: one request, no walk up the tree.
+	asked.Store(0)
+	if _, err := a.Get(WithPrincipal(ctx, bob), child.ID); !errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "bob reads no run") {
 		t.Fatalf("bob reads the child: %v", err)
 	}
-	if got := len(cp.authzRequests()) - before; got != 1 {
-		t.Fatalf("one refusal sent %d requests", got)
+	if n := asked.Load(); n != 1 {
+		t.Fatalf("one refusal asked %d times", n)
 	}
-}
-
-func TestExternalAuthzCache(t *testing.T) {
-	ctx := WithPrincipal(testCtx(t), alice)
-	bus := NewMemBus()
-	var ttl atomic.Int64
-	ttl.Store(60_000)
-	cp := &controlPlane{decide: func(Principal, AuthzQuery) AuthzDecision {
-		return AuthzDecision{Allow: true, TTLMs: ttl.Load()}
-	}}
-	cp.serve(t, bus, "fw.authz")
-	clock := NewManualClock(t0)
-	a := externalAgent(t, newScript().Model(), bus, nil, WithClock(clock), WithProfile(AgentProfile{Name: "reviewer"}))
-	for i := 0; i < 3; i++ {
-		_ = a.ProfilesFor(ctx)
+	// A nil plug from the builder keeps the rules.
+	b := newTestAgent(t, newScript().Model(), WithAuthzFrom(func(*Agent) (Authz, string, error) { return nil, "", nil }))
+	if b.AccessMode() != AccessModeRules {
+		t.Fatalf("mode without a plug = %q", b.AccessMode())
 	}
-	if n := len(cp.authzRequests()); n != 1 {
-		t.Fatalf("cached decision sent %d requests", n)
-	}
-	clock.Advance(2 * time.Minute)
-	ttl.Store(0)
-	_ = a.ProfilesFor(ctx)
-	_ = a.ProfilesFor(ctx)
-	if n := len(cp.authzRequests()); n != 3 {
-		t.Fatalf("expired and uncached decisions sent %d requests, want 3", n)
-	}
-}
-
-func TestExternalAuthzUnavailable(t *testing.T) {
-	ctx := testCtx(t)
-	a := externalAgent(t, newScript(endTurn("internal")).Model(), NewMemBus(), func(c *Config) {
-		c.Access.External.Timeout = 30 * time.Millisecond
-	}, WithProfile(AgentProfile{Name: "reviewer"}))
-	_, err := a.Start(WithPrincipal(ctx, alice), "hi")
-	if !errors.Is(err, ErrAuthzUnavailable) || errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "fw.authz") {
-		t.Fatalf("Start without a control plane = %v", err)
-	}
-	// The process itself keeps working while the control plane is down.
-	r, err := a.Run(ctx, "hi")
-	mustState(t, r, err, StateCompleted)
-	// A listing reports the outage instead of an empty list.
-	if _, err := a.List(WithPrincipal(ctx, alice)); !errors.Is(err, ErrAuthzUnavailable) {
-		t.Fatalf("List = %v", err)
-	}
-	if _, err := a.Children(WithPrincipal(ctx, alice), r.ID); !errors.Is(err, ErrAuthzUnavailable) {
-		t.Fatalf("Children = %v", err)
-	}
-	if _, err := a.ListProfiles(WithPrincipal(ctx, alice)); !errors.Is(err, ErrAuthzUnavailable) {
-		t.Fatalf("ListProfiles = %v", err)
+	// An error of the builder is an error of New.
+	base := []Option{WithoutDefaults(), WithAuthn(NoAuthn{}), WithLedger(NewMemLedger()), WithBus(NewMemBus()), WithLogger(quietLogger())}
+	if _, err := New(append(base, WithAuthzFrom(func(*Agent) (Authz, string, error) { return nil, "", errors.New("no control plane") }))...); err == nil || !strings.Contains(err.Error(), "no control plane") {
+		t.Fatalf("New with a builder that fails = %v", err)
 	}
 }
 
@@ -323,7 +283,7 @@ func TestExternalPolicyUnavailableDenies(t *testing.T) {
 func TestExternalConfigErrors(t *testing.T) {
 	base := []Option{WithoutDefaults(), WithAuthn(NoAuthn{}), WithLedger(NewMemLedger()), WithBus(NewMemBus()), WithLogger(quietLogger())}
 	cfg := DefaultConfig()
-	cfg.Access.External = &ExternalPolicyConfig{MCP: "cp", Bus: "fw.authz"}
+	cfg.Policy.External = &ExternalPolicyConfig{MCP: "cp", Bus: "fw.policy"}
 	if _, err := New(append(base, WithConfig(cfg))...); err == nil || !strings.Contains(err.Error(), "exactly one of mcp and bus") {
 		t.Fatalf("both transports = %v", err)
 	}
@@ -332,18 +292,24 @@ func TestExternalConfigErrors(t *testing.T) {
 	if _, err := New(append(base, WithConfig(cfg))...); err == nil || !strings.Contains(err.Error(), "tools/mcp") {
 		t.Fatalf("mcp without the driver = %v", err)
 	}
+	// The control servers are the one of policy.external and the ones that
+	// linked packages register, from their own blocks.
+	RegisterControlServers(func(c *Config) []string {
+		if c.Listen == "control-test" {
+			return []string{"cp"}
+		}
+		return nil
+	})
 	cfg = DefaultConfig()
-	cfg.Access.External = &ExternalPolicyConfig{MCP: "cp"}
+	cfg.Listen = "control-test"
 	cfg.Policy.External = &ExternalPolicyConfig{MCP: "cp2", Tool: "check"}
-	if got := cfg.ControlServers(); len(got) != 2 || !got["cp"] || !got["cp2"] {
+	if got := cfg.ControlServers(); len(got) != 2 || !got["cp"] || !got["cp2"] || !cfg.IsControlServer("CP") {
 		t.Fatalf("control servers = %v", got)
 	}
 	// An option wins over the configuration.
 	cfg = DefaultConfig()
-	cfg.Access.External = &ExternalPolicyConfig{MCP: "cp"}
 	cfg.Policy.External = &ExternalPolicyConfig{MCP: "cp"}
-	a, err := New(append(base, WithConfig(cfg), WithAuthz(AuthzFunc(func(context.Context, *Principal, string, Target) error { return nil })),
-		WithPolicy(PolicyFunc(func(context.Context, ToolCall) Decision { return Decision{} })))...)
+	a, err := New(append(base, WithConfig(cfg), WithPolicy(PolicyFunc(func(context.Context, ToolCall) Decision { return Decision{} })))...)
 	if err != nil {
 		t.Fatalf("options did not win: %v", err)
 	}
@@ -353,7 +319,7 @@ func TestExternalConfigErrors(t *testing.T) {
 func TestProbeExternal(t *testing.T) {
 	a := externalAgent(t, newScript().Model(), NewMemBus(), nil)
 	st := a.ProbeExternal(testCtx(t))
-	if len(st) != 1 || st[0].Use != "access" || st[0].Probed || st[0].Target != "the bus subject fw.authz" {
+	if len(st) != 1 || st[0].Use != "policy" || st[0].Probed || st[0].Target != "the bus subject fw.policy" {
 		t.Fatalf("status = %+v", st)
 	}
 }

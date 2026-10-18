@@ -52,13 +52,17 @@ type RunCounts struct {
 
 // StatusOf computes the status from the runs that the caller in ctx can
 // view. A kernel that does not list runs gives zero counts. An idle process
-// whose runs never worked is idle since its start.
+// whose runs never worked is idle since its start. A process that is
+// sending a branch to another process (fw.Agent.Starting) is not idle.
 func StatusOf(ctx context.Context, a *fw.Agent) (Status, error) {
 	runs, err := a.List(ctx)
 	if err != nil && !errors.Is(err, fw.ErrNotImplemented) {
 		return Status{}, err
 	}
 	s := ComputeStatus(runs)
+	if a.Starting() > 0 {
+		s.Idle, s.IdleSince = false, nil
+	}
 	if s.Idle && s.IdleSince == nil {
 		t := a.Started().UTC()
 		s.IdleSince = &t

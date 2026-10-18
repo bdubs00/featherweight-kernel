@@ -949,7 +949,7 @@ func (s *server) decodeLimit(w http.ResponseWriter, r *http.Request, v any, limi
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, fw.ErrAuthzUnavailable):
-		// The control plane of access.external did not answer. A 503 tells
+		// The control plane of the authorization did not answer. A 503 tells
 		// the caller to try again, which a 403 would not.
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 		problem(w, r, http.StatusServiceUnavailable, unavailableDetail(err))

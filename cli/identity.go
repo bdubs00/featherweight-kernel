@@ -35,7 +35,7 @@ func localUser() string {
 // subject is local:<user> and its kind is local, so the access entries
 // local:* and kind:local both name it. fw mcp and fw agents always act as
 // it, and fw run, fw events, and fw replay act as it when access.default
-// is closed or access.external is set.
+// is closed or a control plane decides.
 func localPrincipal() *fw.Principal {
 	name := localUser()
 	return &fw.Principal{Subject: "local:" + name, Name: name, Kind: fw.KindLocal}
@@ -46,26 +46,40 @@ func accessClosed(cfg *fw.Config) bool {
 	return strings.EqualFold(strings.TrimSpace(cfg.Access.Default), "closed")
 }
 
-// accessExternal reports whether access.external hands the decisions to a
-// control plane. Then the control plane is the only source of truth, and
-// the CLI asks it instead of reading access.admins.
-func accessExternal(cfg *fw.Config) bool { return cfg.Access.External != nil }
+// ExternalAccess reports the control plane that a linked package hands the
+// authorization decisions to, read from its own block of the configuration,
+// or nil when the rules of access decide. The workbench sets it; the kernel
+// binary has none. When it is set, the control plane is the only source of
+// truth, and the verbs ask it instead of reading access.admins.
+var ExternalAccess func(cfg *fw.Config) *fw.ExternalPolicyConfig
 
-// controlPlane names the decision point of access.external for a message,
-// with the default tool filled in.
+// externalAccess returns the control plane of the configuration, or nil.
+func externalAccess(cfg *fw.Config) *fw.ExternalPolicyConfig {
+	if ExternalAccess == nil || cfg == nil {
+		return nil
+	}
+	return ExternalAccess(cfg)
+}
+
+// accessExternal reports whether a control plane decides.
+func accessExternal(cfg *fw.Config) bool { return externalAccess(cfg) != nil }
+
+// controlPlane names the control plane for a message, with the default
+// tool filled in.
 func controlPlane(cfg *fw.Config) string {
-	if cfg.Access.External == nil {
+	e := externalAccess(cfg)
+	if e == nil {
 		return "the control plane"
 	}
-	e := *cfg.Access.External
-	if e.Tool == "" {
-		e.Tool = fw.DefaultAuthzTool
+	ext := *e
+	if ext.Tool == "" {
+		ext.Tool = fw.DefaultAuthzTool
 	}
-	return e.String()
+	return ext.String()
 }
 
 // commandContext returns ctx with the local principal when access.default
-// is closed or access.external is set, so the run carries the name of the
+// is closed or a control plane decides, so the run carries the name of the
 // operator and the access rules, or the control plane, decide for it. With
 // the default open and no control plane, the context carries no
 // principal, and the kernel trusts the call as one from the process
@@ -78,15 +92,15 @@ func commandContext(ctx context.Context, cfg *fw.Config) context.Context {
 }
 
 // isAdmin reports whether access.admins names the principal. It reads the
-// local rules only. With access.external set, use adminOf.
+// local rules only. When a control plane decides, use adminOf.
 func isAdmin(cfg *fw.Config, p *fw.Principal) bool {
 	return fw.MatchesAny(cfg.Access.Admins, p)
 }
 
-// adminOf reports whether the principal has the admin role. With
-// access.external set, it builds an agent and asks the control plane,
-// because the control plane is then the only source of truth. Otherwise it
-// reads access.admins.
+// adminOf reports whether the principal has the admin role. When a control
+// plane decides, it builds an agent and asks the control plane, because the
+// control plane is then the only source of truth. Otherwise it reads
+// access.admins.
 func adminOf(ctx context.Context, cfg *fw.Config, p *fw.Principal) (bool, error) {
 	if !accessExternal(cfg) {
 		return isAdmin(cfg, p), nil
@@ -111,9 +125,10 @@ func cmdWhoami(ctx context.Context, g *globals, args []string) int {
 	fs := g.newFlagSet("whoami", "")
 	asJSON := fs.Bool("json", false, "print the principal as JSON")
 	describe(fs, `Prints the principal that fw mcp and fw agents act as, and that fw run,
-fw events, and fw replay act as when access.default is closed or
-access.external is set. Name it in access.admins as local:*, as kind:local,
-or by its subject. With access.external, the control plane decides for it.`)
+fw events, and fw replay act as when access.default is closed or a control
+plane decides (fw-workbench, workbench.access.external). Name it in
+access.admins as local:*, as kind:local, or by its subject. With a control
+plane, the control plane decides for it.`)
 	if _, err := parseArgs(fs, args); err != nil {
 		return flagExit(err)
 	}
@@ -141,7 +156,7 @@ or by its subject. With access.external, the control plane decides for it.`)
 	}
 	switch {
 	case accessExternal(cfg):
-		fmt.Fprintf(g.stdout, "acts: always; access.external hands every decision to %s\n", controlPlane(cfg))
+		fmt.Fprintf(g.stdout, "acts: always; %s decides for every caller\n", controlPlane(cfg))
 	case accessClosed(cfg):
 		fmt.Fprintln(g.stdout, "acts: always; access.default is closed")
 	default:
@@ -339,7 +354,7 @@ func accessHint(cfg *fw.Config, err error) error {
 	case errors.Is(err, fw.ErrAuthzUnavailable):
 		return fmt.Errorf("%w (the control plane did not answer: make sure that %s is reachable; fw doctor checks it)", err, controlPlane(cfg))
 	case errors.Is(err, fw.ErrForbidden) && accessExternal(cfg):
-		return fmt.Errorf("%w (%s refused it; access.admins and the access blocks do not apply while access.external is set)", err, controlPlane(cfg))
+		return fmt.Errorf("%w (%s refused it; access.admins and the access blocks do not apply while a control plane decides)", err, controlPlane(cfg))
 	}
 	if errors.Is(err, fw.ErrForbidden) {
 		return fmt.Errorf("%w (add local:* to access.admins in fw.yaml, or name the principal of fw whoami in the access block of the profile)", err)

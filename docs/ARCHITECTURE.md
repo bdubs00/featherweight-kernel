@@ -145,7 +145,7 @@ A run is defined by its ledger and its workspace, so a run can branch. `Agent.Fo
 
 A branch goes on as a resumed run does (section 4.5). A model request without an answer is sent again, a tool call without a result follows the resume rules, and a pending approval waits for its decision, under the approval id that the branch copied. A message in the request, `input`, follows the kept events as a follow-up from the person, so a branch of a finished run goes on in another direction; without a message, a branch that keeps the end of a finished run stays finished. A `model` in the request changes the model of the branch. Because the system prompt, the history, and the tool results of the kept events are the same bytes, the branch keeps the prompt cache prefix of the provider up to the point of the branch.
 
-A branch shares the workspace of its process. Two branches that change files in the same process therefore see each other's changes. With `spawn` in the request, the branch runs in another process: the `Spawner` of the agent must be a `Forker`. A `Forker` works in two steps, because the other process takes a while to run and the caller does not wait for it. `Place` creates the process, a child Task with the `ax` driver, and names it at once. The kernel then gives the branch its id, records it in the source as a child in `fw.run.child` with that member, and answers the caller with the branch as queued, with `Member` set; the route answers 202. `Branch` runs in the background: once the process runs, it sends the kept events through `POST /v1/runs/fork`, a route for the static token or a workload alone, because the events name the person of the branch, and the process takes the branch under the id that the body names. Until then the source answers `Get` for the branch, `WaitFor` waits for the start, `Decide` has nothing to decide, and `Cancel` ends the start. A branch that its process does not take, because the Task never runs or refuses the events, and a branch whose start was canceled are recorded in the source process under the id of the branch, as a failed run with the reason or as a canceled run, so nothing is lost without a trace; after a restart that record wins over the `fw.run.child` event. The `ax` driver deletes a child Task that did not take its branch. The branch has the workspace of its own Task: a fresh copy of the Workspace of the parent Task, not the files that the parent changed. Several branches of one run in several Tasks therefore try different prompts or models from the same base, and their `fw.file.changed` events and their outputs compare.
+A branch shares the workspace of its process. Two branches that change files in the same process therefore see each other's changes. With `spawn` in the request, the branch runs in another process: the `Spawner` of the agent must be a `Forker`. A `Forker` works in two steps, because the other process takes a while to run and the caller does not wait for it. `Place` creates the process, a child Task with the `ax` driver, and names it at once. The kernel then gives the branch its id, records it in the source as a child in `fw.run.child` with that member, and answers the caller with the branch as queued, with `Member` set; the route answers 202. `Branch` runs in the background: once the process runs, it sends the kept events through `POST /v1/runs/fork`, a route for the static token or a workload alone, because the events name the person of the branch, and the process takes the branch under the id that the body names. Until then the source answers `Get` for the branch, `WaitFor` waits for the start, `Decide` has nothing to decide, and `Cancel` ends the start. The status of the source is not idle while a start is open (`Agent.Starting`), so the suspend controller of the workbench does not put it to sleep before its child has the branch. If the source process restarts during the start, the branch is lost: the source keeps the `fw.run.child` event, the child Task has no run under the id, and the controller puts the idle child Task to sleep. A branch that its process does not take, because the Task never runs or refuses the events, and a branch whose start was canceled are recorded in the source process under the id of the branch, as a failed run with the reason or as a canceled run, so nothing is lost without a trace; after a restart that record wins over the `fw.run.child` event. The `ax` driver deletes a child Task that did not take its branch. The branch has the workspace of its own Task: a fresh copy of the Workspace of the parent Task, not the files that the parent changed. Several branches of one run in several Tasks therefore try different prompts or models from the same base, and their `fw.file.changed` events and their outputs compare.
 
 ## 5. The kernel
 
@@ -819,7 +819,7 @@ The setting `bus.egress` names a subject prefix, for example `fw.events`. The `b
 
 ### 9.5 Request and reply
 
-A decision point on the bus uses request and reply (section 13.5). `fw` publishes a `fw.decision.requested` event to the subject of `access.external.bus` or `policy.external.bus`. The event names a reply subject of the process, and a responder publishes `fw.decision.answered` to it. The default timeout is 5 seconds. Without an answer in time, a tool call is denied, and a request from a caller is refused with a 503.
+A decision point on the bus uses request and reply (section 13.5). `fw` publishes a `fw.decision.requested` event to the subject of `policy.external.bus`, or of the control plane of the workbench. The event names a reply subject of the process, and a responder publishes `fw.decision.answered` to it. The default timeout is 5 seconds. Without an answer in time, a tool call is denied, and a request from a caller is refused with a 503.
 
 <a id="observability"></a>
 
@@ -1126,7 +1126,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 | `Surface` | native, A2A, metrics | MCP from the workbench, any subset, your own | `surfaces:` or `fw.Surfaces` |
 | `Observer` | messages, status, metrics, bus, a2a, trace | your own | `fw.Observe` |
 | `Authn` | bearer token | none, oidc, spiffe, a chain of modes, your own | `auth.mode:` or `fw.WithAuthn` |
-| `Authz` | rules from `access` | an external MCP or bus decision point, your own | `access.external:` or `fw.WithAuthz` |
+| `Authz` | rules from `access` | your own, or the control-plane authorization of the workbench | `fw.WithAuthz` or `fw.WithAuthzFrom` |
 | Profiles at runtime | the configuration | a linked package that writes files, such as the workbench | `Agent.SetProfiles` |
 | TLS provider | plain HTTP | `file`, `spiffe`, your own | `tls.provider:` or `fw.WithTLS` |
 | `Prices` | empty | a price table | `prices:` or `fw.Prices` |
@@ -1284,7 +1284,7 @@ func WithFiles(f Files) Option
 func WithoutDefaults() Option
 ```
 
-`WithAuthz` and `WithPolicy` win over `access.external` and `policy.external` (section 13.5).
+`WithAuthz` wins over `WithAuthzFrom` and the rules of `access`, and `WithPolicy` wins over `policy.external` (section 13.5).
 
 A complete library program. Each driver registers itself at import, so the blank imports select the drivers:
 
@@ -1373,7 +1373,7 @@ Each entry names principals in one of five forms:
 
 The process-wide block `access` holds `admins`, who own every agent, `creators`, who can add agents, and `default`. With `default: open`, which is the default, an agent that has no `access` block is open to every authenticated principal as an operator. That is how fw behaved before access existed. With `default: closed`, such an agent is reachable by its admins only. A deployment therefore turns identity on in two steps: set `auth.mode` and `access.admins`, then switch `access.default` to `closed` once every agent names its owners.
 
-The kernel enforces this through the `Authz` plug on every call that carries a principal. A run on an agent needs the operator role, and a read of a run needs the viewer role or the run itself. A decision or a cancel needs the operator role or the run itself, and a profile change needs the owner role. A call that carries no principal comes from the process itself, such as a tool that starts a child run, and is trusted. A target can name another process that holds the agent and the run, a member of the fleet of the workbench (the workbench architecture, section 4). The default rules refuse such a target, because they do not know the rules of another process. The default `Authz` is the rules above, and `fw.WithAuthz` replaces it with a policy of your own. `access.external` replaces it with a control plane outside the process (section 13.5).
+The kernel enforces this through the `Authz` plug on every call that carries a principal. A run on an agent needs the operator role, and a read of a run needs the viewer role or the run itself. A decision or a cancel needs the operator role or the run itself, and a profile change needs the owner role. A call that carries no principal comes from the process itself, such as a tool that starts a child run, and is trusted. A target can name another process that holds the agent and the run, a member of the fleet of the workbench (the workbench architecture, section 4). The default rules refuse such a target, because they do not know the rules of another process. The default `Authz` is the rules above, and `fw.WithAuthz` replaces it with a policy of your own. `fw.WithAuthzFrom` builds one from the agent once the agent has its configuration and its bus; the workbench uses it to hand the decisions to a control plane outside the process (section 13.5 and the workbench architecture, section 12). A worker kernel in a fleet decides with the rules above alone.
 
 ### 13.3 Managing agents
 
@@ -1395,24 +1395,26 @@ The actions `agent.create`, `agent.edit`, and `agent.delete` stay in the kernel,
 - A child run never has more than its parent: fewer tools, stricter rules, a smaller budget, and a bounded depth and count.
 - An inline profile on a request never carries an `access` block, so a request cannot grant itself a role. Its tool list can give a run more tools than its agent lists, and every surface says so (section 12.5).
 - The principal of a run and the decider of an approval are in the ledger, so every action has a name on it.
-- A control plane that does not answer never opens access. With `access.external`, a request from a caller gets a 503. With `policy.external`, the tool call is denied.
+- A control plane that does not answer never opens access. With `policy.external`, the tool call is denied. An `Authz` that reports `fw.ErrAuthzUnavailable`, such as the control-plane authorization of the workbench, gets a 503 for the caller.
 
 Do not set `auth.mode: none` on a listener that is reachable from outside the cluster. Anyone who reaches the port can start runs and approve tool calls. Do not set `access.default: closed` without an entry in `access.admins`, or nobody can manage the agents until the configuration changes.
 
 ### 13.5 External decisions
 
-A deployment with many agents often keeps its rules in one control plane. With `access.external`, that control plane decides who can do what. With `policy.external`, it decides which tool calls run. `fw` sends the facts of each decision and enforces the answer. It makes no decision of its own for that part, so the control plane is the single source of truth. A security team changes a rule without a change to `fw.yaml` and without a rebuild.
+A deployment with many agents often keeps its rules in one control plane. With `policy.external`, that control plane decides which tool calls run. `fw` sends the facts of each decision and enforces the answer. It makes no decision of its own for that part, so the control plane is the single source of truth. A security team changes a rule without a change to `fw.yaml` and without a rebuild.
 
-Both blocks have the same fields:
+Who can do what is a question of the front, not of a worker. The workbench asks a control plane with `workbench.access.external` (the workbench architecture, section 12), and a worker kernel decides with the rules of `access` alone (section 13.2). The kernel defines the protocol of both decisions, the requests, the answers, and the transports, so one control plane serves both, and it builds a decision point for a linked package with `Agent.NewDecisionPoint`.
+
+The block `policy.external`, and the block of the workbench, have the same fields:
 
 | Field | Meaning | Default |
 |---|---|---|
 | `mcp` | The name of a `tools.mcp` entry. The endpoint, the TLS, and the authentication of that entry apply. | none |
-| `tool` | The tool on that server | `authorize` for `access.external`, `decide` for `policy.external` |
+| `tool` | The tool on that server | `decide` for `policy.external`, `authorize` for the authorization of the workbench |
 | `bus` | The bus subject that receives the requests | none |
 | `timeout` | The limit of one request | `5s` |
 
-A block sets exactly one of `mcp` and `bus`, or the process stops at start. Every field has a variable, for example `FW_ACCESS_EXTERNAL_MCP=control` and `FW_POLICY_EXTERNAL_BUS=fw.policy`. The options `fw.WithAuthz` and `fw.WithPolicy` win over the blocks. This configuration sends both kinds of decision to one MCP server:
+A block sets exactly one of `mcp` and `bus`, or the process stops at start. Every field has a variable, for example `FW_POLICY_EXTERNAL_MCP=control` and `FW_POLICY_EXTERNAL_BUS=fw.policy`. The option `fw.WithPolicy` wins over the block. This configuration of a front sends both kinds of decision to one MCP server:
 
 ```yaml
 tools:
@@ -1420,15 +1422,16 @@ tools:
     - name: control
       endpoint: https://control.example.com/mcp
       auth: { bearer: CONTROL_TOKEN }
-access:
-  external: { mcp: control }
 policy:
   external: { mcp: control }
+workbench:
+  access:
+    external: { mcp: control }
 ```
 
 #### The requests and the answers
 
-Every request is a JSON object with `kind` and `version`. The kind is `authz` or `policy`, so one tool can serve both. The version is 1. An authorization request asks about one principal and one or more checks:
+Every request is a JSON object with `kind` and `version`. The kind is `authz` or `policy`, so one tool can serve both. The version is 1. An authorization request, which the front of the workbench sends, asks about one principal and one or more checks:
 
 ```json
 {
@@ -1474,7 +1477,7 @@ The Go types are `fw.AuthzRequest`, `fw.AuthzAnswer`, `fw.PolicyRequest`, and `f
 
 #### Over MCP and over the bus
 
-With `mcp`, `fw` calls the tool by its plain name with the request as the arguments. It reads the answer from `structuredContent`, or else from the first text block that holds a JSON object. A result with `isError` counts as no answer. A server that is down after repeated failures (section 7.3) also counts as no answer. The MCP tool source leaves out every server that a block names, so the model never sees or calls a decision tool. The MCP driver registers this transport with `fw.RegisterDecisionPoint`.
+With `mcp`, `fw` calls the tool by its plain name with the request as the arguments. It reads the answer from `structuredContent`, or else from the first text block that holds a JSON object. A result with `isError` counts as no answer. A server that is down after repeated failures (section 7.3) also counts as no answer. The MCP tool source leaves out every server that a block names, so the model never sees or calls a decision tool; a linked package names its servers with `fw.RegisterControlServers`. The MCP driver registers this transport with `fw.RegisterDecisionPoint`.
 
 With `bus`, `fw` publishes a `fw.decision.requested` event to the subject. Its data holds `replyTo`, a reply subject of the process, and `request`, the request above. A responder publishes a `fw.decision.answered` event to `replyTo`. Its data holds `inReplyTo`, the id of the request event, and `answer`. Any process that subscribes to the subject can answer. A Go responder reads a request with `fw.DecisionRequestOf` and builds the answer event with `fw.AnswerDecision`.
 
@@ -1482,21 +1485,17 @@ With `bus`, `fw` publishes a `fw.decision.requested` event to the subject. Its d
 
 #### Authorization
 
-With `access.external`, `fw` applies none of its own access rules. `access.default`, `access.admins`, and `access.creators` do not apply. The access block of the profile travels in each check, and the control plane decides whether it counts.
+A worker kernel authorizes with the rules of section 13.2. The control-plane authorization is a plug of the workbench (its architecture, section 12): the front builds an `Authz` over a decision point through `fw.WithAuthzFrom`, and `AccessMode` reports `external` for it. Such an `Authz` is a `fw.LineageAuthz`: it sends the lineage of a run in each check and decides about a child run itself, so the kernel does not ask again for the ancestors after a refusal. `Agent.RunFacts` gives it the lineage of a run of this process.
 
-The control plane also decides about a child run by itself, from the lineage in the check. After a refusal, `fw` does not ask again for the ancestors of the run, as the rules of section 13.2 do. A listing of runs or agents sends all of its checks in one request, and so does each view of the dashboard.
+If the control plane does not answer in time, the plug refuses the request with `fw.ErrAuthzUnavailable`, and every surface of the kernel tells that apart from a refusal. The native API answers 503 with `Retry-After: 5`, and the MCP surface returns an error result that says that the service did not answer. A caller therefore tells a refusal, a 403, from a control plane that is down.
 
-`ttlMs` lets `fw` reuse a decision for that many milliseconds. Zero, the default, means no reuse, so a revocation takes effect at the next request. The cache key holds every fact of the check. A change to an access block or to a run therefore asks again.
+A2A has no error for a service that is down, so the A2A surface sends the server error of the protocol. Its details carry the reason `AUTHZ_UNAVAILABLE` and `retryAfterSeconds: 5`. The metadata of its error info carries `fwReason: AUTHZ_UNAVAILABLE` and `retryAfter: "5"`. The JSON-RPC binding sends this error with the code -32000 and HTTP 200, as JSON-RPC defines. The REST binding sends HTTP 503 with `Retry-After: 5`, and the error document has the code 503 and the status `UNAVAILABLE`. If the first event of a stream on the REST binding is this error, the stream gets the same 503. The surface holds the headers of a stream until its first event to make this possible, and that event comes right away.
 
-If the control plane does not answer in time, `fw` refuses the request with `fw.ErrAuthzUnavailable`. An answer that `fw` cannot read, or that holds the wrong number of decisions, counts as no answer. The native API answers 503 with `Retry-After: 5`, and the MCP surface returns an error result that says that the service did not answer. A caller therefore tells a refusal, a 403, from a control plane that is down.
-
-A2A has no error for a service that is down, so the A2A surface sends the server error of the protocol. Its details carry the reason `AUTHZ_UNAVAILABLE` and `retryAfterSeconds: 5`. The metadata of its error info carries `fwReason: AUTHZ_UNAVAILABLE` and `retryAfter: "5"`. The JSON-RPC binding sends this error with the code -32000 and HTTP 200, as JSON-RPC defines. The REST binding sends HTTP 503 with `Retry-After: 5`, and the error document has the code 503 and the status `UNAVAILABLE`. If the first event of a stream on the REST binding is this error, the stream gets the same 503. The surface holds the headers of a stream until its first event to make this possible, and that event comes right after the access check.
-
-A call from the process itself carries no principal and never asks. Runs, child runs, resumes, and the bootstrap goal therefore keep working during an outage. With `access.external`, `fw agents` and `fw-workbench mcp` act as the local principal (section 13.1). The control plane therefore also decides for the local user.
+A call from the process itself carries no principal and never asks. Runs, child runs, resumes, and the bootstrap goal therefore keep working during an outage. The verbs `fw agents`, `fw whoami`, and `fw-workbench mcp` act as the local principal (section 13.1) when a control plane decides, which the hook `cli.ExternalAccess` of the workbench tells the command line; the control plane therefore also decides for the local user.
 
 #### Policy
 
-`policy.external` replaces the rules of `policy:`. The control plane decides every tool call. `allow` runs the call, and `deny` refuses it with the reason. `ask` asks the caller for an approval (section 5.3). When `access.external` is set, it authorizes the decision on that approval as the action `run.operate`.
+`policy.external` replaces the rules of `policy:`. The control plane decides every tool call. `allow` runs the call, and `deny` refuses it with the reason. `ask` asks the caller for an approval (section 5.3), and the `Authz` of the process authorizes the decision on that approval as the action `run.operate`.
 
 The policy of a profile and the rules of the ancestors of a run still apply, and the stricter verdict wins. They can therefore only make the verdict of the control plane stricter. If the control plane does not answer, or answers with an unknown verdict, the call is denied. The model reads the reason in the tool result.
 
@@ -1587,6 +1586,8 @@ The spawner revision of 2026-10-17 put `spawn_task` behind the `Spawner` plug (d
 The token broker revision of 2026-10-17 added the kernel package `tokens` (docs/ROADMAP.md, section 3). With `tokens.url`, a process gets the access tokens of people from a broker, the front of the workbench, through `fw.PersonTokens`, and a notice on the bus resumes its paused calls when a connection ends. The configuration gained the key `tokens`, and `fw doctor` gained the line `tokens`. A `cli.DoctorCheck` of a linked package gets the secrets of the process since this revision.
 
 The records revision of 2026-10-18 removed `fw.Retainer` from the bus contract, with the retained events of the `mem`, `nats`, and `redis` drivers and the options `retainBucket` and `retainKey`. The fleet of the workbench reads the ax API and the egress stream, and a worker publishes nothing about itself (the workbench architecture, section 4).
+
+The authorization revision of 2026-10-18 moved the control-plane authorization to the workbench, the first item of stage 5 (docs/ROADMAP.md). The kernel lost `access.external`, its variables, and the authorization over a decision point. It gained `fw.WithAuthzFrom`, `fw.LineageAuthz`, `Agent.NewDecisionPoint`, `Agent.RunFacts`, `fw.RegisterControlServers`, and the hook `cli.ExternalAccess`. `policy.external`, the decision protocol, and the transports stay (section 13.5).
 
 The connections revision of 2026-10-17 moved the grants and the OAuth flows out of the kernel, the fifth and last step of stage 3. The kernel lost `fw.Grant`, `fw.GrantStore`, the stores, `fw.Connector`, `fw.Connection`, `fw.ConnectStart`, `Agent.Connections`, `Agent.BeginConnect`, `Agent.FinishConnect`, `Agent.Disconnect`, `Agent.Grants`, `fw.WithGrantStore`, the key `grants` of the configuration, and the `connections` line of `fw doctor`. The MCP client keeps the sessions of people and the placeholder tool, and gets the tokens of a person from `fw.PersonTokens`, which a linked package sets with `Agent.SetPersonTokens`. `Agent.Connected` resumes the paused calls when a connection ends. The package `tools/mcp` exports its OAuth helpers for such a package. The workbench package `connections` keeps the grants under `workbench.grants` and `FW_WORKBENCH_GRANTS_*` (the workbench architecture, section 11). The file `fw/grants.go` stays: it projects the tool grants of a profile for the surfaces and has nothing to do with OAuth.
 

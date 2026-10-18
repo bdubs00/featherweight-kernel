@@ -1,9 +1,10 @@
 package mcp
 
 // This file is the MCP transport of the external decision point
-// (docs/ARCHITECTURE.md section 13.5). access.external or policy.external
-// names an entry of tools.mcp and a tool on it. fw calls that tool with the
-// decision request as its arguments and reads the answer from the result.
+// (docs/ARCHITECTURE.md section 13.5). policy.external, or the control
+// plane of the workbench, names an entry of tools.mcp and a tool on it. fw
+// calls that tool with the decision request as its arguments and reads the
+// answer from the result.
 // The model never sees the tools of that server (see newSources).
 
 import (

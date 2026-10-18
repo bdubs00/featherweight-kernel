@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -315,12 +316,18 @@ func TestRulesRefuseAnotherMember(t *testing.T) {
 	}
 }
 
-func TestExternalAuthzSendsMemberFacts(t *testing.T) {
+// A check about a run of another member carries the member, the access
+// block, and the lineage to the Authz unchanged, in one batch, so the
+// control-plane authorization of the workbench can send them on. A
+// LineageAuthz is not asked again for the ancestors.
+func TestAuthorizeAllPassesMemberFacts(t *testing.T) {
 	ctx := testCtx(t)
-	bus := NewMemBus()
-	cp := &controlPlane{decide: func(Principal, AuthzQuery) AuthzDecision { return AuthzDecision{Allow: true} }}
-	cp.serve(t, bus, "fw.authz")
-	a := externalAgent(t, newScript(endTurn("hi")).Model(), bus, nil)
+	var got []AuthzCheck
+	z := &recordingAuthz{allow: func(p *Principal, c AuthzCheck) error {
+		got = append(got, c)
+		return fmt.Errorf("%w: no", ErrForbidden)
+	}}
+	a := newTestAgent(t, newScript(endTurn("hi")).Model(), WithAuthzFrom(func(*Agent) (Authz, string, error) { return z, AccessModeExternal, nil }))
 	if a.AccessMode() != AccessModeExternal {
 		t.Fatalf("access mode = %q", a.AccessMode())
 	}
@@ -329,19 +336,33 @@ func TestExternalAuthzSendsMemberFacts(t *testing.T) {
 		Agent: "reviewer", Run: run, Member: "team/other",
 		Access:  &Access{Viewers: []string{"bob"}},
 		Lineage: []RunRef{{ID: "r1", Agent: "planner", Principal: "carol"}},
-	}}})
-	if errs[0] != nil {
-		t.Fatalf("decision = %v", errs[0])
+	}}, {Action: ActionAgentView, Target: Target{Agent: "reviewer"}}})
+	if len(errs) != 2 || !errors.Is(errs[0], ErrForbidden) || !errors.Is(errs[1], ErrForbidden) {
+		t.Fatalf("decisions = %v", errs)
 	}
-	reqs := cp.authzRequests()
-	if len(reqs) != 1 || len(reqs[0].Checks) != 1 {
-		t.Fatalf("requests = %+v", reqs)
+	if len(got) != 2 || got[0].Target.Member != "team/other" || got[0].Target.Access == nil || got[0].Target.Access.Viewers[0] != "bob" ||
+		got[0].Target.Run == nil || got[0].Target.Run.ID != "r2" || len(got[0].Target.Lineage) != 1 || got[0].Target.Lineage[0].ID != "r1" {
+		t.Fatalf("checks = %+v", got)
 	}
-	q := reqs[0].Checks[0]
-	if q.Member != "team/other" || q.Agent != "reviewer" || q.Access == nil || q.Access.Viewers[0] != "bob" ||
-		q.Run == nil || q.Run.ID != "r2" || q.Run.Principal != "carol" || len(q.Run.Lineage) != 1 || q.Run.Lineage[0].ID != "r1" {
-		t.Fatalf("check = %+v run = %+v", q, q.Run)
+}
+
+// recordingAuthz is a batch Authz that decides about the lineage itself.
+type recordingAuthz struct {
+	allow func(p *Principal, c AuthzCheck) error
+}
+
+func (*recordingAuthz) DecidesLineage() {}
+
+func (z *recordingAuthz) Allow(ctx context.Context, p *Principal, action string, t Target) error {
+	return z.allow(p, AuthzCheck{Action: action, Target: t})
+}
+
+func (z *recordingAuthz) AllowAll(ctx context.Context, p *Principal, checks []AuthzCheck) []error {
+	out := make([]error, len(checks))
+	for i, c := range checks {
+		out[i] = z.allow(p, c)
 	}
+	return out
 }
 
 func TestAccessMode(t *testing.T) {

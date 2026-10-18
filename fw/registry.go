@@ -39,6 +39,7 @@ var registry = struct {
 	annotators  []RunAnnotator
 	services    []Service
 	extensions  map[string]bool
+	control     []func(*Config) []string
 }{
 	models:      map[string]ModelCtor{},
 	buses:       map[string]BusCtor{},
@@ -140,6 +141,29 @@ func RegisterExtension(name string) {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	registry.extensions[name] = true
+}
+
+// RegisterControlServers registers a function that names the tools.mcp
+// entries that a linked package uses for decisions, read from its own block
+// of the configuration. Config.ControlServers includes them, so the MCP tool
+// source leaves them out and the model never sees a decision tool.
+func RegisterControlServers(names func(c *Config) []string) {
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	registry.control = append(registry.control, names)
+}
+
+// registeredControlServers returns the names that the registered functions
+// give for a configuration.
+func registeredControlServers(c *Config) []string {
+	registry.mu.RLock()
+	fns := append([]func(*Config) []string(nil), registry.control...)
+	registry.mu.RUnlock()
+	var out []string
+	for _, fn := range fns {
+		out = append(out, fn(c)...)
+	}
+	return out
 }
 
 // RegisteredExtensions lists the claimed top-level keys, sorted.

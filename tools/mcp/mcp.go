@@ -45,7 +45,7 @@ func init() {
 
 // newSources builds one Server per entry under tools.mcp. A configuration
 // error fails the whole set. A server that is down does not, because each
-// Server connects on first use. An entry that access.external or
+// Server connects on first use. An entry that a control plane or
 // policy.external names is not a tool source: the decision point has a
 // connection of its own, and the model never sees a decision tool.
 func newSources(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) ([]fw.ToolSource, error) {

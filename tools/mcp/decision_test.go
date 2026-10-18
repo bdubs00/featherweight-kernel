@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -139,14 +140,17 @@ func fakeModel() fw.Model {
 }
 
 // newDecisionAgent builds an agent with the MCP server cp at endpoint. The
-// mutate function sets access.external or policy.external.
-func newDecisionAgent(t *testing.T, endpoint string, mutate func(*fw.Config)) (*fw.Agent, error) {
+// mutate function sets policy.external, and the options add the
+// authorization over a decision point, as the workbench does.
+func newDecisionAgent(t *testing.T, endpoint string, mutate func(*fw.Config), opts ...fw.Option) (*fw.Agent, error) {
 	t.Helper()
 	t.Setenv("FW_ATESPACE", "")
 	cfg := fw.DefaultConfig()
 	cfg.Tools.MCP = []fw.MCPServerConfig{{Name: "cp", Endpoint: endpoint, Timeout: 5 * time.Second}}
-	mutate(cfg)
-	a, err := fw.New(
+	if mutate != nil {
+		mutate(cfg)
+	}
+	base := []fw.Option{
 		fw.WithConfig(cfg),
 		fw.WithoutDefaults(),
 		fw.WithAuthn(fw.NoAuthn{}),
@@ -154,7 +158,8 @@ func newDecisionAgent(t *testing.T, endpoint string, mutate func(*fw.Config)) (*
 		fw.WithLedger(fw.NewMemLedger()),
 		fw.WithBus(fw.NewMemBus()),
 		fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
-	)
+	}
+	a, err := fw.New(append(base, opts...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -166,27 +171,78 @@ func newDecisionAgent(t *testing.T, endpoint string, mutate func(*fw.Config)) (*
 	return a, nil
 }
 
-func mustDecisionAgent(t *testing.T, endpoint string, mutate func(*fw.Config)) *fw.Agent {
+func mustDecisionAgent(t *testing.T, endpoint string, mutate func(*fw.Config), opts ...fw.Option) *fw.Agent {
 	t.Helper()
-	a, err := newDecisionAgent(t, endpoint, mutate)
+	a, err := newDecisionAgent(t, endpoint, mutate, opts...)
 	if err != nil {
 		t.Fatalf("fw.New: %v", err)
 	}
 	return a
 }
 
-func accessTool(tool string) func(*fw.Config) {
-	return func(c *fw.Config) {
-		c.Access.External = &fw.ExternalPolicyConfig{MCP: "cp", Tool: tool, Timeout: 2 * time.Second}
+// planeAuthz is the smallest authorization plug over a decision point, as
+// the workbench builds one: it sends the checks of one call in one request
+// and refuses when the control plane does not answer.
+type planeAuthz struct {
+	a  *fw.Agent
+	dp fw.DecisionPoint
+}
+
+func (z *planeAuthz) DecidesLineage() {}
+
+func (z *planeAuthz) Allow(ctx context.Context, p *fw.Principal, action string, t fw.Target) error {
+	return z.AllowAll(ctx, p, []fw.AuthzCheck{{Action: action, Target: t}})[0]
+}
+
+func (z *planeAuthz) AllowAll(ctx context.Context, p *fw.Principal, checks []fw.AuthzCheck) []error {
+	out := make([]error, len(checks))
+	req := fw.AuthzRequest{Kind: fw.DecisionAuthz, Version: fw.DecisionVersion, Principal: *p}
+	for _, c := range checks {
+		agent := c.Target.Agent
+		if agent == "" && c.Target.Run != nil {
+			agent = c.Target.Run.Agent
+		}
+		req.Checks = append(req.Checks, fw.AuthzQuery{Action: c.Action, Agent: agent, Run: z.a.RunFacts(c.Target.Run)})
 	}
+	body, _ := json.Marshal(req)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	raw, err := z.dp.Decide(ctx, body)
+	var ans fw.AuthzAnswer
+	if err == nil {
+		if json.Unmarshal(raw, &ans) != nil || len(ans.Decisions) != len(checks) {
+			err = errors.New("a bad answer")
+		}
+	}
+	for i := range out {
+		switch {
+		case err != nil:
+			out[i] = fmt.Errorf("%w: %v", fw.ErrAuthzUnavailable, err)
+		case !ans.Decisions[i].Allow:
+			out[i] = fmt.Errorf("%w: %s", fw.ErrForbidden, ans.Decisions[i].Reason)
+		}
+	}
+	return out
+}
+
+// controlPlaneAuthz hands the authorization to the tool of the server cp,
+// through a decision point of the agent, as the workbench does.
+func controlPlaneAuthz(tool string) fw.Option {
+	return fw.WithAuthzFrom(func(a *fw.Agent) (fw.Authz, string, error) {
+		dp, err := a.NewDecisionPoint(context.Background(), "workbench.access", fw.ExternalPolicyConfig{MCP: "cp", Tool: tool, Timeout: 2 * time.Second})
+		if err != nil {
+			return nil, "", err
+		}
+		return &planeAuthz{a: a, dp: dp}, fw.AccessModeExternal, nil
+	})
 }
 
 func TestDecisionAuthz(t *testing.T) {
 	ctx := context.Background()
 	cp := &controlPlane{}
 	ts := serveHTTP(t, cp.server(), nil)
-	// The default tool of access.external is "authorize".
-	a := mustDecisionAgent(t, ts.URL, accessTool(""))
+	// The default tool of an authorization decision point is "authorize".
+	a := mustDecisionAgent(t, ts.URL, nil, controlPlaneAuthz(""))
 
 	r, err := a.Run(fw.WithPrincipal(ctx, alice), "hi")
 	if err != nil || r.State != fw.StateCompleted {
@@ -207,7 +263,7 @@ func TestDecisionTextAnswer(t *testing.T) {
 	ctx := context.Background()
 	cp := &controlPlane{}
 	ts := serveHTTP(t, cp.server(), nil)
-	a := mustDecisionAgent(t, ts.URL, accessTool("authorize_text"))
+	a := mustDecisionAgent(t, ts.URL, nil, controlPlaneAuthz("authorize_text"))
 	if _, err := a.Start(fw.WithPrincipal(ctx, alice), "hi"); err != nil {
 		t.Fatalf("alice = %v", err)
 	}
@@ -225,7 +281,7 @@ func TestDecisionUnavailable(t *testing.T) {
 		"authorize_error": "the policy store is offline",
 		"chatter":         "no JSON object",
 	} {
-		a := mustDecisionAgent(t, ts.URL, accessTool(tool))
+		a := mustDecisionAgent(t, ts.URL, nil, controlPlaneAuthz(tool))
 		_, err := a.Start(ctx, "hi")
 		if !errors.Is(err, fw.ErrAuthzUnavailable) || errors.Is(err, fw.ErrForbidden) || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: Start = %v, want ErrAuthzUnavailable with %q", tool, err, want)
@@ -236,7 +292,7 @@ func TestDecisionUnavailable(t *testing.T) {
 	gone := serveHTTP(t, cp.server(), nil)
 	url := gone.URL
 	gone.Close()
-	a := mustDecisionAgent(t, url, accessTool("authorize"))
+	a := mustDecisionAgent(t, url, nil, controlPlaneAuthz("authorize"))
 	if _, err := a.Start(ctx, "hi"); !errors.Is(err, fw.ErrAuthzUnavailable) {
 		t.Fatalf("stopped server: Start = %v, want ErrAuthzUnavailable", err)
 	}
@@ -249,7 +305,7 @@ func TestDecisionUnavailable(t *testing.T) {
 func TestDecisionNeverAsks(t *testing.T) {
 	cp := &controlPlane{}
 	ts := serveHTTP(t, cp.server(), nil)
-	a := mustDecisionAgent(t, ts.URL, accessTool("ask"))
+	a := mustDecisionAgent(t, ts.URL, nil, controlPlaneAuthz("ask"))
 	var asked atomic.Int32
 	ctx := fw.WithAsker(fw.WithPrincipal(context.Background(), alice), func(ctx context.Context, _ string, _ []byte) ([]byte, error) {
 		asked.Add(1)
@@ -299,12 +355,12 @@ func TestDecisionPolicy(t *testing.T) {
 func TestDecisionProbe(t *testing.T) {
 	ctx := context.Background()
 	ts := serveHTTP(t, (&controlPlane{}).server(), nil)
-	a := mustDecisionAgent(t, ts.URL, accessTool("authorize"))
+	a := mustDecisionAgent(t, ts.URL, nil, controlPlaneAuthz("authorize"))
 	st := a.ProbeExternal(ctx)
-	if len(st) != 1 || st[0].Use != "access" || !st[0].Probed || st[0].Err != nil {
+	if len(st) != 1 || st[0].Use != "workbench.access" || !st[0].Probed || st[0].Err != nil {
 		t.Fatalf("status = %+v", st)
 	}
-	a = mustDecisionAgent(t, ts.URL, accessTool("missing"))
+	a = mustDecisionAgent(t, ts.URL, nil, controlPlaneAuthz("missing"))
 	st = a.ProbeExternal(ctx)
 	if len(st) != 1 || st[0].Err == nil || !strings.Contains(st[0].Err.Error(), `has no tool "missing"`) || !strings.Contains(st[0].Err.Error(), "authorize") {
 		t.Fatalf("status = %+v", st)
@@ -318,8 +374,14 @@ func TestDecisionServerIsNotAToolSource(t *testing.T) {
 		{Name: "git", Endpoint: "https://git.example.com/mcp"},
 	}
 	// The names match loosely, as in the validation of the configuration,
-	// so a different spelling still hides the server from the model.
-	cfg.Access.External = &fw.ExternalPolicyConfig{MCP: "Control_Plane"}
+	// so a different spelling still hides the server from the model. A
+	// linked package names its control server through the registry.
+	fw.RegisterControlServers(func(c *fw.Config) []string {
+		if c == cfg {
+			return []string{"Control_Plane"}
+		}
+		return nil
+	})
 	cfg.Policy.External = &fw.ExternalPolicyConfig{MCP: "control-plane", Tool: "decide"}
 	srcs, err := newSources(context.Background(), cfg, nil)
 	if err != nil {
@@ -332,11 +394,12 @@ func TestDecisionServerIsNotAToolSource(t *testing.T) {
 }
 
 func TestDecisionMissingEntry(t *testing.T) {
-	_, err := newDecisionAgent(t, "https://cp.example.com/mcp", func(c *fw.Config) {
-		c.Access.External = &fw.ExternalPolicyConfig{MCP: "nope"}
-	})
+	_, err := newDecisionAgent(t, "https://cp.example.com/mcp", nil, fw.WithAuthzFrom(func(a *fw.Agent) (fw.Authz, string, error) {
+		_, err := a.NewDecisionPoint(context.Background(), "workbench.access", fw.ExternalPolicyConfig{MCP: "nope"})
+		return nil, "", err
+	}))
 	if err == nil || !strings.Contains(err.Error(), `names the server "nope"`) || !strings.Contains(err.Error(), "the entries are cp") ||
-		!strings.Contains(err.Error(), "access.external") {
+		!strings.Contains(err.Error(), "workbench.access.external") {
 		t.Fatalf("fw.New = %v", err)
 	}
 }

@@ -97,11 +97,7 @@ func TestEnvOverrides(t *testing.T) {
 		{"time note after", map[string]string{"FW_TIME_NOTE_AFTER": "30m"}, func(c *fw.Config) any { return c.Time.NoteAfter }, 30 * time.Minute},
 		{"time notes off", map[string]string{"FW_TIME_NOTE_AFTER": "0"}, func(c *fw.Config) any { return c.Time.NoteAfter }, time.Duration(0)},
 		{"profile time zone", map[string]string{"FW_AGENTS_REVIEWER_TIME_ZONE": "Europe/Berlin"}, func(c *fw.Config) any { return c.Agents["reviewer"].TimeZone }, "Europe/Berlin"},
-		{"access external mcp", map[string]string{"FW_ACCESS_EXTERNAL_MCP": "control", "FW_ACCESS_EXTERNAL_TOOL": "check", "FW_ACCESS_EXTERNAL_TIMEOUT": "2s"},
-			func(c *fw.Config) any { return *c.Access.External }, fw.ExternalPolicyConfig{MCP: "control", Tool: "check", Timeout: 2 * time.Second}},
-		{"access external bus", map[string]string{"FW_ACCESS_EXTERNAL_BUS": "fw.authz"}, func(c *fw.Config) any { return *c.Access.External }, fw.ExternalPolicyConfig{Bus: "fw.authz"}},
 		{"policy external mcp", map[string]string{"FW_POLICY_EXTERNAL_MCP": "control", "FW_POLICY_EXTERNAL_TOOL": "decide"}, func(c *fw.Config) any { return *c.Policy.External }, fw.ExternalPolicyConfig{MCP: "control", Tool: "decide"}},
-		{"absent access external stays nil", map[string]string{"FW_BUS_URL": "x"}, func(c *fw.Config) any { return c.Access.External == nil }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,7 +131,6 @@ func TestEnvNames(t *testing.T) {
 		"FW_BUS_URL", "FW_TOOLS_SEARCH_THRESHOLD", "FW_AUTH_MODE", "FW_MCP_PATH", "FW_TELEMETRY_LOG", "FW_MODEL", "FW_HOME", "FW_MAX_RUNS", "FW_BUDGET_MAX_COST_USD",
 		"FW_TOOLS_LIMITS_TIMEOUT", "FW_TOOLS_BASH_TIMEOUT", "FW_TOOLS_SKILLS", "FW_SPAWN_MAX_DEPTH", "FW_BUDGET_MAX_REPEATS",
 		"FW_TIME_ZONE", "FW_TIME_NOTE_AFTER", "FW_AGENTS_<NAME>_TIME_ZONE",
-		"FW_ACCESS_EXTERNAL_MCP", "FW_ACCESS_EXTERNAL_TOOL", "FW_ACCESS_EXTERNAL_BUS", "FW_ACCESS_EXTERNAL_TIMEOUT",
 		"FW_POLICY_EXTERNAL_MCP", "FW_POLICY_EXTERNAL_TOOL", "FW_POLICY_EXTERNAL_BUS", "FW_POLICY_EXTERNAL_TIMEOUT",
 	} {
 		if !slices.Contains(names, want) {

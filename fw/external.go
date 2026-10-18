@@ -1,10 +1,14 @@
 package fw
 
 // This file is the external decision point (docs/ARCHITECTURE.md section
-// 13.5): an MCP tool or a bus subject outside the process that decides who
-// can do what (access.external) and which tool calls run (policy.external).
-// fw sends the facts and enforces the answer. It makes no decision of its
-// own for that part, so the control plane is the single source of truth.
+// 13.5): an MCP tool or a bus subject outside the process that decides. The
+// kernel asks it which tool calls run (policy.external), sends the facts,
+// and enforces the answer; it makes no decision of its own for that part,
+// so the control plane is the single source of truth. The kernel also
+// defines the protocol of an authorization decision, AuthzRequest and
+// AuthzAnswer, and builds a decision point for a linked package
+// (NewDecisionPoint). The workbench asks a control plane who can do what;
+// a worker kernel decides that with the rules of access alone.
 
 import (
 	"context"
@@ -24,7 +28,7 @@ var ErrAuthzUnavailable = errors.New("fw: authorization unavailable")
 
 // Defaults of an external decision point.
 const (
-	DefaultAuthzTool       = "authorize"     // the MCP tool of access.external
+	DefaultAuthzTool       = "authorize"     // the MCP tool of an authorization decision point
 	DefaultPolicyTool      = "decide"        // the MCP tool of policy.external
 	DefaultDecisionTimeout = 5 * time.Second // the limit of one request
 	DecisionVersion        = 1               // the version of the request shape
@@ -109,22 +113,26 @@ func (e ExternalPolicyConfig) withDefaults(tool string) ExternalPolicyConfig {
 	return e
 }
 
-// ControlServers returns the names of the MCP servers that access.external
-// and policy.external use, as the configuration gives them. The MCP tool
-// source leaves them out, so the model never sees or calls a decision
-// tool. Compare a name with IsControlServer, which matches loosely.
+// ControlServers returns the names of the MCP servers that decisions use:
+// the one of policy.external, and the ones that linked packages registered
+// with RegisterControlServers, such as the control plane of the workbench.
+// The MCP tool source leaves them out, so the model never sees or calls a
+// decision tool. Compare a name with IsControlServer, which matches loosely.
 func (c *Config) ControlServers() map[string]bool {
 	out := map[string]bool{}
-	for _, e := range []*ExternalPolicyConfig{c.Access.External, c.Policy.External} {
-		if e != nil && e.MCP != "" {
-			out[e.MCP] = true
+	if e := c.Policy.External; e != nil && e.MCP != "" {
+		out[e.MCP] = true
+	}
+	for _, name := range registeredControlServers(c) {
+		if name != "" {
+			out[name] = true
 		}
 	}
 	return out
 }
 
-// IsControlServer reports whether access.external or policy.external names
-// the MCP server, with the loose match of SameServerName.
+// IsControlServer reports whether a decision point names the MCP server,
+// with the loose match of SameServerName.
 func (c *Config) IsControlServer(name string) bool {
 	for n := range c.ControlServers() {
 		if SameServerName(n, name) {
@@ -162,18 +170,26 @@ func (a *Agent) newDecisionPoint(ctx context.Context, key string, ext ExternalPo
 	return nil, fmt.Errorf("fw: %s needs exactly one of mcp and bus", key)
 }
 
-// setupExternal builds the external Authz and Policy that the configuration
-// names, unless an option already set them.
-func (a *Agent) setupExternal(ctx context.Context, authzSet, policySet bool) error {
-	if ext := a.cfg.Access.External; ext != nil && !authzSet {
-		e := ext.withDefaults(DefaultAuthzTool)
-		dp, err := a.newDecisionPoint(ctx, "access.external", e)
-		if err != nil {
-			return err
-		}
-		a.decisionPoints = append(a.decisionPoints, external{use: "access", ext: e, dp: dp})
-		a.authz = &externalAuthz{a: a, dp: dp, ext: e, cache: map[string]cachedDecision{}}
+// NewDecisionPoint builds the decision point that ext names, for a linked
+// package that asks a control plane, such as the authorization of the
+// workbench. Use names what the point decides, for example
+// "workbench.access"; fw doctor prints "<use>.external" for it. The point
+// gets the default tool for authorization and the default timeout when ext
+// leaves them empty. The agent closes it at shutdown and probes it for fw
+// doctor (ProbeExternal).
+func (a *Agent) NewDecisionPoint(ctx context.Context, use string, ext ExternalPolicyConfig) (DecisionPoint, error) {
+	e := ext.withDefaults(DefaultAuthzTool)
+	dp, err := a.newDecisionPoint(ctx, use+".external", e)
+	if err != nil {
+		return nil, err
 	}
+	a.decisionPoints = append(a.decisionPoints, external{use: use, ext: e, dp: dp})
+	return dp, nil
+}
+
+// setupExternal builds the external Policy that the configuration names,
+// unless an option already set it.
+func (a *Agent) setupExternal(ctx context.Context, policySet bool) error {
 	if ext := a.cfg.Policy.External; ext != nil && !policySet {
 		e := ext.withDefaults(DefaultPolicyTool)
 		dp, err := a.newDecisionPoint(ctx, "policy.external", e)
@@ -188,14 +204,15 @@ func (a *Agent) setupExternal(ctx context.Context, authzSet, policySet bool) err
 
 // external is one decision point of the agent.
 type external struct {
-	use string // "access" or "policy"
+	use string // "policy", or the use that a linked package gave, such as "workbench.access"
 	ext ExternalPolicyConfig
 	dp  DecisionPoint
 }
 
 // ExternalStatus is the state of one external decision point, for fw
-// doctor. Use is "access" or "policy". Err is nil when the decision point
-// is ready, or when it cannot tell (Probed is false).
+// doctor. Use is "policy", or the use of a linked package, such as
+// "workbench.access". Err is nil when the decision point is ready, or when
+// it cannot tell (Probed is false).
 type ExternalStatus struct {
 	Use    string
 	Target string
@@ -229,7 +246,8 @@ func (a *Agent) closeDecisionPoints() {
 	}
 }
 
-// AuthzRequest is what fw sends to access.external. It asks about one
+// AuthzRequest is what the workbench sends to its control plane
+// (workbench.access.external). It asks about one
 // principal and one or more checks, and the answer holds one decision per
 // check, in the same order.
 type AuthzRequest struct {
@@ -272,7 +290,7 @@ type RunRef struct {
 	Principal string `json:"principal,omitempty"`
 }
 
-// AuthzAnswer is what access.external returns: one decision per check.
+// AuthzAnswer is what the control plane returns: one decision per check.
 type AuthzAnswer struct {
 	Decisions []AuthzDecision `json:"decisions"`
 }
@@ -318,8 +336,10 @@ type PolicyAnswer struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
-// runFacts describes a run with its lineage.
-func (a *Agent) runFacts(r *Run) *RunFacts {
+// RunFacts returns the facts of a run for a decision request: the run and
+// its ancestors in this process, the parent first (AuthzQuery.Run). A
+// linked package that asks a control plane uses it; nil gives nil.
+func (a *Agent) RunFacts(r *Run) *RunFacts {
 	if r == nil {
 		return nil
 	}
@@ -333,162 +353,6 @@ func (a *Agent) runFacts(r *Run) *RunFacts {
 		f.Lineage = append(f.Lineage, RunRef{ID: cur.ID, Agent: cur.Agent, Principal: cur.Principal})
 	}
 	return f
-}
-
-// externalAuthz asks access.external about every check. It decides about a
-// child run from the lineage in the request, so Authorize does not ask
-// again for the ancestors.
-type externalAuthz struct {
-	a   *Agent
-	dp  DecisionPoint
-	ext ExternalPolicyConfig
-
-	mu    sync.Mutex
-	cache map[string]cachedDecision
-}
-
-type cachedDecision struct {
-	err     error
-	expires time.Time
-}
-
-// maxCachedDecisions bounds the cache of decisions.
-const maxCachedDecisions = 4096
-
-func (*externalAuthz) decidesLineage() {}
-
-// Allow implements Authz.
-func (z *externalAuthz) Allow(ctx context.Context, p *Principal, action string, t Target) error {
-	return z.AllowAll(ctx, p, []AuthzCheck{{Action: action, Target: t}})[0]
-}
-
-// AllowAll implements BatchAuthz. It answers from the cache when it can and
-// sends the other checks in one request.
-func (z *externalAuthz) AllowAll(ctx context.Context, p *Principal, checks []AuthzCheck) []error {
-	out := make([]error, len(checks))
-	if p == nil {
-		return out
-	}
-	now := z.a.now()
-	// The facts come from the run cache and the profiles, so they are read
-	// before the lock of the decision cache.
-	queries := make([]AuthzQuery, len(checks))
-	keys := make([]string, len(checks))
-	for i, c := range checks {
-		queries[i] = z.query(c)
-		keys[i] = cacheKey(p, queries[i])
-	}
-	var miss []int
-	z.mu.Lock()
-	for i := range checks {
-		if d, ok := z.cache[keys[i]]; ok && now.Before(d.expires) {
-			out[i] = d.err
-			continue
-		}
-		miss = append(miss, i)
-	}
-	z.mu.Unlock()
-	if len(miss) == 0 {
-		return out
-	}
-	req := AuthzRequest{Kind: DecisionAuthz, Version: DecisionVersion, Principal: *p}
-	for _, i := range miss {
-		req.Checks = append(req.Checks, queries[i])
-	}
-	ans, err := z.ask(ctx, req)
-	if err != nil {
-		z.a.log.Warn("external authorization failed", "decisionPoint", z.ext.String(), "error", err)
-		for _, i := range miss {
-			out[i] = fmt.Errorf("%w: %s did not answer: %v", ErrAuthzUnavailable, z.ext, err)
-		}
-		return out
-	}
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	for j, i := range miss {
-		d := ans.Decisions[j]
-		if !d.Allow {
-			reason := strings.TrimSpace(d.Reason)
-			if reason == "" {
-				reason = "the control plane refused it"
-			}
-			out[i] = fmt.Errorf("%w: %s %s: %s", ErrForbidden, p.Subject, checks[i].Action, reason)
-		}
-		if d.TTLMs > 0 {
-			if len(z.cache) >= maxCachedDecisions {
-				z.sweep(now)
-			}
-			z.cache[keys[i]] = cachedDecision{err: out[i], expires: now.Add(time.Duration(d.TTLMs) * time.Millisecond)}
-		}
-	}
-	return out
-}
-
-// query turns a check into the facts that the request carries.
-func (z *externalAuthz) query(c AuthzCheck) AuthzQuery {
-	agent := c.Target.Agent
-	if agent == "" && c.Target.Run != nil {
-		agent = c.Target.Run.Agent
-	}
-	if c.Target.Member != "" {
-		q := AuthzQuery{Action: c.Action, Member: c.Target.Member, Agent: agent, Access: c.Target.Access}
-		if r := c.Target.Run; r != nil {
-			q.Run = &RunFacts{ID: r.ID, Agent: r.Agent, Principal: r.Principal, State: r.State, Origin: r.Origin, Lineage: c.Target.Lineage}
-		}
-		return q
-	}
-	q := AuthzQuery{Action: c.Action, Agent: agent, Run: z.a.runFacts(c.Target.Run)}
-	if agent != "" {
-		if prof, ok := z.a.ProfileNamed(agent); ok && prof.Access != nil {
-			acc := *prof.Access
-			q.Access = &acc
-		}
-	}
-	return q
-}
-
-// ask sends one request and checks the shape of the answer.
-func (z *externalAuthz) ask(ctx context.Context, req AuthzRequest) (AuthzAnswer, error) {
-	var ans AuthzAnswer
-	body, err := json.Marshal(req)
-	if err != nil {
-		return ans, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, z.ext.Timeout)
-	defer cancel()
-	raw, err := z.dp.Decide(ctx, body)
-	if err != nil {
-		return ans, err
-	}
-	if err := json.Unmarshal(raw, &ans); err != nil {
-		return ans, fmt.Errorf("the answer is not an AuthzAnswer: %w", err)
-	}
-	if len(ans.Decisions) != len(req.Checks) {
-		return ans, fmt.Errorf("the answer holds %d decisions for %d checks", len(ans.Decisions), len(req.Checks))
-	}
-	return ans, nil
-}
-
-// sweep drops expired decisions, and every decision when none expired. The
-// caller holds z.mu.
-func (z *externalAuthz) sweep(now time.Time) {
-	for k, d := range z.cache {
-		if !now.Before(d.expires) {
-			delete(z.cache, k)
-		}
-	}
-	if len(z.cache) >= maxCachedDecisions {
-		clear(z.cache)
-	}
-}
-
-// cacheKey identifies a decision by every fact that the request carries.
-func cacheKey(p *Principal, q AuthzQuery) string {
-	b, _ := json.Marshal(struct {
-		P *Principal `json:"p"`
-		Q AuthzQuery `json:"q"`
-	}{p, q})
-	return string(b)
 }
 
 // externalPolicy asks policy.external about every tool call. A decision
@@ -514,7 +378,7 @@ func (x *externalPolicy) Decide(ctx context.Context, call ToolCall) Decision {
 	}
 	if call.RunID != "" && x.a.k != nil {
 		if rs, err := x.a.k.lookup(call.RunID); err == nil {
-			req.Run = x.a.runFacts(rs.snapshot())
+			req.Run = x.a.RunFacts(rs.snapshot())
 		}
 	}
 	unavailable := func(err error) Decision {

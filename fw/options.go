@@ -26,6 +26,7 @@ type options struct {
 	profiles   []AgentProfile
 	authn      Authn
 	authz      Authz
+	authzFrom  func(*Agent) (Authz, string, error)
 	tlsConfig  *tls.Config
 	prices     Prices
 	logger     *slog.Logger
@@ -156,6 +157,16 @@ func WithAuthn(a Authn) Option { return func(o *options) { o.authn = a } }
 
 // WithAuthz uses an authorization plug in place of the rules from access.
 func WithAuthz(z Authz) Option { return func(o *options) { o.authz = z } }
+
+// WithAuthzFrom builds the authorization plug from the agent, once the
+// agent has its configuration, its secrets, and its bus, for a plug that
+// needs them, such as the control-plane authorization of the workbench. The
+// function returns the plug and the mode that AccessMode reports,
+// AccessModeExternal or "" for AccessModeCustom; a nil plug keeps the rules
+// from access. WithAuthz wins over it.
+func WithAuthzFrom(build func(a *Agent) (Authz, string, error)) Option {
+	return func(o *options) { o.authzFrom = build }
+}
 
 // WithTLS serves the listener with this TLS configuration, in place of
 // the one that Config.TLS builds.

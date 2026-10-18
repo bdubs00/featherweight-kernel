@@ -53,7 +53,7 @@ Done on 2026-10-18.
 
 ### Stage 5: Final boundary and identity cleanup
 
-1. **Control-plane authorization at the front:** Move `access.external` and multi-user role checks beyond single-Task caller verification out of the worker kernel and into the front.
+1. **Control-plane authorization at the front:** Done on 2026-10-18. `access.external` left the kernel. The front hands the authorization of people to a control plane with `workbench.access.external` (the workbench architecture, section 12), through `fw.WithAuthzFrom`, and a worker decides with the rules of `access` alone: the static token of the fleet, the person who started a run, `access.admins`, and the access block of a profile. `policy.external`, the decision protocol, and the transports stay in the kernel.
 2. **Workload identity for workers:** Replace the shared static fleet token between workers and the front with actor JWTs once Substrate ships `ate-idp-server`.
 3. **Lean worker builds:** Add build tags so the worker image links only the drivers it uses inside AX.
 
