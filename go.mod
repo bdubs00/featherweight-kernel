@@ -109,4 +109,4 @@ require (
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )
 
-replace github.com/google/ax => github.com/bdubs00/ax v0.3.2-0.20261018165739-84fce4d59f9c
+replace github.com/google/ax => github.com/bdubs00/ax v0.3.2-0.20261018223907-fc509c5026dc
