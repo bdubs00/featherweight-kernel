@@ -120,7 +120,7 @@ See section 11 of the architecture for the boot sequence, suspend and resume, `a
 
 ## Models
 
-The selector `provider/model` picks the adapter: `anthropic/claude-opus-5-5` (the default), `gemini/gemini-3.8-flash`, or `openai/<model>`. The OpenAI adapter speaks the chat completions API to OpenAI, to Azure OpenAI, and to a local server such as vLLM or Ollama. The key `providers.openai` in `fw.yaml` holds the base URL, the headers, the TLS configuration, and the options.
+The selector `provider/model` picks the adapter: `anthropic/claude-opus-5-5`, `gemini/gemini-3.8-flash`, or `openai/<model>`. There is no default. A process without a model boots and serves, and refuses every run until `model`, `FW_MODEL`, or the profile of the run names one. The OpenAI adapter speaks the chat completions API to OpenAI, to Azure OpenAI, and to a local server such as vLLM or Ollama. The key `providers.openai` in `fw.yaml` holds the base URL, the headers, the TLS configuration, and the options.
 
 ## Layout
 

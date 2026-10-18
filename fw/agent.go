@@ -215,6 +215,10 @@ func New(opts ...Option) (*Agent, error) {
 	}
 	if o.model != nil {
 		a.model = a.wrapModel(o.model)
+	} else if cfg.Model == "" {
+		// No default model. The process serves, and a run request fails with
+		// ErrNoModel unless its profile names a model.
+		a.log.Info("no model configured; a run needs model in the configuration or on its profile")
 	} else {
 		// Open the default model now when possible. A missing credential is a
 		// warning, not a failure, so that a process boots and serves health and
@@ -340,7 +344,7 @@ func DefaultNode(listen string) string {
 // Logger returns the logger.
 func (a *Agent) Logger() *slog.Logger { return a.log }
 
-// Model returns the default model.
+// Model returns the default model, or nil when the configuration names none.
 func (a *Agent) Model() Model { return a.model }
 
 // ModelFor returns the model for a selector or a name from Config.Models,
@@ -351,6 +355,9 @@ func (a *Agent) ModelFor(ctx context.Context, name string) (Model, error) {
 	defer a.modelsMu.Unlock()
 	if m, ok := a.models[selector]; ok {
 		return m, nil
+	}
+	if selector == "" {
+		return nil, ErrNoModel
 	}
 	m, err := NewModel(ctx, selector, a.cfg, a.secrets)
 	if err != nil {

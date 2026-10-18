@@ -8,29 +8,79 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
 
 const egressTimeout = 5 * time.Second
 
+// intakeRetryMax caps the pause between two attempts to start the intake.
+const intakeRetryMax = 30 * time.Second
+
 // startIntake consumes Config.Bus.Intake. Each message is a RunRequest in
 // JSON. The message id is the idempotency key when the request has none, so
 // a redelivered message returns the first run. The handler acknowledges the
 // message only when the run reaches a terminal state.
-func (a *Agent) startIntake() error {
+//
+// The bus can be out of reach when the process boots. In a sandbox the
+// egress policy can take effect seconds after the first packet, and a bus
+// server can restart. A consumer that does not start is a warning, not a
+// failure: the kernel tries again in the background, with a pause that
+// doubles up to intakeRetryMax, until the consumer starts or the kernel
+// closes. The process serves its API and its health in the meantime.
+func (a *Agent) startIntake() {
 	queue := a.cfg.Bus.Intake
 	if queue == "" || a.bus == nil {
-		return nil
+		return
 	}
-	stop, err := a.bus.Consume(a.k.ctx, queue, a.handleIntake)
+	if a.tryIntake(queue) {
+		return
+	}
+	a.k.wg.Add(1)
+	go func() {
+		defer a.k.wg.Done()
+		delay := time.Second
+		for {
+			t := time.NewTimer(delay)
+			select {
+			case <-a.k.ctx.Done():
+				t.Stop()
+				return
+			case <-a.k.drainCh:
+				t.Stop()
+				return
+			case <-t.C:
+			}
+			if a.tryIntake(queue) {
+				return
+			}
+			delay = min(delay*2, intakeRetryMax)
+		}
+	}()
+}
+
+// tryIntake starts the consumer once. It returns true when the consumer
+// runs, or when the kernel is closing and a retry has no point.
+func (a *Agent) tryIntake(queue string) bool {
+	k := a.k
+	stop, err := a.bus.Consume(k.ctx, queue, a.handleIntake)
 	if err != nil {
-		return fmt.Errorf("fw: consume %s: %w", queue, err)
+		if k.ctx.Err() != nil {
+			return true
+		}
+		a.log.Warn("bus intake not started yet; retrying in the background", "queue", queue, "error", err)
+		return false
 	}
-	a.k.intakeStop = stop
+	k.lifeMu.Lock()
+	if k.draining {
+		k.lifeMu.Unlock()
+		stop()
+		return true
+	}
+	k.intakeStop = stop
+	k.lifeMu.Unlock()
 	a.log.Info("bus intake started", "queue", queue)
-	return nil
+	return true
 }
 
 func (a *Agent) handleIntake(e Event) error {

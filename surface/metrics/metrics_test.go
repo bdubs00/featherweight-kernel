@@ -23,6 +23,10 @@ import (
 func newAgent(t *testing.T, cfg *fw.Config, s fw.Surface, opts ...fw.Option) *fw.Agent {
 	t.Helper()
 	t.Setenv("FW_ATESPACE", "")
+	if cfg.Model == "" {
+		// The kernel has no default model; the series under test name this one.
+		cfg.Model = "anthropic/claude-opus-5-5"
+	}
 	model := fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
 		return &fw.Response{Content: []fw.Block{fw.Text("ok")}, StopReason: fw.StopEndTurn, Usage: fw.Usage{InputTokens: 3, OutputTokens: 2}}, nil
 	}}

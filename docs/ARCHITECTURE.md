@@ -255,7 +255,7 @@ type Model interface {
 | `gemini/` | `google.golang.org/genai` | `gemini-3.8-flash` |
 | `openai/` | OpenAI-compatible chat completions over HTTP | none |
 
-A model selector is the string `provider/model`, for example `anthropic/claude-opus-5-5`. The default selector is `anthropic/claude-opus-5-5`. The `gemini` adapter exists because ax injects `GEMINI_API_KEY` and the ax `Model` resource defaults to Google. The `openai` adapter exists for OpenAI itself, for proxies, and for local servers such as vLLM and Ollama.
+A model selector is the string `provider/model`, for example `anthropic/claude-opus-5-5`. There is no default selector. A configuration that names no model boots and serves, logs one line that says so, and refuses every run with `fw: no model configured` until `model`, `FW_MODEL`, or the profile of the run names one. A process that only serves people, such as the front of a fleet, needs no model and no model credential. The `gemini` adapter exists because ax injects `GEMINI_API_KEY` and the ax `Model` resource defaults to Google. The `openai` adapter exists for OpenAI itself, for proxies, and for local servers such as vLLM and Ollama.
 
 Each provider has a connection block under `providers.<name>` in `fw.yaml`, and every field of it has an `FW_PROVIDERS_<NAME>_*` variable (section 12.1):
 
@@ -802,7 +802,7 @@ type Retainer interface {
 
 ### 9.3 Intake
 
-The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each message is a run request with the same body as `POST /v1/runs`. A request from the queue keeps the `principal` and the `principalKind` that it names, because the bus is a channel of the process, so the front of a fleet sends the work of a person to a worker and the run acts as that person (the workbench architecture, section 4.9). When the run reaches a terminal event, the handler acknowledges the message. The message id is the idempotency key, so a redelivered message does not start a second run.
+The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each message is a run request with the same body as `POST /v1/runs`. A request from the queue keeps the `principal` and the `principalKind` that it names, because the bus is a channel of the process, so the front of a fleet sends the work of a person to a worker and the run acts as that person (the workbench architecture, section 4.9). When the run reaches a terminal event, the handler acknowledges the message. The message id is the idempotency key, so a redelivered message does not start a second run. If the bus is out of reach when the process boots, the consumer does not start, and the kernel logs a warning and tries again in the background, with a pause that doubles up to 30 seconds, while the process serves its API and its health. A sandbox whose egress policy takes effect after the first packet, and a bus server that restarts, both need this.
 
 ### 9.4 Egress
 
@@ -1102,7 +1102,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 
 | Interface | Default | Alternatives | Swap with |
 |---|---|---|---|
-| `Model` | `anthropic/claude-opus-5-5` | `gemini/*`, `openai/*`, your own | `model:` or `fw.WithModel` |
+| `Model` | none; a run needs `model:`, `FW_MODEL`, or a profile model | `anthropic/*`, `gemini/*`, `openai/*`, your own | `model:` or `fw.WithModel` |
 | `Tool`, `ToolSource` | `bash`, `files`, `http`, `memory` | MCP servers, A2A peers, your own | `tools:` or `fw.Tools` |
 | `Policy` | allow read-only, ask on destructive | rules, an external MCP or bus decision point, your own | `policy:`, `policy.external:`, or `fw.WithPolicy` |
 | `Ledger` | JSONL files | NATS, Redis, SQLite, your own | `ledger.driver:` or `fw.Ledger` |

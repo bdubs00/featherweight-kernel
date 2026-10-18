@@ -503,6 +503,7 @@ func newAgent(t *testing.T, m fw.Model, opts ...fw.Option) *fw.Agent {
 	base := []fw.Option{
 		fw.WithoutDefaults(),
 		fw.WithAuthn(fw.NoAuthn{}),
+		fw.WithModelName("anthropic/claude-opus-5-5"),
 		fw.WithModel(m),
 		fw.WithLedger(fw.NewMemLedger()),
 		fw.WithBus(fw.NewMemBus()),

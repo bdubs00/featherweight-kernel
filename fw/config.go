@@ -550,14 +550,15 @@ const (
 )
 
 // DefaultConfig returns the configuration that works with no file and no
-// variables, given a model credential in the environment. The changes of
-// RegisterDefaults apply last.
+// variables. It names no model: a process without a model boots and
+// serves, and refuses every run until `model`, FW_MODEL, or the profile
+// of the run names one. The changes of RegisterDefaults apply last.
 func DefaultConfig() *Config {
 	c := &Config{
 		Listen:  ":8080",
 		Auth:    AuthConfig{Mode: "token", TokenEnv: "FW_API_TOKEN"},
 		Access:  AccessConfig{Default: "open"},
-		Model:   "anthropic/claude-opus-5-5",
+		Model:   "",
 		Effort:  "high",
 		Secrets: SecretsConfig{Driver: "env"},
 		Ledger:  LedgerConfig{Driver: "file"},

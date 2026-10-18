@@ -308,7 +308,7 @@ func validate(c *fw.Config, servers bool) error {
 	if strings.TrimSpace(c.Listen) == "" {
 		p = append(p, "listen is empty")
 	}
-	if !isSelector(c.Model) {
+	if c.Model != "" && !isSelector(c.Model) {
 		p = append(p, fmt.Sprintf("model %q is not a provider/model selector", c.Model))
 	}
 	for _, name := range sortedKeys(c.Models) {

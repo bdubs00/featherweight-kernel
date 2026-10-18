@@ -1,7 +1,11 @@
 package fw
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -89,4 +93,63 @@ func TestAgentOfSource(t *testing.T) {
 			t.Errorf("agentOfSource(%q) = %q, want %q", src, got, want)
 		}
 	}
+}
+
+// flakyBus refuses the first consume calls, like a bus that is out of reach
+// when the process boots.
+type flakyBus struct {
+	Bus
+	mu    sync.Mutex
+	fails int
+	calls int
+}
+
+func (b *flakyBus) Consume(ctx context.Context, queue string, h func(Event) error) (func(), error) {
+	b.mu.Lock()
+	b.calls++
+	n := b.calls
+	b.mu.Unlock()
+	if n <= b.fails {
+		return nil, errors.New("flaky: not reachable yet")
+	}
+	return b.Bus.Consume(ctx, queue, h)
+}
+
+func (b *flakyBus) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+// The intake starts later when the bus refuses the consumer at boot.
+func TestBusIntakeRetriesUntilTheBusAnswers(t *testing.T) {
+	t.Setenv("FW_ATESPACE", "")
+	cfg := DefaultConfig()
+	cfg.Bus.Intake = "fw.jobs.flaky"
+	cfg.Agents = map[string]AgentProfile{"default": {}}
+	fb := &flakyBus{Bus: NewMemBus(), fails: 2}
+	a := newTestAgent(t, newScript(endTurn("done")).Model(), WithConfig(cfg), WithBus(fb))
+	if fb.count() != 1 {
+		t.Fatalf("consume calls at boot = %d; want 1", fb.count())
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for fb.count() < 3 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if fb.count() < 3 {
+		t.Fatalf("consume calls = %d; the kernel must try again after a refusal", fb.count())
+	}
+	ctx := testCtx(t)
+	body, _ := json.Marshal(RunRequest{Input: "hi"})
+	if err := fb.Publish(ctx, "fw.jobs.flaky", Event{ID: "job-1", Data: body}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	for time.Now().Before(deadline) {
+		runs, _ := a.List(ctx)
+		if len(runs) == 1 && runs[0].State.Terminal() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the run from the queue did not finish; the intake never started")
 }

@@ -25,6 +25,9 @@ var (
 	ErrClosed = errors.New("fw: agent is closed")
 	// ErrInvalidRequest marks a request that fails validation, so a surface answers 400.
 	ErrInvalidRequest = errors.New("fw: invalid request")
+	// ErrNoModel means that neither the configuration nor the profile of a
+	// run names a model. The kernel has no default model.
+	ErrNoModel = errors.New("fw: no model configured; set model in fw.yaml or FW_MODEL, or model on the agent profile")
 	// ErrNoPendingApproval is returned by Decide when the run waits for no
 	// approval with that id.
 	ErrNoPendingApproval = errors.New("fw: no pending approval with that id")
@@ -157,10 +160,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 	if !a.noResume {
 		a.resume(unfinished)
 	}
-	if err := a.startIntake(); err != nil {
-		a.shutdownKernel(ctx)
-		return err
-	}
+	a.startIntake()
 	return nil
 }
 
@@ -173,13 +173,14 @@ func (a *Agent) shutdownKernel(ctx context.Context) {
 		return
 	}
 	k.once.Do(func() {
-		if k.intakeStop != nil {
-			k.intakeStop()
-		}
 		k.lifeMu.Lock()
+		stop := k.intakeStop
 		k.draining = true
 		close(k.drainCh)
 		k.lifeMu.Unlock()
+		if stop != nil {
+			stop()
+		}
 
 		done := make(chan struct{})
 		go func() {
@@ -296,6 +297,9 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, err
 	}
 	if err := a.checkProfile(req.Profile); err != nil {
+		return nil, err
+	}
+	if err := a.checkModel(req); err != nil {
 		return nil, err
 	}
 	if len(req.Instructions) > maxInstructionBytes {
@@ -573,6 +577,27 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 		if b.MaxTurns < 0 || b.MaxTokens < 0 || b.MaxCostUSD < 0 || b.Deadline < 0 || b.MaxToolCalls < 0 || b.MaxCallsPerTurn < 0 || b.MaxRepeats < 0 {
 			return fmt.Errorf("%w: a budget limit is negative", ErrInvalidRequest)
 		}
+	}
+	return nil
+}
+
+// checkModel makes sure that a run has a model: the one of the request
+// profile, else the one of the agent profile, else the default model of
+// the configuration. The kernel has no built-in default, so a process
+// without a model refuses the run here, before anything is recorded.
+func (a *Agent) checkModel(req RunRequest) error {
+	if a.model != nil {
+		return nil
+	}
+	model := ""
+	if p, ok := a.ProfileNamed(req.Agent); ok {
+		model = p.Model
+	}
+	if req.Profile != nil && req.Profile.Model != "" {
+		model = req.Profile.Model
+	}
+	if a.cfg.ModelSelector(model) == "" {
+		return fmt.Errorf("%w: %w", ErrInvalidRequest, ErrNoModel)
 	}
 	return nil
 }

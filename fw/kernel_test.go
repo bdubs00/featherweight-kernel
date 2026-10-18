@@ -74,6 +74,7 @@ func newTestAgent(t *testing.T, m Model, opts ...Option) *Agent {
 	base := []Option{
 		WithoutDefaults(),
 		WithAuthn(NoAuthn{}),
+		WithModelName("anthropic/claude-opus-5-5"),
 		WithModel(m),
 		WithLedger(NewMemLedger()),
 		WithBus(NewMemBus()),

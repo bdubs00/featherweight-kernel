@@ -106,12 +106,19 @@ type toolSourcer interface {
 // each profile. These keep their names as label values.
 func modelSelectors(a *fw.Agent) []string {
 	cfg := a.Config()
-	out := []string{cfg.Model, cfg.ModelSelector(cfg.Compaction.Model)}
+	var out []string
+	add := func(s string) {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	add(cfg.Model)
+	add(cfg.ModelSelector(cfg.Compaction.Model))
 	for _, s := range cfg.Models {
-		out = append(out, s)
+		add(s)
 	}
 	for _, p := range a.Profiles() {
-		out = append(out, cfg.ModelSelector(p.Model))
+		add(cfg.ModelSelector(p.Model))
 	}
 	return out
 }

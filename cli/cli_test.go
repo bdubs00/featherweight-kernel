@@ -887,6 +887,7 @@ func TestDoctorAllOK(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
 	t.Setenv("FW_TIME_ZONE", "America/Chicago")
+	t.Setenv("FW_MODEL", "anthropic/claude-opus-5-5")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-doctor-secret")
 	t.Setenv("ANTHROPIC_API_KEY_FILE", "")
 	writeSkill(t, filepath.Join(home, "skills"), "review", "Review")
@@ -940,6 +941,7 @@ func TestDoctorAllOK(t *testing.T) {
 
 func TestDoctorReportsEveryProblem(t *testing.T) {
 	home := env(t)
+	t.Setenv("FW_MODEL", "anthropic/claude-opus-5-5")
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("ANTHROPIC_API_KEY_FILE", "")
 	bad := filepath.Join(t.TempDir(), "fw.yaml")

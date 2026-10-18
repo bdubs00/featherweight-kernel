@@ -520,6 +520,10 @@ func (d *doctor) checkCredential(ctx context.Context, cfg *fw.Config) fw.Secrets
 		d.fail("credential: the secrets driver %q does not open: %v", cfg.Secrets.Driver, err)
 		return nil
 	}
+	if cfg.Model == "" {
+		d.ok("credential: no model is configured, so there is no model credential to check")
+		return secrets
+	}
 	names := credentialNames(cfg)
 	if len(names) == 0 {
 		provider, _ := fw.SplitSelector(cfg.Model)
@@ -544,6 +548,10 @@ func (d *doctor) checkCredential(ctx context.Context, cfg *fw.Config) fw.Secrets
 func (d *doctor) checkModel(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) {
 	if secrets == nil {
 		secrets = fw.EnvSecrets{}
+	}
+	if cfg.Model == "" {
+		d.ok("model: none configured; this process serves and refuses every run until model, FW_MODEL, or the profile of a run names one")
+		return
 	}
 	m, err := openModel(ctx, cfg.Model, cfg, secrets)
 	if err != nil {
