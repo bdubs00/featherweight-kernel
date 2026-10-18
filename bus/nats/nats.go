@@ -82,6 +82,11 @@ type Bus struct {
 	closed    bool
 }
 
+// errNotConnected means that the connection to the server is not up yet.
+// Consume and a stream publish fail with it at once, so a caller tries
+// again later instead of waiting for a request timeout.
+var errNotConnected = errors.New("nats: not connected yet")
+
 // Open connects to NATS and makes sure the stream exists.
 //
 // It reads cfg.Bus.URL (default nats://127.0.0.1:4222), cfg.Bus.Intake,
@@ -276,6 +281,10 @@ func (b *Bus) Publish(ctx context.Context, subject string, e fw.Event) error {
 	if e.ID != "" {
 		m.Header.Set(jetstream.MsgIDHeader, msgID(subject, e.ID))
 	}
+	if !b.nc.IsConnected() {
+		// A stream publish waits for an acknowledgement that cannot come.
+		return fmt.Errorf("nats: publish %s: %w", subject, errNotConnected)
+	}
 	_, err = b.js.PublishMsg(ctx, m)
 	if errors.Is(err, jetstream.ErrNoStreamResponse) {
 		// The server lost the stream, for example in a restart without
@@ -320,11 +329,14 @@ func (b *Bus) Subscribe(ctx context.Context, subject string, h func(fw.Event) er
 		return nil, fmt.Errorf("nats: subscribe %s: %w", subject, err)
 	}
 	// Flush so that the server knows the subscription before Subscribe
-	// returns. While the client reconnects, it sends the subscription again
-	// on its own.
-	if err := flush(ctx, b.nc); err != nil && !b.nc.IsReconnecting() {
-		_ = sub.Unsubscribe()
-		return nil, fmt.Errorf("nats: subscribe %s: %w", subject, err)
+	// returns. While the connection is not up, the client sends the
+	// subscription on its own when it connects, and a flush would only wait
+	// for the flush timeout.
+	if b.nc.IsConnected() {
+		if err := flush(ctx, b.nc); err != nil && !b.nc.IsReconnecting() {
+			_ = sub.Unsubscribe()
+			return nil, fmt.Errorf("nats: subscribe %s: %w", subject, err)
+		}
 	}
 	var once sync.Once
 	return func() {
@@ -352,6 +364,11 @@ func (b *Bus) Consume(ctx context.Context, queue string, h func(fw.Event) error)
 	}
 	if b.isClosed() {
 		return nil, errClosed
+	}
+	if !b.nc.IsConnected() {
+		// The stream and the consumer need the server. Fail at once, so the
+		// caller tries again later instead of waiting for a request timeout.
+		return nil, fmt.Errorf("nats: consume %s: %w", queue, errNotConnected)
 	}
 	if err := b.ensureCaptured(ctx, queue); err != nil {
 		return nil, err

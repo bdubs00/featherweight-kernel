@@ -153,3 +153,78 @@ func TestBusIntakeRetriesUntilTheBusAnswers(t *testing.T) {
 	}
 	t.Fatal("the run from the queue did not finish; the intake never started")
 }
+
+// downBus refuses every publish while it is down, like a bus that is out of
+// reach at boot.
+type downBus struct {
+	Bus
+	mu   sync.Mutex
+	down bool
+}
+
+func (b *downBus) Publish(ctx context.Context, subject string, e Event) error {
+	b.mu.Lock()
+	down := b.down
+	b.mu.Unlock()
+	if down {
+		return errors.New("down: not reachable")
+	}
+	return b.Bus.Publish(ctx, subject, e)
+}
+
+func (b *downBus) set(down bool) {
+	b.mu.Lock()
+	b.down = down
+	b.mu.Unlock()
+}
+
+// The egress keeps the events of a run while the bus is down and sends them
+// in order when the bus answers.
+func TestBusEgressQueuesWhileTheBusIsDown(t *testing.T) {
+	ctx := testCtx(t)
+	t.Setenv("FW_ATESPACE", "test")
+	mem := NewMemBus()
+	db := &downBus{Bus: mem, down: true}
+	cfg := DefaultConfig()
+	cfg.Bus.Egress = "fw.events"
+	cfg.Bus.EgressTypes = []string{"fw.run.*"}
+	cfg.Agents = map[string]AgentProfile{"default": {}}
+	got := make(chan Event, 100)
+	stop, err := mem.Subscribe(ctx, "fw.events.>", func(e Event) error {
+		got <- e
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	a := newTestAgent(t, newScript(endTurn("ok")).Model(), WithConfig(cfg), WithBus(db))
+	r, err := a.Start(ctx, "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.WaitFor(ctx, r.ID, func(r *Run) bool { return r.State.Terminal() }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case e := <-got:
+		t.Fatalf("an event reached the bus while it was down: %s", e.Type)
+	case <-time.After(300 * time.Millisecond):
+	}
+	db.set(false)
+	// The mem bus hands each event to a goroutine, so the arrival order
+	// says nothing; the queue sends in order, and every event must arrive.
+	want := map[string]bool{EvRunQueued: false, EvRunStarted: false, EvRunFinished: false}
+	deadline := time.After(15 * time.Second)
+	for left := len(want); left > 0; {
+		select {
+		case e := <-got:
+			if seen, ok := want[e.Type]; ok && !seen {
+				want[e.Type] = true
+				left--
+			}
+		case <-deadline:
+			t.Fatalf("events after the bus came back: %v", want)
+		}
+	}
+}
