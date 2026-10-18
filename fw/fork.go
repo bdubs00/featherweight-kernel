@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"maps"
 	"strconv"
+	"time"
 )
 
 // Metadata keys of a branch.
@@ -136,7 +137,8 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder}
 	ref := childRef{parent: src, member: member, depth: depth, start: start}
 	a.decorateChild(placeholder, ref)
-	if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: req.ID, Member: member}); err != nil {
+	placed := RunChildData{Child: req.ID, Member: member, Principal: q.Principal, PrincipalKind: q.PrincipalKind, Metadata: q.Metadata}
+	if _, err := a.emit(nil, rs, EvRunChild, placed); err != nil {
 		a.log.Warn("record a remote branch", "run", src, "branch", req.ID, "member", member, "error", err)
 	}
 	k.mu.Lock()
@@ -177,6 +179,13 @@ func (a *Agent) startBranch(ctx context.Context, forker Forker, ref childRef, q 
 	case err == nil && (child == nil || child.ID != req.ID):
 		err = errors.New("fw: the spawner started another run than the branch")
 	case err == nil:
+		// The source records that the process has the branch, so a restart
+		// does not take the branch for a lost one.
+		if rs, lerr := k.lookup(ref.parent); lerr == nil {
+			if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: req.ID, Member: ref.member, Started: true}); err != nil {
+				a.log.Warn("record the start of a remote branch", "run", ref.parent, "branch", req.ID, "error", err)
+			}
+		}
 		k.mu.Lock()
 		close(ref.start.done)
 		k.mu.Unlock()
@@ -188,22 +197,52 @@ func (a *Agent) startBranch(ctx context.Context, forker Forker, ref childRef, q 
 		outcome, reason = "canceled", "the start of the branch in "+ref.member+" was canceled"
 	}
 	a.log.Warn("branch did not start in another process", "branch", req.ID, "member", ref.member, "outcome", outcome, "error", err)
-	brs := k.newRunState(req.ID, q.Agent, "")
-	brs.queued = q
-	k.mu.Lock()
-	k.runs[req.ID] = brs
-	delete(k.remote, req.ID)
-	k.kids[ref.parent]--
-	k.mu.Unlock()
-	if _, err := a.emit(nil, brs, EvRunQueued, q); err != nil {
-		a.log.Error("record a branch that did not start", "branch", req.ID, "error", err)
-	}
-	if _, err := a.emit(nil, brs, EvRunFinished, RunFinishedData{Outcome: outcome, Error: reason}); err != nil {
-		a.log.Error("record a branch that did not start", "branch", req.ID, "error", err)
-	}
+	a.recordBranchEnd(req.ID, ref.parent, q, outcome, reason)
 	k.mu.Lock()
 	close(ref.start.done)
 	k.mu.Unlock()
+}
+
+// recordBranchEnd records a branch that never reached its process as a run
+// of this process with the outcome and the reason, under the id of the
+// branch, and stops counting it as a child in another process.
+func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, reason string) {
+	k := a.k
+	brs := k.newRunState(id, q.Agent, "")
+	brs.queued = q
+	k.mu.Lock()
+	k.runs[id] = brs
+	delete(k.remote, id)
+	k.kids[parent]--
+	k.mu.Unlock()
+	if _, err := a.emit(nil, brs, EvRunQueued, q); err != nil {
+		a.log.Error("record a branch that did not start", "branch", id, "error", err)
+	}
+	if _, err := a.emit(nil, brs, EvRunFinished, RunFinishedData{Outcome: outcome, Error: reason}); err != nil {
+		a.log.Error("record a branch that did not start", "branch", id, "error", err)
+	}
+}
+
+// recordLostBranch records, after a restart, a branch that this process
+// placed in another process but never sent, from the facts in the
+// fw.run.child event of its source, and abandons the process. The source is
+// the run state of the source run.
+func (a *Agent) recordLostBranch(src *runState, d RunChildData) {
+	q := src.queuedData()
+	q.Parent, q.Depth = "", 0
+	q.Principal, q.PrincipalKind, q.Metadata = d.Principal, d.PrincipalKind, d.Metadata
+	reason := "this process restarted before " + d.Member + " took the branch"
+	a.log.Warn("branch lost in a restart", "branch", d.Child, "member", d.Member, "run", src.id)
+	a.recordBranchEnd(d.Child, src.id, q, "failed", reason)
+	if forker, ok := a.spawner.(Forker); ok {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
+			if err := forker.Abandon(ctx, d.Member); err != nil {
+				a.log.Warn("abandon the process of a lost branch", "branch", d.Child, "member", d.Member, "error", err)
+			}
+		}()
+	}
 }
 
 // ForkEvents makes a branch from events that another process kept: the

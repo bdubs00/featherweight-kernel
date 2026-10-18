@@ -23,6 +23,7 @@ import (
 func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 	k := a.k
 	var unfinished []*runState
+	var lost []lostBranch
 	for id, err := range a.ledger.Runs(ctx) {
 		if err != nil {
 			return nil, fmt.Errorf("fw: list runs: %w", err)
@@ -37,6 +38,7 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		var q RunQueuedData
 		trace := ""
 		var remote []RunChildData
+		index := map[string]int{} // the child id to its place in remote
 		for _, e := range evs {
 			switch e.Type {
 			case EvRunQueued:
@@ -44,7 +46,15 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 			case EvRunChild:
 				var d RunChildData
 				if e.Decode(&d) == nil && d.Child != "" && d.Member != "" {
-					remote = append(remote, d)
+					// A branch is recorded when it is placed and again
+					// when its process took it; the later event only
+					// marks the start.
+					if i, ok := index[d.Child]; ok {
+						remote[i].Started = remote[i].Started || d.Started
+					} else {
+						index[d.Child] = len(remote)
+						remote = append(remote, d)
+					}
 				}
 			}
 			if trace == "" {
@@ -62,6 +72,9 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		for _, d := range remote {
 			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1}
 			k.kids[id]++
+			if d.placed() {
+				lost = append(lost, lostBranch{src: rs, data: d})
+			}
 		}
 		if key := q.Metadata["idempotencyKey"]; key != "" {
 			k.idem[idemKey(q.Principal, key)] = id
@@ -82,10 +95,28 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		}
 	}
 	k.mu.Unlock()
+	// A branch that was placed in another process but never started when
+	// this process went away is lost: no process has it, and nothing will
+	// send it. It is recorded here as failed, and its process is abandoned.
+	for _, l := range lost {
+		k.mu.Lock()
+		_, pending := k.remote[l.data.Child]
+		k.mu.Unlock()
+		if pending {
+			a.recordLostBranch(l.src, l.data)
+		}
+	}
 	sort.SliceStable(unfinished, func(i, j int) bool {
 		return unfinished[i].run.CreatedAt.Before(unfinished[j].run.CreatedAt)
 	})
 	return unfinished, nil
+}
+
+// lostBranch is a branch that its source placed in another process and
+// never started, found at a rebuild.
+type lostBranch struct {
+	src  *runState
+	data RunChildData
 }
 
 // resume appends fw.run.resumed to each unfinished run and starts its driver.

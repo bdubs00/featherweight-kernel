@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A branch keeps the events of its source to a point and goes on from
@@ -137,6 +138,65 @@ func TestForkInAnotherProcess(t *testing.T) {
 	}
 	if list, _ := other.List(ctx); len(list) != 1 {
 		t.Fatalf("the other process holds %d runs after the repeat", len(list))
+	}
+}
+
+// A restart of the source while a branch starts in another process loses
+// the branch: at the rebuild the source records it as failed, with the
+// reason, and the process that was placed for it is abandoned. A branch
+// that had started is not touched.
+func TestForkLostInARestart(t *testing.T) {
+	ctx := testCtx(t)
+	ledger := NewMemLedger()
+	other := newTestAgent(t, newScript(endTurn("elsewhere")).Model())
+	// A first source whose branch did start, in the same ledger.
+	ok := &otherSpawner{other: other}
+	b := newTestAgent(t, newScript(endTurn("second")).Model(), WithLedger(ledger), WithSpawner(ok))
+	src2, err := b.Run(ctx, "hello again")
+	mustState(t, src2, err, StateCompleted)
+	started, err := b.Fork(ctx, src2.ID, ForkRequest{Input: "sent", Spawn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.WaitFor(ctx, started.ID, func(r *Run) bool { return r.State.Terminal() }); err != nil {
+		t.Fatal(err)
+	}
+	// A second source whose branch waits for its process.
+	stuck := &otherSpawner{other: other, branchWait: make(chan struct{})}
+	a := newTestAgent(t, newScript(endTurn("here")).Model(), WithLedger(ledger), WithSpawner(stuck))
+	src, err := a.Run(ctx, "hello")
+	mustState(t, src, err, StateCompleted)
+	lost, err := a.Fork(ctx, src.ID, ForkRequest{Input: "never sent", Spawn: true})
+	if err != nil {
+		t.Fatalf("Fork with spawn: %v", err)
+	}
+	// The process goes away while the branch waits for its process, and a
+	// new process rebuilds from the ledger.
+	a.k.cancel() // no record at shutdown: the ledger keeps the placed branch alone
+	sp := &otherSpawner{other: other}
+	c := newTestAgent(t, newScript().Model(), WithLedger(ledger), WithSpawner(sp))
+	got, err := c.Get(ctx, lost.ID)
+	if err != nil || got.State != StateFailed || !strings.Contains(got.Error, "restarted before other took the branch") {
+		t.Fatalf("the lost branch after the restart = %+v, %v", got, err)
+	}
+	if got.Metadata[MetaForkOf] != src.ID || got.Agent != src.Agent {
+		t.Fatalf("the record of the lost branch = %+v", got)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(sp.abandonedMembers()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := sp.abandonedMembers(); len(got) != 1 || got[0] != "other" {
+		t.Fatalf("abandoned = %v", got)
+	}
+	if r, err := c.Get(ctx, started.ID); err != nil || r.State != StateCompleted || r.Output != "elsewhere" {
+		t.Fatalf("the started branch after the restart = %+v, %v", r, err)
+	}
+	if got := ok.abandonedMembers(); len(got) != 0 {
+		t.Fatalf("the started branch was abandoned: %v", got)
+	}
+	if c.Starting() != 0 {
+		t.Fatalf("Starting = %d after the rebuild", c.Starting())
 	}
 }
 

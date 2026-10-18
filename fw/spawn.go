@@ -53,9 +53,14 @@ type Spawner interface {
 // process reports it, under req.ID. It returns when the process has the
 // branch or when it cannot have it. On an error it leaves no process
 // behind. A canceled ctx ends the start.
+//
+// Abandon removes the process that Place created, for a branch that never
+// reached it: the kernel calls it after a restart for a branch whose start
+// was open when the process went away.
 type Forker interface {
 	Place(ctx context.Context, parent *Run) (string, error)
 	Branch(ctx context.Context, member string, events []Event, req ForkRequest) (*Run, error)
+	Abandon(ctx context.Context, member string) error
 }
 
 // SpawnerCtor builds a Spawner from the configuration.
@@ -101,11 +106,28 @@ const (
 )
 
 // RunChildData is the data of EvRunChild, which the kernel appends to a
-// parent run when a spawner started a child of it in another process.
+// parent run when a spawner runs a child of it in another process. A child
+// of spawn_task is recorded once, started. A branch in another process is
+// recorded twice: when its process is placed, without Started and with the
+// facts of the branch, and again once the process took it, with Started.
+// After a restart, a branch that was placed but never started is recorded
+// as failed from those facts, and its process is abandoned.
 type RunChildData struct {
-	Child  string `json:"child"`
-	Member string `json:"member"`
+	Child   string `json:"child"`
+	Member  string `json:"member"`
+	Started bool   `json:"started,omitempty"`
+
+	// The facts of a branch that was placed but not started yet: the person
+	// of the branch and its metadata, which carries MetaForkOf.
+	Principal     string            `json:"principal,omitempty"`
+	PrincipalKind string            `json:"principalKind,omitempty"`
+	Metadata      map[string]string `json:"metadata,omitempty"`
 }
+
+// placed reports whether the event records a branch that its process has
+// not taken yet. An event of an older kernel has no facts, so it counts as
+// started.
+func (d RunChildData) placed() bool { return !d.Started && d.Metadata[MetaForkOf] != "" }
 
 // inheritBatch gives a child the batch of its parent when the request
 // names none.
@@ -248,7 +270,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		return nil, err
 	}
 	ref := childRef{parent: parent, member: member, depth: depth}
-	if _, err := a.emit(nil, p, EvRunChild, RunChildData{Child: child.ID, Member: member}); err != nil {
+	if _, err := a.emit(nil, p, EvRunChild, RunChildData{Child: child.ID, Member: member, Started: true}); err != nil {
 		a.log.Warn("record a remote child", "run", parent, "child", child.ID, "member", member, "error", err)
 	}
 	k.mu.Lock()

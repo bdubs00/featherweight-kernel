@@ -19,8 +19,23 @@ type otherSpawner struct {
 	branchErr  error         // Branch fails with it
 	branchWait chan struct{} // Branch waits for it first
 
-	mu   sync.Mutex
-	reqs []RunRequest
+	mu        sync.Mutex
+	reqs      []RunRequest
+	abandoned []string // the members that Abandon removed
+}
+
+// Abandon records the member of a lost branch.
+func (s *otherSpawner) Abandon(_ context.Context, member string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.abandoned = append(s.abandoned, member)
+	return nil
+}
+
+func (s *otherSpawner) abandonedMembers() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.abandoned...)
 }
 
 func (s *otherSpawner) Spawn(ctx context.Context, _ *Run, req RunRequest) (*Run, string, error) {

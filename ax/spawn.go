@@ -259,6 +259,25 @@ func (s *Spawner) Branch(ctx context.Context, member string, events []fw.Event, 
 	return run, nil
 }
 
+// Abandon implements fw.Forker: it deletes the child Task of a branch that
+// never reached it, after a restart of this process.
+func (s *Spawner) Abandon(ctx context.Context, member string) error {
+	actor, err := actorOf(member)
+	if err != nil {
+		return err
+	}
+	atespace, child, _ := strings.Cut(actor, "/")
+	client, err := s.ax()
+	if err != nil {
+		return err
+	}
+	if _, err := client.DeleteTask(ctx, &v1alpha1.DeleteTaskRequest{Atespace: atespace, Name: child}); err != nil {
+		return fmt.Errorf("ax: delete the child Task %s: %w", actor, err)
+	}
+	s.log.Info("child Task of a lost branch deleted", "atespace", atespace, "task", child)
+	return nil
+}
+
 // childName makes the name of a child Task from the name of its parent and
 // a random suffix, within the length of a DNS label.
 func childName(parent string) (string, error) {

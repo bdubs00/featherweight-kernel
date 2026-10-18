@@ -164,6 +164,36 @@ func (a *Agent) startKernel(ctx context.Context) error {
 	return nil
 }
 
+// cancelStarts ends the start of every branch in another process that is
+// still open and waits for each record, until ctx ends or five seconds
+// pass.
+func (a *Agent) cancelStarts(ctx context.Context) {
+	k := a.k
+	k.mu.Lock()
+	var starts []*branchStart
+	for _, ref := range k.remote {
+		if _, ok := ref.starting(); ok {
+			starts = append(starts, ref.start)
+		}
+	}
+	k.mu.Unlock()
+	if len(starts) == 0 {
+		return
+	}
+	wait, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for _, st := range starts {
+		st.cancel()
+	}
+	for _, st := range starts {
+		select {
+		case <-st.done:
+		case <-wait.Done():
+			return
+		}
+	}
+}
+
 // shutdownKernel stops accepting work, waits until ctx ends for in-flight
 // model calls, appends fw.run.suspended to every run that is still working,
 // and flushes the ledger. A second call returns at once.
@@ -194,6 +224,10 @@ func (a *Agent) shutdownKernel(ctx context.Context) {
 		// Stop every call that is still in flight. A driver that wakes up
 		// after this point cannot append, because its context is done.
 		k.cancel()
+		// End the start of every branch that another process has not
+		// taken yet. The driver removes the process it created, and the
+		// branch is recorded here as canceled while the ledger is open.
+		a.cancelStarts(ctx)
 
 		for _, rs := range k.all() {
 			rs.emitMu.Lock()
