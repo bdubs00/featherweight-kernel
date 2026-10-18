@@ -99,6 +99,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"POST /v1/runs/{id}/messages", s.remote(s.sendMessage)},
 		{"POST /v1/runs/{id}/approvals/{approval}", s.remote(s.decide)},
 		{"POST /v1/runs/{id}/cancel", s.remote(s.cancel)},
+		{"POST /v1/runs/{id}/fork", s.remote(s.fork)},
 		{"GET /v1/runs/{id}/files", s.remote(s.runFiles)},
 		{"GET /v1/runs/{id}/files/{path...}", s.remote(s.runFile)},
 		{"GET /v1/agents", s.listAgents},
@@ -720,6 +721,27 @@ func (s *server) decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeRun(w, r, http.StatusOK, id)
+}
+
+// fork answers POST /v1/runs/{id}/fork with a branch of the run: a new run
+// that keeps the events of the run up to seq and goes on with the message
+// input, with the model, or the same way again (fw.Agent.Fork).
+func (s *server) fork(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Seq      uint64            `json:"seq"`
+		Input    string            `json:"input"`
+		Model    string            `json:"model"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	if !s.decode(w, r, &body) {
+		return
+	}
+	run, err := s.a.Fork(r.Context(), r.PathValue("id"), fw.ForkRequest{Seq: body.Seq, Input: body.Input, Model: body.Model, Metadata: body.Metadata, Origin: fw.OriginHTTP})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeRun(w, r, http.StatusOK, run.ID)
 }
 
 func (s *server) cancel(w http.ResponseWriter, r *http.Request) {

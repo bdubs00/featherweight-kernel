@@ -139,6 +139,14 @@ The command `fw replay <ledger> --model <selector>` runs a recorded run again ag
 
 A recorded result matches the tool name and its JSON input. Object key order and whitespace do not matter; number literals keep their precision and spelling, so `1` and `1.0` are distinct. Repeated identical calls consume recorded results in ledger order. Replay serves calls serially in model-response order, including tools that are normally parallel-safe. A different input, an exhausted result queue, or a result without a recorded input produces an explicit error result; it never falls back to the live tool. This is argument-aware fixture replay, not a guarantee of identical model output or a pinned execution environment. The replay overrides are process-local and do not survive a restart.
 
+### 4.7 Branches
+
+A run is defined by its ledger and its workspace, so a run can branch. `Agent.Fork` and `POST /v1/runs/{id}/fork` make a new run whose ledger begins with a copy of the events of the source up to one sequence number, `seq`; without one, every event. The copied events get the id of the branch, new event ids, and the time of the copy; the `fw.run.queued` event of the branch names the person who branched as its principal and carries the metadata `fw.forkOf`, the id of the source, and `fw.forkSeq`, the sequence number kept. The branch has no parent, and the children of the source stay with the source. The source does not change.
+
+A branch goes on as a resumed run does (section 4.5). A model request without an answer is sent again, a tool call without a result follows the resume rules, and a pending approval waits for its decision, under the approval id that the branch copied. A message in the request, `input`, follows the kept events as a follow-up from the person, so a branch of a finished run goes on in another direction; without a message, a branch that keeps the end of a finished run stays finished. A `model` in the request changes the model of the branch. Because the system prompt, the history, and the tool results of the kept events are the same bytes, the branch keeps the prompt cache prefix of the provider up to the point of the branch.
+
+A branch shares the workspace of its process. Two branches that change files in the same process therefore see each other's changes, and a branch that must have files of its own runs in another process, such as a child Task (section 11.9).
+
 ## 5. The kernel
 
 ### 5.1 Run and turn
@@ -700,6 +708,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | `POST /v1/runs/{id}/messages` | Send a follow-up message. Body fields: `content`, `files`. |
 | `POST /v1/runs/{id}/approvals/{approval}` | Decide a pending approval. Body fields: `decision`, `note`. |
 | `POST /v1/runs/{id}/cancel` | Cancel a run. |
+| `POST /v1/runs/{id}/fork` | Branch a run (section 4.7). Body fields: `seq`, the last event to keep, every event when absent; `input`, a message that follows the kept events; `model`, a selector for the branch; `metadata`. The answer is the branch. |
 | `GET /v1/runs/{id}/files` | List the files that the run changed (section 7.9). |
 | `GET /v1/runs/{id}/files/{path}` | The content of a file that the run changed, or a view of it under `Accept: application/json`. `?download=1` always returns the content (section 7.9). |
 | `GET /v1/agents` | List agent profiles with their descriptions, instructions, and skills. |
