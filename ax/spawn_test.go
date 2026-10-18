@@ -477,6 +477,38 @@ func joinAny(v any, field string) string {
 
 // TestChildTaskCarriesTheDepthTheConfigExpects walks the depth remnant that
 // the child Task carries as the configuration expects it. A child past the
+// A child Task carries the egress of its parent, so it reaches what the
+// parent reaches and nothing more; a parent without egress gives none.
+func TestChildTaskInheritsTheEgress(t *testing.T) {
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	s := newSpawnerUnderTest(t, ax, router)
+	base := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img", Egress: &EgressSpec{Rules: []EgressRule{
+		{HTTP: &EgressHosts{Hostnames: []string{"nats.agents.svc"}, Ports: []int32{8080}}},
+		{HTTPS: &EgressHosts{Hostnames: []string{"api.example.com"}}},
+		{TLS: &EgressHosts{Hostnames: []string{"github.com", "*.github.com"}, Ports: []int32{443}}},
+		{},
+	}}}}
+	child := s.childTask(base, "team", "c", &fw.Run{ID: "01P"})
+	rules := child.Spec.GetEgress().GetRules()
+	if len(rules) != 3 {
+		t.Fatalf("rules = %v, want 3", rules)
+	}
+	if h := rules[0].GetHttp(); h == nil || h.GetHostnames()[0] != "nats.agents.svc" || h.GetPorts()[0] != 8080 {
+		t.Fatalf("http rule = %v", rules[0])
+	}
+	if h := rules[1].GetHttps(); h == nil || h.GetHostnames()[0] != "api.example.com" || len(h.GetPorts()) != 0 {
+		t.Fatalf("https rule = %v", rules[1])
+	}
+	if h := rules[2].GetTls(); h == nil || len(h.GetHostnames()) != 2 || h.GetPorts()[0] != 443 {
+		t.Fatalf("tls rule = %v", rules[2])
+	}
+	plain := s.childTask(&Task{Metadata: ObjectMeta{Name: "m", Atespace: "team"}, Spec: TaskSpec{Image: "img"}}, "team", "c", &fw.Run{ID: "01P"})
+	if plain.Spec.GetEgress() != nil {
+		t.Fatalf("a parent without egress gave the child %v", plain.Spec.GetEgress())
+	}
+}
+
 // depth of the tree gets no depth variable, because FW_SPAWN_MAX_DEPTH = 0
 // means unlimited in the configuration; FW_SPAWN_DISABLED represents an
 // exhausted allowance independently of the tool policy.

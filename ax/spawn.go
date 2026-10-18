@@ -278,6 +278,34 @@ func (s *Spawner) Abandon(ctx context.Context, member string) error {
 	return nil
 }
 
+// egressOf converts the egress of a Task manifest to the API type. A Task
+// without egress gives nil, and the child then has no network, as the
+// parent has none.
+func egressOf(e *EgressSpec) *v1alpha1.EgressSpec {
+	if e == nil {
+		return nil
+	}
+	out := &v1alpha1.EgressSpec{}
+	hosts := func(h *EgressHosts) *v1alpha1.EgressHosts {
+		return &v1alpha1.EgressHosts{Hostnames: append([]string(nil), h.Hostnames...), Ports: append([]int32(nil), h.Ports...)}
+	}
+	for _, r := range e.Rules {
+		rule := &v1alpha1.EgressRule{}
+		switch {
+		case r.HTTP != nil:
+			rule.Http = hosts(r.HTTP)
+		case r.HTTPS != nil:
+			rule.Https = hosts(r.HTTPS)
+		case r.TLS != nil:
+			rule.Tls = hosts(r.TLS)
+		default:
+			continue
+		}
+		out.Rules = append(out.Rules, rule)
+	}
+	return out
+}
+
 // childName makes the name of a child Task from the name of its parent and
 // a random suffix, within the length of a DNS label.
 func childName(parent string) (string, error) {
@@ -334,6 +362,9 @@ func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run) *
 		// a bootstrap run of its own.
 		spec.Workspaces = append(spec.Workspaces, &v1alpha1.WorkspaceRef{Name: w.Name, Path: w.Path})
 	}
+	// The child reaches what the parent reaches and nothing more: ax writes
+	// the egress policy of the child actor from this before the child runs.
+	spec.Egress = egressOf(task.Spec.Egress)
 	apiVersion, kind := task.APIVersion, task.Kind
 	if apiVersion == "" {
 		apiVersion = "ax.io/v1alpha1"

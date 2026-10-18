@@ -57,6 +57,30 @@ type TaskSpec struct {
 	Resources  ResourcesSpec  `yaml:"resources,omitempty" json:"resources,omitempty"`
 	Workspaces []WorkspaceRef `yaml:"workspaces,omitempty" json:"workspaces,omitempty"`
 	Debug      bool           `yaml:"debug,omitempty" json:"debug,omitempty"`
+	Egress     *EgressSpec    `yaml:"egress,omitempty" json:"egress,omitempty"`
+}
+
+// EgressSpec is spec.egress of a Task: the outbound connections that the
+// Task may open, which ax writes to the egress policy of the actor before
+// the Task first runs. A child Task inherits the egress of its parent, so
+// it reaches what the parent reaches and nothing more.
+type EgressSpec struct {
+	Rules []EgressRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+}
+
+// EgressRule allows one protocol to a set of destinations. Exactly one of
+// HTTP, HTTPS, and TLS is set.
+type EgressRule struct {
+	HTTP  *EgressHosts `yaml:"http,omitempty" json:"http,omitempty"`
+	HTTPS *EgressHosts `yaml:"https,omitempty" json:"https,omitempty"`
+	TLS   *EgressHosts `yaml:"tls,omitempty" json:"tls,omitempty"`
+}
+
+// EgressHosts names the destinations of a rule: hostname patterns and
+// ports, with the default port of the protocol when Ports is empty.
+type EgressHosts struct {
+	Hostnames []string `yaml:"hostnames,omitempty" json:"hostnames,omitempty"`
+	Ports     []int32  `yaml:"ports,omitempty" json:"ports,omitempty"`
 }
 
 // EnvVar is one spec.env entry.
