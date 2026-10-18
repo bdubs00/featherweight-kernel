@@ -9,7 +9,11 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/usr/local/bin/fw ./cmd/fw \
+# TAGS selects the drivers: empty for every driver, or lean plus the tags of
+# the drivers that the image needs, for example lean,nats,openai,oidc
+# (docs/ARCHITECTURE.md section 15).
+ARG TAGS=""
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -tags "${TAGS}" -ldflags "-s -w -X main.version=${VERSION}" -o /out/usr/local/bin/fw ./cmd/fw \
  && ln -s fw /out/usr/local/bin/ax-task-runner
 
 FROM debian:bookworm-slim

@@ -1351,7 +1351,7 @@ Every surface authenticates every request with the `Authn` plug and puts the pri
 | `spiffe` | a JWT-SVID bearer token. With `auth.spiffe.x509` and a listener that verifies clients, also an X.509-SVID client certificate. | the SPIFFE ID, for example `spiffe://example.org/ns/prod/sa/reviewer` |
 | `none` | nothing | `anonymous` |
 
-The `oidc` driver is part of the workbench, in the package `authn/oidc`, and the binary `fw` links only the `spiffe` driver. The `oidc` driver reads the discovery document of the issuer and refreshes its keys. Its challenge names the protected-resource document at `/.well-known/oauth-protected-resource`, so an MCP client finds the authorization server and does the OAuth flow itself. The `spiffe` driver reads the trust bundle from the Workload API at `auth.spiffe.socket`. Without an agent, it reads the bundle from the file or URL `auth.spiffe.bundle`. The same driver is the TLS provider `spiffe`, which serves the X.509-SVID of the workload and verifies client certificates against the bundle. An MCP server entry with `auth.spiffe` sends a JWT-SVID of this workload on every request, so one agent calls another with no shared secret.
+Both drivers are packages of the kernel, `authn/oidc` and `authn/spiffe`, because a worker that people reach through the front verifies their tokens itself; a lean build leaves out the one it does not use (section 15). The `oidc` driver reads the discovery document of the issuer and refreshes its keys. Its challenge names the protected-resource document at `/.well-known/oauth-protected-resource`, so an MCP client finds the authorization server and does the OAuth flow itself. The `spiffe` driver reads the trust bundle from the Workload API at `auth.spiffe.socket`. Without an agent, it reads the bundle from the file or URL `auth.spiffe.bundle`. The same driver is the TLS provider `spiffe`, which serves the X.509-SVID of the workload and verifies client certificates against the bundle. An MCP server entry with `auth.spiffe` sends a JWT-SVID of this workload on every request, so one agent calls another with no shared secret.
 
 TLS on the listener comes from `tls.provider`: `file` uses `tls.cert` and `tls.key`, with `tls.clientCA` and `tls.clientAuth` for client certificates, and a driver such as `spiffe` builds the configuration itself. Without a provider the listener speaks plain HTTP with unencrypted HTTP/2, which is the right choice behind the atenet router.
 
@@ -1514,6 +1514,7 @@ Drivers live in public packages, not under `internal/`, because a Go program out
 ```
 cmd/fw/                 the binary and the drivers that it links
 cli/                    the command line, public so that another binary reuses it
+authn/oidc/             the oidc authentication driver
 authn/spiffe/           the spiffe authentication driver and TLS provider
 fw/                     the public contract and the kernel: interfaces, types,
                         configuration, options, registry, turn loop, projections,
@@ -1546,7 +1547,7 @@ The workbench architecture, section 1.3, gives the layout of the workbench.
 
 ## 15. Dependencies
 
-The default binary carries these modules. A blank import in `cmd/fw/drivers.go` links every driver, and no driver sits behind a build tag. The ax manifest types are defined in the `ax` package from the YAML schema, so the binary does not import the ax module. Unencrypted HTTP/2 on one port comes from the standard library `http.Server.Protocols` field.
+The default binary carries these modules. The blank imports of `cmd/fw/drivers.go` and `cmd/fw/driver_*.go` link the drivers. Without a build tag the binary carries every driver. With the tag `lean` it carries the core alone, the configuration loader, the native API, the built-in tools, the MCP client, the token client of the fleet, and the telemetry, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses inside ax, for example `go build -tags lean,nats,openai,oidc ./cmd/fw`, or `docker build --build-arg TAGS=lean,nats,openai,oidc`, and the Makefile takes `TAGS`. The full binary is about 82 MB; the lean core is about 38 MB, and a worker with NATS, OpenAI, and `oidc` about 41 MB. A configuration that names a driver that the build left out stops at start with the name of the driver, except a surface or a built-in tool, which the kernel skips with a warning. The ax manifest types are defined in the `ax` package from the YAML schema, so the binary does not import the ax module. Unencrypted HTTP/2 on one port comes from the standard library `http.Server.Protocols` field.
 
 | Module | Used for |
 |---|---|
