@@ -1005,11 +1005,13 @@ ax has no RPC for a runner to report its state, and ax commit f0f16ff removed th
 {
   "usage": { "promptTokens": 48210, "completionTokens": 3120 },
   "pendingApproval": { "id": "ap_7f3", "action": "bash: git push", "requestedAt": "2026-10-13T09:14:31Z" },
-  "runs": { "active": 1, "inputRequired": 1, "total": 12 }
+  "runs": { "active": 1, "inputRequired": 1, "total": 12 },
+  "idle": true,
+  "idleSince": "2026-10-13T09:14:31Z"
 }
 ```
 
-The body counts the runs that the caller can view. `pendingApproval` is the oldest approval that waits, or `null`. The workbench, or any poller, reads the body through the atenet router. A later revision adds the idle state of the agent to it, so that a controller can suspend a Task that waits (docs/ROADMAP.md, stage 2). If ax adds a reporting RPC, a `Reporter` plug pushes the same data.
+The body counts the runs that the caller can view. `pendingApproval` is the oldest approval that waits, or `null`. `idle` is true when no run is queued or running: every run waits for input, is suspended, or is finished, and a process without runs is idle. `idleSince` is the newest update of a run, or the start of the process when no run worked yet, and it is absent while a run works. The front of a fleet reads the body through the atenet router before it suspends a Task that the egress stream shows as idle (the workbench architecture, section 4.12). A suspended Task costs nothing and wakes on the next request through the router. If ax adds a reporting RPC, a `Reporter` plug pushes the same data.
 
 ### 11.9 Child runs and child tasks
 

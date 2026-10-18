@@ -45,8 +45,9 @@ type Agent struct {
 	tlsConfig *tls.Config
 	prices    Prices
 	clock     Clock
-	spawner   Spawner // the children in other processes, see spawn.go
-	node      string  // the name of this process, see Config.Node
+	spawner   Spawner   // the children in other processes, see spawn.go
+	node      string    // the name of this process, see Config.Node
+	started   time.Time // when New built this agent, see Started
 
 	tokMu        sync.RWMutex
 	personTokens PersonTokens // the tokens of people from a linked package, see connect.go
@@ -268,6 +269,7 @@ func New(opts ...Option) (*Agent, error) {
 	if a.prices == nil {
 		a.prices = PriceTable(cfg.Prices)
 	}
+	a.started = time.Now()
 	a.node = strings.TrimSpace(cfg.Node)
 	if a.node == "" {
 		a.node = DefaultNode(cfg.Listen)
@@ -343,6 +345,10 @@ func DefaultNode(listen string) string {
 
 // Logger returns the logger.
 func (a *Agent) Logger() *slog.Logger { return a.log }
+
+// Started returns when New built this agent. The status body uses it as
+// the start of an idle period when no run ever worked.
+func (a *Agent) Started() time.Time { return a.started }
 
 // Model returns the default model, or nil when the configuration names none.
 func (a *Agent) Model() Model { return a.model }

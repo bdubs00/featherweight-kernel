@@ -39,6 +39,20 @@ func TestComputeStatus(t *testing.T) {
 	if got.PendingApproval == nil || *got.PendingApproval != *want.PendingApproval {
 		t.Errorf("pendingApproval = %+v, want %+v", got.PendingApproval, want.PendingApproval)
 	}
+	// r4 runs, so the process is not idle, and no idle time is given.
+	if got.Idle || got.IdleSince != nil {
+		t.Errorf("idle = %v since %v with a running run", got.Idle, got.IdleSince)
+	}
+	// Without a queued or running run the process is idle since the newest
+	// update of a run, whatever else waits.
+	idle := ComputeStatus([]*fw.Run{
+		{ID: "a", State: fw.StateCompleted, UpdatedAt: t0},
+		{ID: "b", State: fw.StateInputRequired, UpdatedAt: t0.Add(2 * time.Minute)},
+		{ID: "c", State: fw.StateSuspended, UpdatedAt: t0.Add(time.Minute)},
+	})
+	if !idle.Idle || idle.IdleSince == nil || !idle.IdleSince.Equal(t0.Add(2*time.Minute)) {
+		t.Errorf("idle status = %+v (since %v)", idle, idle.IdleSince)
+	}
 	b, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +64,7 @@ func TestComputeStatus(t *testing.T) {
 	}
 	// No runs give zero counts and a null approval, not a missing key.
 	b, _ = json.Marshal(ComputeStatus(nil))
-	if string(b) != `{"usage":{"promptTokens":0,"completionTokens":0},"pendingApproval":null,"runs":{"active":0,"inputRequired":0,"total":0}}` {
+	if string(b) != `{"usage":{"promptTokens":0,"completionTokens":0},"pendingApproval":null,"runs":{"active":0,"inputRequired":0,"total":0},"idle":true}` {
 		t.Errorf("empty status = %s", b)
 	}
 }

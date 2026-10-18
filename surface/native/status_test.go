@@ -3,6 +3,7 @@ package native
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/bdubs00/featherweight-kernel/surface/view"
 )
@@ -15,7 +16,9 @@ func TestStatusRoute(t *testing.T) {
 	resp, b := do(t, "GET", srv.URL+"/v1/status", "")
 	var st view.Status
 	decodeJSON(t, resp, b, http.StatusOK, &st)
-	if st != (view.Status{}) {
+	// Before any run the counts are zero, and the process is idle since
+	// its start.
+	if st.Runs != (view.RunCounts{}) || st.Usage != (view.StatusUsage{}) || st.PendingApproval != nil || !st.Idle || st.IdleSince == nil || st.IdleSince.After(time.Now()) {
 		t.Fatalf("status before any run = %s", b)
 	}
 	if m := keys(t, b); string(m["pendingApproval"]) != "null" {
@@ -29,7 +32,7 @@ func TestStatusRoute(t *testing.T) {
 	decodeRun(t, resp, b, http.StatusOK)
 	resp, b = do(t, "GET", srv.URL+"/v1/status", "")
 	decodeJSON(t, resp, b, http.StatusOK, &st)
-	if st.Runs.Total != 1 || st.Runs.Active != 0 || st.PendingApproval != nil {
+	if st.Runs.Total != 1 || st.Runs.Active != 0 || st.PendingApproval != nil || !st.Idle || st.IdleSince == nil {
 		t.Errorf("status after one run = %s", b)
 	}
 }

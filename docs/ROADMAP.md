@@ -36,8 +36,10 @@ Stages 1 through 4.5 completed on 2026-10-17:
 
 ### Stage 2: Zero-cost waiting (idle signal and auto-suspend)
 
-1. **Kernel idle state:** Report `idle` and `idleSince` in `GET /v1/status` and on the egress stream when no run works and every open run waits in `input-required` (for an approval, a question, or an OAuth connection) or has finished.
-2. **Front suspend controller:** Add a controller in `fw-workbench` that watches the fleet state and calls `SuspendTask` on the AX API when a worker Task (including a finished or waiting child Task from `spawn.driver: ax`) stays idle past a grace period. The `atenet-router` wakes the Task on the next approval, message, or run request.
+Done on 2026-10-18.
+
+1. **Kernel idle state:** `GET /v1/status` reports `idle` and `idleSince` when no run is queued or running: every open run waits for input, is suspended, or has finished. The egress stream already carries the transitions, the terminal and the `fw.approval.requested` events of every run, so the front derives the same state from the stream and reads the body once before it acts.
+2. **Front suspend controller:** The fleet of `fw-workbench` watches the Tasks of `workbench.fleet.atespaces` and calls `SuspendTask` on the AX API when a Task, a child Task of `spawn.driver: ax` included, stays idle past `workbench.fleet.suspendAfter` (default ten minutes). The `atenet-router` wakes the Task on the next approval, message, or run request, and `enqueue` wakes the suspended Tasks that serve the profile of a job, because a sleeping Task reads no queue.
 
 ### Stage 3: End-to-end fleet acceptance and record retirement
 
