@@ -384,7 +384,7 @@ The other built-in tools have no label. `files` and `memory` read, write, and de
 
 The `files` tool never opens a path under the paths that `Config.Reserved` lists: the home directory of `fw`, the directory of the file ledger, and the configuration file. The check uses the real path, after symbolic links. A change there changes what `fw` allows at its next start. For example, a profile file under `$FW_HOME/agents` can grant its agent access and read secrets from the environment through `${VAR}`. Every other path under the root needs no approval, except the paths that the rules of the workspace refuse (section 7.9).
 
-When the provider is Anthropic, `bash`, `files`, and `memory` use the Anthropic-defined tool shapes `bash_20250124`, `text_editor_20250728`, and `memory_20250818`. Other providers get the same tools with a plain JSON schema. Each profile lists the tools that it allows. The `bash` shell never inherits `FW_API_TOKEN` or a model API key, and `FW_BASH_HIDE` names more variables to hide. The shell starts with `FW_HOME` and with the variables of `tools.bash.env`. A script inside the sandbox therefore reads an endpoint from its environment instead of from a literal in a prompt. `tools.bash.timeout` bounds one command, 120 seconds by default. A tool that implements `io.Closer` is closed at shutdown, which ends the shell.
+When the provider is Anthropic, `bash`, `files`, and `memory` use the Anthropic-defined tool shapes `bash_20250124`, `text_editor_20250728`, and `memory_20250818`. Other providers get the same tools with a plain JSON schema. Each profile lists the tools that it allows. The `bash` shell never inherits `FW_API_TOKEN` or a model API key, and `FW_BASH_HIDE` names more variables to hide. The shell starts with `FW_HOME` and with the variables of `tools.bash.env`. A script inside the sandbox therefore reads an endpoint from its environment instead of from a literal in a prompt. `tools.bash.timeout` bounds one command, 120 seconds by default. A tool that implements `io.Closer` is closed at shutdown, which ends the shell. The `bash` tool keeps one shell per run: the working directory, the variables, and the background jobs of one run never reach another run or another person, and the kernel closes the shell when the run ends, through the interface `fw.RunCloser`, which any tool with state per run can implement.
 
 ### 7.3 MCP client over HTTP and HTTPS
 
@@ -1026,6 +1026,7 @@ The kernel keeps a child inside its parent:
 - A canceled parent cancels its children.
 - A child shares the trace of its parent, so one trace shows the whole tree.
 - A child takes no slot of `maxRuns`, because its parent holds one while it waits. Otherwise parents that wait for children can fill every slot.
+- `maxRuns` is 16 when the configuration leaves it at 0, and 1 under ax: a Task is one agent with one working copy, so one run at a time holds `/workspace` and its shell. A Task that must run more sets `maxRuns` in its configuration.
 
 When a child needs an approval or asks a question, `spawn_task` relays it to the caller of the parent. It arrives as a question on the parent run. Every surface shows it, and the answer goes to the child. The parent run therefore stays the one place to watch.
 

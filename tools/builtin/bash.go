@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -26,7 +27,7 @@ const bashSchema = `{
   "properties": {
     "command": {
       "type": "string",
-      "description": "The bash command to run. One shell session serves every call, so the working directory and exported variables carry over to the next call."
+      "description": "The bash command to run. One shell serves every call of this run, so the working directory and exported variables carry over to the next call of the run. Another run never sees them."
     },
     "restart": {
       "type": "boolean",
@@ -36,8 +37,8 @@ const bashSchema = `{
   "additionalProperties": false
 }`
 
-const bashDescription = "Run a command in a persistent bash shell. " +
-	"The working directory and exported variables carry over between calls. " +
+const bashDescription = "Run a command in the persistent bash shell of this run. " +
+	"The working directory and exported variables carry over between the calls of the run, and another run never sees them. " +
 	"The result holds stdout, then stderr, then the exit code. " +
 	"A non-zero exit code is a normal result. " +
 	"The output is cut at the output limit of the configuration. " +
@@ -51,31 +52,52 @@ const bashTimeout = 120 * time.Second
 // end mark is still found when a command prints more than maxOutput.
 const markKeep = 4 << 10
 
-// bashTool keeps one bash process for its life. Calls take turns.
+// sessionIdle is how long the shell of a run stays after its last call
+// when no CloseRun came, for example for a call outside a run.
+const sessionIdle = 30 * time.Minute
+
+// bashTool keeps one bash process per run. The calls of one run take turns
+// on its shell, and runs never share a shell, so the working directory,
+// the variables, and the background jobs of one run never reach another
+// run or another person. The kernel closes the shell of a run when the run
+// ends (fw.RunCloser), and a shell that no call used for sessionIdle goes
+// too. A call outside a run, as from a test or the command line, shares
+// one shell under the empty run id.
 type bashTool struct {
 	dir     string
 	env     []string // variables that every shell starts with, as NAME=value
 	timeout time.Duration
-	sem     chan struct{} // holds one token while a call uses the shell
-	sh      *shell        // nil until the first call, and after a kill
+
+	mu       sync.Mutex
+	sessions map[string]*bashSession // by run id
+	closed   bool
+	done     chan struct{} // closed by Close, which ends the reaper
+}
+
+// bashSession is the shell of one run. sem holds one token while a call
+// uses the shell, so the calls of a run take turns.
+type bashSession struct {
+	sem  chan struct{}
+	sh   *shell // nil until the first call, and after a kill
+	used time.Time
 }
 
 func newBash(cfg *fw.Config) (fw.Tool, error) {
-	t := &bashTool{timeout: bashTimeout, sem: make(chan struct{}, 1)}
-	if cfg == nil {
-		return t, nil
-	}
-	if cfg.Tools.Files.Root != "" {
-		dir, err := filepath.Abs(cfg.Tools.Files.Root)
-		if err != nil {
-			return nil, fmt.Errorf("builtin: bash: root %s: %w", cfg.Tools.Files.Root, err)
+	t := &bashTool{timeout: bashTimeout, sessions: map[string]*bashSession{}, done: make(chan struct{})}
+	if cfg != nil {
+		if cfg.Tools.Files.Root != "" {
+			dir, err := filepath.Abs(cfg.Tools.Files.Root)
+			if err != nil {
+				return nil, fmt.Errorf("builtin: bash: root %s: %w", cfg.Tools.Files.Root, err)
+			}
+			t.dir = dir
 		}
-		t.dir = dir
+		if cfg.Tools.Bash.Timeout > 0 {
+			t.timeout = cfg.Tools.Bash.Timeout
+		}
+		t.env = configEnv(cfg)
 	}
-	if cfg.Tools.Bash.Timeout > 0 {
-		t.timeout = cfg.Tools.Bash.Timeout
-	}
-	t.env = configEnv(cfg)
+	go t.reap()
 	return t, nil
 }
 
@@ -88,13 +110,100 @@ func (t *bashTool) Spec() fw.ToolSpec {
 	return s
 }
 
-// Close kills the shell. The kernel calls it, when it knows io.Closer, as the
-// agent shuts down.
+// Close kills every shell and ends the reaper. The kernel calls it, when
+// it knows io.Closer, as the agent shuts down.
 func (t *bashTool) Close() error {
-	t.sem <- struct{}{}
-	defer func() { <-t.sem }()
-	t.stop()
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil
+	}
+	t.closed = true
+	close(t.done)
+	sessions := t.sessions
+	t.sessions = map[string]*bashSession{}
+	t.mu.Unlock()
+	for _, s := range sessions {
+		s.sem <- struct{}{}
+		s.stop()
+		<-s.sem
+	}
 	return nil
+}
+
+// CloseRun implements fw.RunCloser: the shell of the run goes when the run
+// ends. A call that still holds the shell ends first; the kill waits for
+// it in the background.
+func (t *bashTool) CloseRun(runID string) {
+	t.mu.Lock()
+	s := t.sessions[runID]
+	delete(t.sessions, runID)
+	t.mu.Unlock()
+	if s == nil {
+		return
+	}
+	go func() {
+		s.sem <- struct{}{}
+		defer func() { <-s.sem }()
+		s.stop()
+	}()
+}
+
+// open returns how many runs hold a shell session, for tests.
+func (t *bashTool) open() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.sessions)
+}
+
+// session returns the session of the run in ctx, and makes one on the
+// first call. It returns nil after Close.
+func (t *bashTool) session(ctx context.Context) *bashSession {
+	id := fw.RunInfoFrom(ctx).RunID
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil
+	}
+	s := t.sessions[id]
+	if s == nil {
+		s = &bashSession{sem: make(chan struct{}, 1)}
+		t.sessions[id] = s
+	}
+	s.used = time.Now()
+	return s
+}
+
+// reap kills the shells that no call used for sessionIdle, once a minute,
+// until Close. A shell in use is left alone.
+func (t *bashTool) reap() {
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-t.done:
+			return
+		case <-tick.C:
+		}
+		var idle []*bashSession
+		t.mu.Lock()
+		for id, s := range t.sessions {
+			if time.Since(s.used) >= sessionIdle {
+				idle = append(idle, s)
+				delete(t.sessions, id)
+			}
+		}
+		t.mu.Unlock()
+		for _, s := range idle {
+			select {
+			case s.sem <- struct{}{}:
+				s.stop()
+				<-s.sem
+			default:
+				// A call holds the shell after all; it ends on its own.
+			}
+		}
+	}
 }
 
 // Call implements fw.Tool.
@@ -106,17 +215,21 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 	if err := decode(input, &in); err != nil {
 		return badInput("bash", err), nil
 	}
+	s := t.session(ctx)
+	if s == nil {
+		return fw.ErrorResult("bash: the tool is closed."), nil
+	}
 	select {
-	case t.sem <- struct{}{}:
+	case s.sem <- struct{}{}:
 	case <-ctx.Done():
 		return canceled(ctx, "bash")
 	}
-	defer func() { <-t.sem }()
+	defer func() { <-s.sem }()
 
 	if in.Restart {
-		t.stop()
+		s.stop()
 		if strings.TrimSpace(in.Command) == "" {
-			if err := t.start(); err != nil {
+			if err := t.start(s); err != nil {
 				return fw.ErrorResult(err.Error()), nil
 			}
 			return fw.TextResult("The bash shell has been restarted."), nil
@@ -125,35 +238,35 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 	if strings.TrimSpace(in.Command) == "" {
 		return fw.ErrorResult("bash: the command is empty. Send a command, or send restart: true."), nil
 	}
-	if t.sh == nil {
-		if err := t.start(); err != nil {
+	if s.sh == nil {
+		if err := t.start(s); err != nil {
 			return fw.ErrorResult(err.Error()), nil
 		}
 	}
-	return t.run(ctx, in.Command)
+	return t.run(ctx, s, in.Command)
 }
 
-// start starts a new shell. The caller holds the token.
-func (t *bashTool) start() error {
+// start starts a new shell for a session. The caller holds its token.
+func (t *bashTool) start(s *bashSession) error {
 	sh, err := startShell(t.dir, t.env)
 	if err != nil {
 		return fmt.Errorf("bash: the shell cannot start: %v", err)
 	}
-	t.sh = sh
+	s.sh = sh
 	return nil
 }
 
-// stop kills the shell, if any. The caller holds the token.
-func (t *bashTool) stop() {
-	if t.sh != nil {
-		t.sh.kill()
-		t.sh = nil
+// stop kills the shell of the session, if any. The caller holds its token.
+func (s *bashSession) stop() {
+	if s.sh != nil {
+		s.sh.kill()
+		s.sh = nil
 	}
 }
 
 // run sends one command and reads both streams up to the end marks.
-func (t *bashTool) run(ctx context.Context, command string) (fw.ToolResult, error) {
-	sh := t.sh
+func (t *bashTool) run(ctx context.Context, s *bashSession, command string) (fw.ToolResult, error) {
+	sh := s.sh
 	eof, mark := randomToken("__FW_EOF_"), randomToken("")
 	// The command goes through a quoted heredoc and eval, so a syntax error
 	// fails the command and leaves the shell running. The end mark is
@@ -180,7 +293,7 @@ func (t *bashTool) run(ctx context.Context, command string) (fw.ToolResult, erro
 		select {
 		case b, ok := <-sh.stdout:
 			if !ok {
-				return t.exited(ctx, out, errs), nil
+				return t.exited(ctx, s, out, errs), nil
 			}
 			out.add(b)
 		case b, ok := <-errCh:
@@ -190,12 +303,12 @@ func (t *bashTool) run(ctx context.Context, command string) (fw.ToolResult, erro
 			}
 			errs.add(b)
 		case <-timer.C:
-			t.stop()
+			s.stop()
 			logger(ctx).Warn("bash: command timed out; shell killed", "timeout", t.timeout.String())
 			msg := fmt.Sprintf("The command timed out after %s. The shell was killed, and the next call starts a new shell.", t.timeout)
 			return fw.ToolResult{Content: []fw.Block{fw.Text(bashText(out, errs, msg))}, IsError: true}, nil
 		case <-ctx.Done():
-			t.stop()
+			s.stop()
 			return canceled(ctx, "bash")
 		}
 	}
@@ -209,9 +322,9 @@ func (t *bashTool) run(ctx context.Context, command string) (fw.ToolResult, erro
 
 // exited handles a shell that closed its output before the end mark, for
 // example after the command "exit".
-func (t *bashTool) exited(ctx context.Context, out, errs *collector) fw.ToolResult {
-	sh := t.sh
-	t.sh = nil
+func (t *bashTool) exited(ctx context.Context, s *bashSession, out, errs *collector) fw.ToolResult {
+	sh := s.sh
+	s.sh = nil
 	killGroup(sh.cmd)
 	_ = sh.stdin.Close()
 	status := sh.cmd.Wait()

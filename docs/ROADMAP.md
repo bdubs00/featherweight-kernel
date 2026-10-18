@@ -31,7 +31,7 @@ Stages 1 through 4.5 completed on 2026-10-17:
 ### Stage 1: Harden the worker inside AX
 
 1. **Resilient bus startup under AX:** Connect to NATS and Redis with background backoff instead of exiting PID 1 when the bus is unreachable at boot. AX boots a Task before its Substrate egress policy takes effect, and golden template boots have no egress policy; background retry stops the startup crash loop.
-2. **Per-run execution isolation:** Enforce one active run at a time in an AX worker Task (`maxRuns: 1` under AX, or isolate `bash` shell sessions per run id) so concurrent runs never share a mutable shell session or collide in `/workspace`.
+2. **Per-run execution isolation:** Done on 2026-10-18. `maxRuns` defaults to 1 under AX, so one run at a time holds `/workspace`, and the `bash` tool keeps one shell per run and closes it when the run ends (`fw.RunCloser`), so runs never share a shell even where `maxRuns` is raised.
 3. **Durable intent before non-idempotent tools:** Call `fsync` in `FileLedger.Append` on `fw.tool.requested` whenever the tool is not idempotent, before the tool executes. A snapshot or crash during tool execution will then always trigger the `"rerun after resume"` approval gate on restore.
 
 ### Stage 2: Zero-cost waiting (idle signal and auto-suspend)

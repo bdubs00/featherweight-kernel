@@ -200,3 +200,32 @@ func TestBashConfigEnvAndTimeout(t *testing.T) {
 		t.Fatalf("after restart: %q", got)
 	}
 }
+
+// Each run has its own shell: the variables and the directory of one run
+// never reach another, and the shell of a run that ended goes.
+func TestBashShellPerRun(t *testing.T) {
+	b, root := newTestBash(t)
+	runA := fw.WithRunInfo(context.Background(), fw.RunInfo{RunID: "run-a"})
+	runB := fw.WithRunInfo(context.Background(), fw.RunInfo{RunID: "run-b"})
+	mustOK(t, call(t, runA, b, `{"command":"export FW_SHELL_TEST=one; mkdir -p sub; cd sub"}`))
+	if got := mustOK(t, call(t, runA, b, `{"command":"echo [$FW_SHELL_TEST]; pwd"}`)); got != "[one]\n"+filepath.Join(root, "sub")+"\nexit code 0" {
+		t.Fatalf("the same run lost its state: %q", got)
+	}
+	if got := mustOK(t, call(t, runB, b, `{"command":"echo [$FW_SHELL_TEST]; pwd"}`)); got != "[]\n"+root+"\nexit code 0" {
+		t.Fatalf("another run saw the state of the first: %q", got)
+	}
+	if n := b.open(); n != 2 {
+		t.Fatalf("sessions = %d, want 2", n)
+	}
+	b.CloseRun("run-a")
+	if got := mustOK(t, call(t, runA, b, `{"command":"echo [$FW_SHELL_TEST]"}`)); got != "[]\nexit code 0" {
+		t.Fatalf("the shell of a closed run kept its state: %q", got)
+	}
+	b.CloseRun("never-ran")
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := b.Call(runB, []byte(`{"command":"true"}`)); err != nil || !res.IsError {
+		t.Fatalf("a call after Close = %+v, %v", res, err)
+	}
+}

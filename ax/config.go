@@ -53,6 +53,8 @@ func BootstrapTimeout() time.Duration {
 //   - Listen is ":80".
 //   - Home is /workspace/.fw when it is empty.
 //   - Tools.Files.Root is the first binding path when it is empty.
+//   - MaxRuns is 1 when it is 0, the default: a Task is one agent with
+//     one working copy, so one run at a time holds the workspace.
 //   - Every spec.mcp.servers entry joins Tools.MCP unless an entry with the
 //     same name exists. The fw.yaml entry wins. spec.mcp.registries entries
 //     are logged and skipped.
@@ -71,6 +73,9 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 	}
 	if cfg.Tools.Files.Root == "" {
 		cfg.Tools.Files.Root = Workdir(bindings)
+	}
+	if cfg.MaxRuns == 0 {
+		cfg.MaxRuns = 1
 	}
 
 	have := make(map[string]bool, len(cfg.Tools.MCP))

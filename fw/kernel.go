@@ -44,7 +44,7 @@ var (
 const OriginKernel = "kernel"
 
 const (
-	defaultMaxRuns   = 16
+	defaultMaxRuns   = 16 // when Config.MaxRuns is 0 outside ax; a Task runs one at a time
 	defaultMaxTokens = 64000
 )
 
@@ -930,7 +930,21 @@ func (a *Agent) appendLocked(guard context.Context, rs *runState, e Event) (Even
 		rs.events = append(rs.events, e)
 	}
 	a.notify(e)
+	if IsTerminal(e.Type) {
+		a.releaseRun(rs.id)
+	}
 	return e, nil
+}
+
+// releaseRun tells every tool that keeps state per run (RunCloser) that
+// the run ended, so a shell or a session of the run goes. The tools of the
+// sources are not asked: a remote server keeps no state of a run here.
+func (a *Agent) releaseRun(id string) {
+	for _, t := range a.tools {
+		if c, ok := runCloserOf(t); ok {
+			c.CloseRun(id)
+		}
+	}
 }
 
 // launchLocked starts the driver goroutine of a run. The caller holds rs.mu.

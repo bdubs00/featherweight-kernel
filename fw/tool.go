@@ -151,6 +151,26 @@ func continuerOf(t Tool) (Continuer, bool) {
 	return nil, false
 }
 
+// RunCloser is a tool that keeps state per run, such as a shell, and
+// releases it when the run ends. The kernel calls CloseRun once for each
+// run that reaches a terminal state, with the id of the run, after the
+// terminal event is in the ledger. The kernel finds a RunCloser behind
+// middleware that has an Unwrap method.
+type RunCloser interface {
+	CloseRun(runID string)
+}
+
+// runCloserOf returns the RunCloser behind t and its middleware, if any.
+func runCloserOf(t Tool) (RunCloser, bool) {
+	for depth := 0; t != nil && depth < 16; depth++ {
+		if c, ok := t.(RunCloser); ok {
+			return c, true
+		}
+		t = unwrapTool(t)
+	}
+	return nil, false
+}
+
 // ToolSource provides tools that change at runtime, such as an MCP server.
 type ToolSource interface {
 	Tools(ctx context.Context) ([]Tool, error)

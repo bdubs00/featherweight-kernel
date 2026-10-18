@@ -602,7 +602,7 @@ func DefaultConfig() *Config {
 			Router: "atenet-router.ate-system.svc.cluster.local",
 		},
 		Telemetry: TelemetryConfig{Metrics: "/metrics", Log: "info"},
-		MaxRuns:   16,
+		MaxRuns:   0, // the default of the environment: 16, or 1 under ax (ax.ApplyToConfig)
 		Agents:    map[string]AgentProfile{},
 	}
 	registry.mu.RLock()

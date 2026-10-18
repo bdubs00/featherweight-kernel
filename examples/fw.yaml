@@ -300,7 +300,7 @@ telemetry:
   log: info                     # debug | info | warn | error
   # OTLP traces use OTEL_EXPORTER_OTLP_ENDPOINT and the other standard OTEL_* variables.
 
-maxRuns: 16                     # runs in flight at once; more wait in the queue
+maxRuns: 16                     # runs in flight at once; more wait in the queue. 0 is the default: 16, or 1 under ax, where a Task is one working copy
 
 # A package that a program links in can own one top-level block, which it
 # claims with fw.RegisterExtension (docs/ARCHITECTURE.md section 12.1). The

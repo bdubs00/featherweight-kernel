@@ -199,7 +199,7 @@ policy:
 	if cfg.Policy.Default != "allow" || !slices.Equal(cfg.Policy.Ask, []string{"destructive"}) || !slices.Equal(cfg.Policy.Deny, []string{"bash"}) {
 		t.Errorf("policy overlay: %+v", cfg.Policy)
 	}
-	if cfg.Effort != "high" || cfg.MaxRuns != 16 {
+	if cfg.Effort != "high" || cfg.MaxRuns != 0 {
 		t.Errorf("defaults lost: effort %q, maxRuns %d", cfg.Effort, cfg.MaxRuns)
 	}
 }

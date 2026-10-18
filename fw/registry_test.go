@@ -12,7 +12,7 @@ import (
 func TestRegisterDefaults(t *testing.T) {
 	var calls atomic.Int32
 	RegisterDefaults(func(c *Config) {
-		if c.MaxRuns == 16 && slices.Contains(c.Surfaces, "native") {
+		if c.MaxRuns == 0 && slices.Contains(c.Surfaces, "native") {
 			calls.Add(1)
 		}
 	})
