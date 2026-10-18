@@ -48,11 +48,12 @@ const DefaultServer = "ax-server.ax-system.svc.cluster.local:8080"
 
 // Limits of the spawner.
 const (
-	readyTimeout = 10 * time.Minute // how long a child Task gets to run
-	startTimeout = 5 * time.Minute  // how long the first request to a child gets
-	maxTaskName  = 63
-	maxAnswer    = 4 << 20
-	phaseRunning = "Running"
+	readyTimeout   = 10 * time.Minute // how long a child Task gets to run
+	startTimeout   = 5 * time.Minute  // how long the first request to a child gets
+	maxTaskName    = 63
+	maxAnswer      = 4 << 20
+	phaseRunning   = "Running"
+	phaseSuspended = "Suspended"
 )
 
 // droppedEnv names the variables of the parent that a child does not get:
@@ -168,8 +169,8 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 		return nil, "", err
 	}
 	spec := s.childTask(task, atespace, child, parent)
-	if _, err := client.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: spec}); err != nil {
-		return nil, "", fmt.Errorf("ax: create the child Task %s/%s: %w", atespace, child, err)
+	if err := s.createTask(ctx, client, spec); err != nil {
+		return nil, "", err
 	}
 	s.log.Info("child Task created", "atespace", atespace, "task", child, "parent", parent.ID)
 	if err := s.awaitRunning(ctx, client, atespace, child); err != nil {
@@ -207,8 +208,8 @@ func (s *Spawner) Place(ctx context.Context, parent *fw.Run) (string, error) {
 		return "", err
 	}
 	spec := s.childTask(task, atespace, child, parent)
-	if _, err := client.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: spec}); err != nil {
-		return "", fmt.Errorf("ax: create the child Task %s/%s: %w", atespace, child, err)
+	if err := s.createTask(ctx, client, spec); err != nil {
+		return "", err
 	}
 	s.log.Info("child Task created for a branch", "atespace", atespace, "task", child, "parent", parent.ID)
 	return "ax:" + atespace + "/" + child, nil
@@ -329,7 +330,24 @@ func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run) *
 	}
 }
 
-// awaitRunning waits until the Task runs.
+// createTask creates a child Task and resumes it. ax creates every Task
+// suspended until a caller resumes it, so a Task that nobody resumes never
+// runs.
+func (s *Spawner) createTask(ctx context.Context, client v1alpha1.AXClient, spec *v1alpha1.Task) error {
+	atespace, name := spec.GetMetadata().GetAtespace(), spec.GetMetadata().GetName()
+	if _, err := client.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: spec}); err != nil {
+		return fmt.Errorf("ax: create the child Task %s/%s: %w", atespace, name, err)
+	}
+	if _, err := client.ResumeTask(ctx, &v1alpha1.ResumeTaskRequest{Atespace: atespace, Name: name}); err != nil {
+		s.deleteTask(client, atespace, name)
+		return fmt.Errorf("ax: resume the child Task %s/%s: %w", atespace, name, err)
+	}
+	return nil
+}
+
+// awaitRunning waits until the Task runs. A Task that ax reports as
+// suspended, because its reconciler ran before the resume took hold, is
+// resumed again.
 func (s *Spawner) awaitRunning(ctx context.Context, client v1alpha1.AXClient, atespace, name string) error {
 	deadline := time.Now().Add(readyTimeout)
 	for {
@@ -337,8 +355,13 @@ func (s *Spawner) awaitRunning(ctx context.Context, client v1alpha1.AXClient, at
 		if err != nil {
 			return fmt.Errorf("ax: read the child Task %s/%s: %w", atespace, name, err)
 		}
-		if t.GetStatus().GetPhase() == phaseRunning {
+		switch t.GetStatus().GetPhase() {
+		case phaseRunning:
 			return nil
+		case phaseSuspended:
+			if _, err := client.ResumeTask(ctx, &v1alpha1.ResumeTaskRequest{Atespace: atespace, Name: name}); err != nil {
+				s.log.Warn("resume the child Task", "atespace", atespace, "task", name, "error", err)
+			}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("ax: the child Task %s/%s is %q after %s", atespace, name, t.GetStatus().GetPhase(), readyTimeout)
@@ -349,13 +372,22 @@ func (s *Spawner) awaitRunning(ctx context.Context, client v1alpha1.AXClient, at
 	}
 }
 
-// deleteTask removes a child Task that never got its run.
+// deleteTask removes a child Task that never got its run. The connection to
+// the ax server can be stale after a suspend of this Task, so it tries
+// three times.
 func (s *Spawner) deleteTask(client v1alpha1.AXClient, atespace, name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if _, err := client.DeleteTask(ctx, &v1alpha1.DeleteTaskRequest{Atespace: atespace, Name: name}); err != nil {
-		s.log.Warn("delete the child Task", "atespace", atespace, "task", name, "error", err)
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = client.DeleteTask(ctx, &v1alpha1.DeleteTaskRequest{Atespace: atespace, Name: name}); err == nil {
+			return
+		}
+		if sleep(ctx, 2*time.Second) != nil {
+			break
+		}
 	}
+	s.log.Warn("delete the child Task", "atespace", atespace, "task", name, "error", err)
 }
 
 // runBody is the body of POST /v1/runs of the child, in the shape that the

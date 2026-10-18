@@ -33,6 +33,7 @@ type fakeAX struct {
 	reads        map[string]int
 	pendingReads int
 	deleted      []string
+	resumed      []string
 }
 
 func newFakeAX(t *testing.T) *fakeAX {
@@ -59,8 +60,22 @@ func (f *fakeAX) CreateTask(_ context.Context, req *v1alpha1.CreateTaskRequest) 
 	if _, ok := f.tasks[k]; ok {
 		return nil, status.Error(codes.AlreadyExists, k)
 	}
-	t.Status = &v1alpha1.TaskStatus{Phase: "Pending"}
+	// ax creates every Task suspended until a caller resumes it.
+	t.Status = &v1alpha1.TaskStatus{Phase: "Suspended"}
 	f.tasks[k] = t
+	return t, nil
+}
+
+func (f *fakeAX) ResumeTask(_ context.Context, req *v1alpha1.ResumeTaskRequest) (*v1alpha1.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(req.GetAtespace(), req.GetName())
+	t, ok := f.tasks[k]
+	if !ok {
+		return nil, status.Error(codes.NotFound, k)
+	}
+	f.resumed = append(f.resumed, k)
+	t.Status.Phase = "Pending"
 	return t, nil
 }
 
@@ -73,7 +88,8 @@ func (f *fakeAX) GetTask(_ context.Context, req *v1alpha1.GetTaskRequest) (*v1al
 		return nil, status.Error(codes.NotFound, k)
 	}
 	f.reads[k]++
-	if f.reads[k] > f.pendingReads {
+	// A Task runs only after a resume, as on ax.
+	if f.reads[k] > f.pendingReads && t.Status.Phase == "Pending" {
 		t.Status.Phase = "Running"
 	}
 	return t, nil
@@ -606,6 +622,12 @@ func TestForkCreatesAChildTaskAndStartsTheBranch(t *testing.T) {
 	}
 	if tasks := ax.created(); len(tasks) != 1 {
 		t.Fatalf("tasks = %d", len(tasks))
+	}
+	ax.mu.Lock()
+	resumed := append([]string(nil), ax.resumed...)
+	ax.mu.Unlock()
+	if len(resumed) != 1 || !strings.HasPrefix(resumed[0], "team/migrator-") {
+		t.Fatalf("the child Task was not resumed: %v", resumed)
 	}
 	events := []fw.Event{{Type: fw.EvRunQueued, Subject: "01PARENT", Seq: 1, Data: json.RawMessage(`{"agent":"default","input":"hello"}`)}, {Type: fw.EvRunStarted, Subject: "01PARENT", Seq: 2, Data: json.RawMessage(`{}`)}}
 	run, err := s.Branch(ctx, member, events, fw.ForkRequest{ID: "01BRANCHID", Input: "try another way"})
