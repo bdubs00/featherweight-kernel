@@ -2,7 +2,9 @@ package fw
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -184,5 +186,306 @@ func TestSpawnChildWithoutASpawnerRunsHere(t *testing.T) {
 	}
 	if done, err := a.Wait(ctx, child.ID); err != nil || done.Output != "child done" {
 		t.Fatalf("Wait = %+v, %v", done, err)
+	}
+}
+
+// testTools gives a test agent a tools list with a few names to intersect.
+func testTools() []Tool {
+	noop := func(context.Context, json.RawMessage) (ToolResult, error) { return TextResult("done"), nil }
+	return []Tool{
+		NewTool(ToolSpec{Name: "files", ReadOnly: true}, noop),
+		NewTool(ToolSpec{Name: "bash", Destructive: true}, noop),
+		NewTool(ToolSpec{Name: "plus", ReadOnly: true}, noop),
+		NewTool(ToolSpec{Name: "deep", ReadOnly: true, OptIn: true}, noop),
+	}
+}
+
+// TestSpawnChildToolsStayInsideTheParent proves that a child run in another
+// process gets only the tools that the parent and every ancestor have. An
+// explicit tool list of the child cannot name what the parent lacks, an
+// empty list cannot mean every tool, and no intersection refuses the child
+// instead of handing it everything.
+func TestSpawnChildToolsStayInsideTheParent(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, newScript(endTurn("child done")).Model())
+	sp := &otherSpawner{other: other}
+	a := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithSpawner(sp),
+		WithProfile(AgentProfile{Name: "default", Tools: []string{"files", "spawn_task"}}),
+		WithTools(testTools()...))
+	parent, err := a.Run(ctx, "parent work")
+	mustState(t, parent, err, StateCompleted)
+
+	// A child of its own with broad tools cannot widen the parent.
+	if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child work",
+		WithRunProfile(AgentProfile{Tools: []string{"bash"}}))); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("a bash child of a files-only parent = %v", err)
+	}
+	// An empty tools list stays the tools of the parent. It does not become
+	// an unrestricted list, which an empty list means at run time.
+	if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child work",
+		WithRunProfile(AgentProfile{Tools: []string{}}))); err != nil {
+		t.Fatalf("an empty tools list = %v", err)
+	}
+	// A child with a broad list of its own keeps only the tools of the
+	// parent, and an opt-in tool the parent never named stays out.
+	if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child work",
+		WithRunProfile(AgentProfile{Tools: []string{"files", "bash", "deep"}}))); err != nil {
+		t.Fatalf("SpawnChild: %v", err)
+	}
+	// A child with no list of its own gets the tools of the parent too.
+	if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child work")); err != nil {
+		t.Fatalf("SpawnChild: %v", err)
+	}
+	reqs := sp.requests()
+	if len(reqs) != 3 {
+		t.Fatalf("requests = %d", len(reqs))
+	}
+	for i, req := range reqs {
+		if req.Profile == nil || join(req.Profile.Tools) != "files" {
+			t.Fatalf("tools of the child request %d = %+v", i, req.Profile)
+		}
+	}
+}
+
+// TestSpawnChildCarriesTheRulesOfTheParent proves that a remote child
+// carries the base rules of this configuration and the rules of every
+// ancestor, so the other process enforces them without the tree.
+func TestSpawnChildCarriesTheRulesOfTheParent(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, newScript(endTurn("child done")).Model())
+	sp := &otherSpawner{other: other}
+	cfg := DefaultConfig()
+	cfg.Policy.Rules = Rules{Default: "ask", Deny: []string{"bash: rm *"}}
+	a := newTestAgent(t, newScript(endTurn("parent work")).Model(), WithSpawner(sp), WithConfig(cfg), WithTools(testTools()...))
+	parent, err := a.Start(ctx, "parent work", WithRunProfile(AgentProfile{
+		Policy: &Rules{Deny: []string{"send"}},
+		Tools:  []string{"files", "bash", "plus"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child work",
+		WithRunProfile(AgentProfile{Policy: &Rules{Ask: []string{"clock"}}})))
+	if err != nil {
+		t.Fatalf("SpawnChild: %v", err)
+	}
+	reqs := sp.requests()
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %d", len(reqs))
+	}
+	q := reqs[0].Profile
+	if q == nil || q.Policy == nil {
+		t.Fatalf("profile = %+v", q)
+	}
+	// Check behavior rather than a flattened encoding of independent rules.
+	for _, tc := range []struct {
+		tool, input string
+		want        Verdict
+	}{
+		{"bash", `{"command":"rm a"}`, VerdictDeny},
+		{"send", `{}`, VerdictDeny},
+		{"clock", `{}`, VerdictAsk},
+		{"files", `{}`, VerdictAsk},
+	} {
+		if got := NewRulesPolicy(*q.Policy).Decide(ctx, ToolCall{Spec: ToolSpec{Name: tc.tool}, Input: json.RawMessage(tc.input)}); got.Verdict != tc.want {
+			t.Fatalf("carried policy for %s = %+v, want %v", tc.tool, got, tc.want)
+		}
+	}
+	// The tools of the child are the intersection, as exact names.
+	if join(q.Tools) != "files,bash,plus" {
+		t.Fatalf("tools of the child = %v", q.Tools)
+	}
+	// The child run keeps its own request and its lineage only in this
+	// process record; the request carries the parent in the metadata.
+	if child.Parent != parent.ID || reqs[0].Parent != "" || reqs[0].Metadata[MetaParent] != parent.ID {
+		t.Fatalf("child = %+v request = %+v", child, reqs[0])
+	}
+}
+
+// TestSpawnDepthDepletesOverARemoteTree walks the depth boundary: a parent
+// starts a child, a child starts a grandchild at the last level, and the
+// grandchild carries a deny of spawn_task, so nothing goes past
+// spawn.maxDepth even in a process that counts its own depth from zero.
+func TestSpawnDepthDepletesOverARemoteTree(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, newScript(endTurn("child done")).Model())
+	sp := &otherSpawner{other: other}
+	cfg := DefaultConfig()
+	cfg.Spawn.MaxDepth = 2
+	a := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithSpawner(sp), WithConfig(cfg))
+	parent, err := a.Start(ctx, "parent work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A parent at depth 0 starts a child at depth 1: no deny of spawn_task
+	// travels with it, because the child may still start one child.
+	child, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child == nil || child.Depth != 1 || child.Parent != parent.ID {
+		t.Fatalf("child = %+v", child)
+	}
+	if q := sp.requests()[0].Profile; q == nil || containsRule(q.Policy, "spawn_task") {
+		t.Fatalf("policy of the child = %+v", q)
+	}
+	// A child at depth 1 starts a grandchild at depth 2, the last level.
+	// The grandchild carries a deny of spawn_task.
+	mid, err := a.Start(ctx, "mid work", WithParent(parent.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	grand, err := a.SpawnChild(ctx, mid.ID, NewRunRequest("grandchild work"))
+	if err != nil {
+		t.Fatalf("SpawnChild: %v", err)
+	}
+	_ = grand
+	if q := sp.requests()[1].Profile; q == nil || !containsRule(q.Policy, "spawn_task") {
+		t.Fatalf("policy of the grandchild = %+v", q)
+	}
+	// A run that carries the deny, as the grandchild would, starts no
+	// child: the check that the child process applies refuses it here too,
+	// so the depth counts past a process border.
+	leaf, err := a.Start(ctx, "leaf work", WithParent(mid.ID), WithRunProfile(AgentProfile{
+		Policy: &Rules{Deny: []string{"spawn_task"}, Default: "deny"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SpawnChild(ctx, leaf.ID, NewRunRequest("again")); !errors.Is(err, ErrSpawnLimit) {
+		t.Fatalf("a child of the carrying leaf = %v", err)
+	}
+}
+
+// containsRule reports whether the rules deny or ask or allow the tool.
+func containsRule(r *Rules, tool string) bool {
+	if r == nil {
+		return false
+	}
+	for _, list := range [][]string{r.Deny, r.Ask, r.Allow} {
+		for _, rule := range list {
+			if rule == tool {
+				return true
+			}
+		}
+	}
+	for i := range r.All {
+		if containsRule(&r.All[i], tool) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSpawnDisabledStopsEveryChildEntryPoint(t *testing.T) {
+	ctx := testCtx(t)
+	for _, remote := range []bool{false, true} {
+		cfg := DefaultConfig()
+		cfg.Spawn.Disabled, cfg.Spawn.MaxDepth = true, 0
+		opts := []Option{WithConfig(cfg)}
+		if remote {
+			opts = append(opts, WithSpawner(&otherSpawner{})) // must never be reached
+		}
+		a := newTestAgent(t, newScript(endTurn("parent")).Model(), opts...)
+		parent, err := a.Run(ctx, "parent")
+		mustState(t, parent, err, StateCompleted)
+		if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child")); !errors.Is(err, ErrSpawnLimit) {
+			t.Fatalf("remote=%v SpawnChild = %v", remote, err)
+		}
+		if _, err := a.Start(ctx, "child", WithParent(parent.ID)); !errors.Is(err, ErrSpawnLimit) {
+			t.Fatalf("remote=%v Start with parent = %v", remote, err)
+		}
+	}
+}
+
+func TestRemoteChildResolvesNamedRestrictions(t *testing.T) {
+	ctx := testCtx(t)
+	script := newScript(callTools(use("f", "files", `{}`), use("b", "bash", `{}`)), endTurn("done"))
+	other := newTestAgent(t, script.Model(), WithTools(testTools()...), WithProfile(AgentProfile{Name: "worker", Tools: []string{"*"}}))
+	sp := &otherSpawner{other: other}
+	a := newTestAgent(t, newScript(endTurn("parent")).Model(), WithTools(testTools()...), WithSpawner(sp),
+		WithProfile(AgentProfile{Name: "worker", Tools: []string{"files"}, Policy: &Rules{Default: "deny", Allow: []string{"files"}}}))
+	parent, err := a.Run(ctx, "parent")
+	mustState(t, parent, err, StateCompleted)
+	child, err := a.SpawnChild(ctx, parent.ID, RunRequest{Input: "child", Agent: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := a.Wait(ctx, child.ID)
+	mustState(t, r, err, StateCompleted)
+	q := sp.requests()[0].Profile
+	if join(q.Tools) != "files" {
+		t.Fatalf("named child tools widened: %v", q.Tools)
+	}
+	results := lastToolResults(t, script.requests()[1])
+	if results[0].IsError || !results[1].IsError || !strings.Contains(TextOf(results[1].Content), "unknown tool") {
+		t.Fatalf("remote model received wrong capability results: %+v", results)
+	}
+	if _, err := a.SpawnChild(ctx, parent.ID, RunRequest{Input: "unknown", Agent: "absent"}); !errors.Is(err, ErrAgentNotFound) {
+		t.Fatalf("unresolved remote profile = %v", err)
+	}
+}
+
+func TestRemoteChildCannotOptInOrExpandLiteralNames(t *testing.T) {
+	ctx := testCtx(t)
+	sp := &otherSpawner{other: newTestAgent(t, newScript(endTurn("done")).Model())}
+	a := newTestAgent(t, newScript(endTurn("parent")).Model(), WithTools(testTools()...), WithSpawner(sp),
+		WithProfile(AgentProfile{Name: "privileged", Tools: []string{"deep"}}))
+	parent, err := a.Run(ctx, "parent")
+	mustState(t, parent, err, StateCompleted)
+	if _, err := a.SpawnChild(ctx, parent.ID, RunRequest{Input: "child", Agent: "privileged"}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("nil parent tool list granted opt-in tool: %v", err)
+	}
+	literal := NewTool(ToolSpec{Name: "x*", ReadOnly: true}, func(context.Context, json.RawMessage) (ToolResult, error) { return TextResult("x"), nil })
+	b := newTestAgent(t, newScript(endTurn("parent")).Model(), WithTools(literal), WithSpawner(sp))
+	p, err := b.Run(ctx, "parent")
+	mustState(t, p, err, StateCompleted)
+	if _, err := b.SpawnChild(ctx, p.ID, NewRunRequest("child")); err != nil {
+		t.Fatal(err)
+	}
+	tools := sp.requests()[0].Profile.Tools
+	if !toolAllowed(tools, literal.Spec()) || toolAllowed(tools, ToolSpec{Name: "xyz"}) {
+		t.Fatalf("literal tool name became a glob: %v", tools)
+	}
+}
+
+func TestRemoteExternalPolicyNeedsAnEnforcementContract(t *testing.T) {
+	ctx := testCtx(t)
+	sp := &otherSpawner{}
+	a := newTestAgent(t, newScript(endTurn("parent")).Model(), WithSpawner(sp), WithPolicy(&externalPolicy{}))
+	parent, err := a.Run(ctx, "parent")
+	mustState(t, parent, err, StateCompleted)
+	if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child")); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("external policy was silently omitted: %v", err)
+	}
+}
+
+// TestSpawnChildWithACustomPolicyDoesNotTravel proves that a policy in Go
+// code, which is not rules and not the control plane, keeps its process:
+// a child in another one does not start, because the rules would not say
+// the same things there.
+func TestSpawnChildWithACustomPolicyDoesNotTravel(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, newScript(endTurn("child done")).Model())
+	sp := &otherSpawner{other: other}
+	policy := PolicyFunc(func(context.Context, ToolCall) Decision { return Decision{Verdict: VerdictAllow, Reason: "custom"} })
+	a := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithSpawner(sp), WithPolicy(policy))
+	parent, err := a.Run(ctx, "parent work")
+	mustState(t, parent, err, StateCompleted)
+	if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("child work")); err == nil || !strings.Contains(err.Error(), "does not travel") {
+		t.Fatalf("SpawnChild with a custom policy = %v", err)
+	}
+	if len(sp.requests()) != 0 {
+		t.Fatal("the child started though the policy does not travel")
+	}
+	// In this process the same policy still holds for a child.
+	b := newTestAgent(t, newScript(endTurn("child done")).Model(), WithPolicy(policy))
+	p2, err := b.Start(ctx, "child work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := b.SpawnChild(ctx, p2.ID, NewRunRequest("do x"))
+	if err != nil || done == nil {
+		t.Fatalf("SpawnChild in the same process = %+v, %v", done, err)
 	}
 }

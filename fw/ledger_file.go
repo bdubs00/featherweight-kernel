@@ -3,12 +3,20 @@ package fw
 // This file is the "file" ledger driver (docs/ARCHITECTURE.md section 4.3).
 // Each run has a directory <root>/<run>/ with ledger.jsonl, one JSON event
 // per line. The driver only appends. It calls fsync after every approval
-// event and every terminal event. The file <root>/index.jsonl records each
-// run id once, in the order the runs were created. The root is
-// Config.Ledger.Path when set, else <Config.Home>/runs.
+// event, every terminal event, and every request to run a tool that is
+// not idempotent. An event whose tool intent has no readable
+// classification counts as not idempotent. Such a success also stands on
+// the entries behind the file: the first open of a run owes an fsync of
+// its directory and of the root, and the first new entry of the index
+// owes an fsync of the root. A failed fsync keeps the debt until a retry
+// pays it, and a debt survives a path that already exists. The file
+// <root>/index.jsonl records each run id once, in the order the runs were
+// created. The root is Config.Ledger.Path when set, else
+// <Config.Home>/runs.
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -50,14 +58,35 @@ type FileLedger struct {
 	runs    map[string]*fileRun
 	indexed map[string]bool
 
-	syncs atomic.Int64 // number of fsync calls on run files, for tests
+	syncs  atomic.Int64 // number of fsync calls on run files, for tests
+	dsyncs atomic.Int64 // number of fsync calls on run directories, for tests
+	rsyncs atomic.Int64 // number of fsync calls on the ledger root, for tests
+
+	// failFileSyncs makes that many fsync calls on files of this ledger
+	// fail first, and failDirSyncs does the same for directories. Each is
+	// a count of failures left, and each belongs to this ledger alone, so
+	// a test can walk a failure and the retry that pays the debt.
+	failFileSyncs atomic.Int64
+	failDirSyncs  atomic.Int64
+	beforeDirSync func(string) error // optional per-instance fault injection for setup tests
+
+	// indexDirSync holds while the entry of index.jsonl in the root has
+	// no fsync behind it. The first new entry of the index pays it.
+	indexDirSync bool
 }
 
 type fileRun struct {
-	mu       sync.Mutex
-	loaded   bool   // seq is known
-	seq      uint64 // last sequence number in the file
-	done     bool   // the run finished, and no later event opened it again
+	mu     sync.Mutex
+	loaded bool   // seq is known
+	seq    uint64 // last sequence number in the file
+	done   bool   // the run finished, and no later event opened it again
+	// opened says the ledger file was opened once in this ledger. The
+	// first open owes the fsyncs of the entries behind the file, and no
+	// later open owes them again. A successful fsync pays a debt once,
+	// and a failed one keeps it.
+	opened   bool
+	rootSync bool // the entry of the run directory owes an fsync of the root
+	dirSync  bool // the entry of the ledger file owes an fsync of the directory of the run
 	f        *os.File
 	watchers []*ledgerWatcher
 }
@@ -69,17 +98,64 @@ func keepsDone(done bool, typ string) bool {
 	return IsTerminal(typ) || (done && typ == EvRunAnnotated)
 }
 
+// needsIntentSync reports whether an event must reach the disk before
+// Append reports success. Approvals and terminal events need it, and so
+// does the intent to run a tool that is not idempotent: the kernel runs
+// the body of a tool only after Append returned, and a restart that
+// reads the ledger must not lose the record that the tool was asked
+// for. An fw.tool.requested event without a readable classification,
+// as from an older version or a direct caller, counts as not
+// idempotent, so no event can bypass the durable write.
+func needsIntentSync(typ string, data json.RawMessage) bool {
+	if typ == EvApprovalRequested || typ == EvApprovalDecided || IsTerminal(typ) {
+		return true
+	}
+	if typ != EvToolRequested {
+		return false
+	}
+	var d ToolRequestedData
+	if err := json.Unmarshal(data, &d); err != nil {
+		return true
+	}
+	return !d.Idempotent
+}
+
 type indexEntry struct {
 	ID   string    `json:"id"`
 	Time time.Time `json:"time"`
 }
 
-// OpenFileLedger opens or creates a file ledger rooted at dir.
+// OpenFileLedger opens or creates a file ledger rooted at dir. It fsyncs
+// the directory chain even when it exists: a previous setup may have
+// created it and failed before making its entries durable.
 func OpenFileLedger(dir string) (*FileLedger, error) {
+	return openFileLedger(dir, nil)
+}
+
+func openFileLedger(dir string, beforeDirSync func(string) error) (*FileLedger, error) {
+	l := &FileLedger{dir: dir, runs: map[string]*fileRun{}, indexed: map[string]bool{}, indexDirSync: true, beforeDirSync: beforeDirSync}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("fw: file ledger: create %s: %w", dir, err)
 	}
-	l := &FileLedger{dir: dir, runs: map[string]*fileRun{}, indexed: map[string]bool{}}
+	if err := l.syncDirectoryChain(dir); err != nil {
+		return nil, fmt.Errorf("fw: file ledger: fsync the directory chain for %s: %w", dir, err)
+	}
+	// An earlier index append may have failed its fsync without losing its
+	// bytes from the page cache. Establish durability before trusting those
+	// ids in indexed, which otherwise skips the index write on later appends.
+	f, err := os.OpenFile(filepath.Join(dir, indexFileName), os.O_RDWR, 0)
+	if err == nil {
+		err = trimPartialLine(f)
+		if err == nil {
+			err = l.syncFile(f)
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("fw: file ledger: recover index: %w", err)
+	}
 	ids, err := l.readIndex()
 	if err != nil {
 		return nil, err
@@ -88,6 +164,65 @@ func OpenFileLedger(dir string) (*FileLedger, error) {
 		l.indexed[id] = true
 	}
 	return l, nil
+}
+
+// syncFile fsyncs f. The failFileSyncs field makes that many fsync calls
+// on files fail first, so a test can walk a failure and the retry.
+func (l *FileLedger) syncFile(f *os.File) error {
+	if l.failFileSyncs.Add(-1) >= 0 {
+		return errors.New("simulated fsync failure")
+	}
+	return f.Sync()
+}
+
+// syncDir fsyncs a directory, so its entries survive a crash. The
+// failDirSyncs field makes that many of these calls fail first.
+func (l *FileLedger) syncDir(path string) error {
+	if l.beforeDirSync != nil {
+		if err := l.beforeDirSync(path); err != nil {
+			return err
+		}
+	}
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if l.failDirSyncs.Add(-1) >= 0 {
+		_ = d.Close()
+		return errors.New("simulated fsync failure")
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
+}
+
+// syncDirectoryChain makes each directory reachable through a synced parent.
+// Do this once per open, bottom-up through the filesystem root, including on
+// retries. Path existence cannot distinguish a durable entry from one left
+// by a failed setup. Resolve symlinks so the parents are the actual parents
+// of the created directories.
+func (l *FileLedger) syncDirectoryChain(dir string) error {
+	path, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	for {
+		if err := l.syncDir(path); err != nil {
+			return err
+		}
+		l.rsyncs.Add(1)
+		parent := filepath.Dir(path)
+		if parent == path {
+			return nil
+		}
+		path = parent
+	}
 }
 
 // Dir returns the root directory.
@@ -123,6 +258,13 @@ func (l *FileLedger) Append(_ context.Context, e Event) (uint64, error) {
 		return 0, err
 	}
 	if r.f == nil {
+		if !r.opened {
+			// The first open of the ledger file of a run owes the fsyncs
+			// of the entries behind it, even when the directories already
+			// exist: an older process may have left them without one. A
+			// later open of an established run owes nothing.
+			r.rootSync, r.dirSync, r.opened = true, true, true
+		}
 		if err := os.MkdirAll(filepath.Join(l.dir, e.Subject), 0o700); err != nil {
 			return 0, fmt.Errorf("fw: file ledger: create run directory: %w", err)
 		}
@@ -151,11 +293,33 @@ func (l *FileLedger) Append(_ context.Context, e Event) (uint64, error) {
 		return 0, fmt.Errorf("fw: file ledger: append to %s: %w", e.Subject, err)
 	}
 	r.seq = e.Seq
-	if e.Type == EvApprovalRequested || e.Type == EvApprovalDecided || IsTerminal(e.Type) {
-		if err := r.f.Sync(); err != nil {
+	// A failed fsync leaves the line in the file with its sequence
+	// number spent, but Append reports the failure and notifies no
+	// watcher: success comes only after an event that needs durability
+	// has reached the disk. The fsync of the file alone keeps no entry,
+	// so the success also stands on the entries behind it: the ledger
+	// file in the directory of the run, then the directory in the root.
+	// A failed fsync there keeps the debt, and the next append that
+	// reports success pays it, however many appends later that is.
+	if needsIntentSync(e.Type, e.Data) {
+		if err := l.syncFile(r.f); err != nil {
 			return 0, fmt.Errorf("fw: file ledger: fsync %s: %w", e.Subject, err)
 		}
 		l.syncs.Add(1)
+		if r.dirSync {
+			if err := l.syncDir(filepath.Join(l.dir, e.Subject)); err != nil {
+				return 0, fmt.Errorf("fw: file ledger: fsync the directory of %s: %w", e.Subject, err)
+			}
+			r.dirSync = false
+			l.dsyncs.Add(1)
+		}
+		if r.rootSync {
+			if err := l.syncDir(l.dir); err != nil {
+				return 0, fmt.Errorf("fw: file ledger: fsync the ledger root for %s: %w", e.Subject, err)
+			}
+			r.rootSync = false
+			l.rsyncs.Add(1)
+		}
 	}
 	for _, w := range r.watchers {
 		w.push(e)
@@ -226,15 +390,19 @@ func (l *FileLedger) index(id string, t time.Time) error {
 	if l.indexed[id] {
 		return nil
 	}
-	f, err := os.OpenFile(filepath.Join(l.dir, indexFileName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filepath.Join(l.dir, indexFileName), os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("fw: file ledger: open index: %w", err)
+	}
+	if err := trimPartialLine(f); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("fw: file ledger: recover index: %w", err)
 	}
 	line, _ := json.Marshal(indexEntry{ID: id, Time: t.UTC()})
 	line = append(line, '\n')
 	_, err = f.Write(line)
 	if err == nil {
-		err = f.Sync()
+		err = l.syncFile(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -242,8 +410,45 @@ func (l *FileLedger) index(id string, t time.Time) error {
 	if err != nil {
 		return fmt.Errorf("fw: file ledger: write index: %w", err)
 	}
+	// The entry of the index file in the root owes an fsync, and a failed
+	// one keeps the debt: the next new entry of the index pays it.
+	if l.indexDirSync {
+		if err := l.syncDir(l.dir); err != nil {
+			return fmt.Errorf("fw: file ledger: fsync the ledger root: %w", err)
+		}
+		l.indexDirSync = false
+		l.rsyncs.Add(1)
+	}
 	l.indexed[id] = true
 	return nil
+}
+
+// trimPartialLine removes only an incomplete trailing record. In particular,
+// an index write retried after a partial write must start on a fresh line;
+// otherwise the next run's id can disappear inside a malformed record.
+func trimPartialLine(f *os.File) error {
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	end := st.Size()
+	var buf [4096]byte
+	for end > 0 {
+		start := max(end-int64(len(buf)), 0)
+		part := buf[:end-start]
+		if _, err := f.ReadAt(part, start); err != nil {
+			return err
+		}
+		if i := bytes.LastIndexByte(part, '\n'); i >= 0 {
+			good := start + int64(i) + 1
+			if good == st.Size() {
+				return nil
+			}
+			return f.Truncate(good)
+		}
+		end = start
+	}
+	return f.Truncate(0)
 }
 
 // readIndex returns the run ids of index.jsonl, each once, in order. A
@@ -400,7 +605,7 @@ func (l *FileLedger) Flush() error {
 	for _, r := range runs {
 		r.mu.Lock()
 		if r.f != nil {
-			if err := r.f.Sync(); err != nil {
+			if err := l.syncFile(r.f); err != nil {
 				errs = append(errs, err)
 			}
 			if err := r.f.Close(); err != nil {

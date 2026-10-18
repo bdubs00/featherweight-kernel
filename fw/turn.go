@@ -38,12 +38,24 @@ const answerSchema = `{"type":"object","properties":{"answer":{"type":"string"}}
 // detects: a call, a pair, or a triple that comes back in the same order.
 const maxLoopPeriod = 3
 
+// questionRecord is a schema-bearing question of a tool call: the stored
+// fw.approval.requested and, when the run already took it, its decision. The
+// kernel keeps no channel for such a decision across a restart, so the
+// ledger alone says what the person answered.
+type questionRecord struct {
+	req     ApprovalRequestedData
+	decided *ApprovalDecidedData
+}
+
 // callRecord is what the log holds about one tool call of the latest response.
 type callRecord struct {
 	requestedSeq uint64               // the latest fw.tool.requested
 	responded    bool                 // a fw.tool.responded exists
 	decision     *ApprovalDecidedData // the latest decision of an approval for this call
 	decisionSeq  uint64
+	// questions holds the schema-bearing questions of the call, in order.
+	// A question that a restart carried over stays here with its decision.
+	questions []*questionRecord
 	// connectSeq is the latest fw.approval.requested of the call with
 	// Connect set. Such a call waited for a connection before it reached
 	// the service, so it can run again after a restart.
@@ -188,6 +200,14 @@ func analyze(events []Event) *cursor {
 						r.connectSeq, r.connect, r.connectDeny = e.Seq, d.Connect, nil
 					}
 				}
+				// A question of a call is a schema-bearing approval with
+				// no connect. Its decision lives in the ledger and not in
+				// a channel, so a resume can read it back.
+				if d.Connect == nil && len(d.Schema) > 0 && c.calls != nil {
+					if r := c.calls[d.CallID]; r != nil {
+						r.questions = append(r.questions, &questionRecord{req: d})
+					}
+				}
 			}
 		case EvApprovalDecided:
 			var d ApprovalDecidedData
@@ -203,7 +223,17 @@ func analyze(events []Event) *cursor {
 			// A question from a tool carries a schema. Only an approval of
 			// the call itself decides whether the call runs. A connect
 			// that the person skipped ends the call.
-			if req, ok := approvals[d.ApprovalID]; ok && len(req.Schema) == 0 && c.calls != nil {
+			req, isReq := approvals[d.ApprovalID]
+			if isReq && len(req.Schema) > 0 && req.Connect == nil && c.calls != nil {
+				if r := c.calls[req.CallID]; r != nil {
+					for _, q := range r.questions {
+						if q.req.ApprovalID == d.ApprovalID {
+							q.decided = &d
+						}
+					}
+				}
+			}
+			if isReq && len(req.Schema) == 0 && c.calls != nil {
 				if r := c.calls[req.CallID]; r != nil {
 					switch {
 					case req.Connect == nil:
@@ -832,6 +862,10 @@ type plannedCall struct {
 	spec   ToolSpec
 	run    bool
 	result ToolResult // the result when the call does not run
+	// answered holds the recorded questions and answers of the call from
+	// the ledger. The kernel fills it for a resumed call that a Continuer
+	// completes on its own, in place of another run of the tool.
+	answered []AnsweredQuestion
 }
 
 // stepTools decides every open call of the latest response, asks for an
@@ -905,7 +939,11 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 		case rec.requestedSeq > 0:
 			// The call started before a restart and has no result.
 			if !p.spec.Idempotent {
-				return a.requestApproval(ctx, rs, u, "rerun after resume")
+				answered, ok := continueAsk(p.tool, rec)
+				if !ok {
+					return a.requestApproval(ctx, rs, u, "rerun after resume")
+				}
+				p.answered = answered
 			}
 			p.run = true
 		default:
@@ -970,6 +1008,29 @@ func deniedBy(d *ApprovalDecidedData) string {
 	return "denied by " + who + ": " + d.Note
 }
 
+// continueAsk decides whether a resumed open call completes from the
+// answers that the ledger already holds instead of running the tool again.
+// The call must hold at least one recorded question, every recorded question
+// must have its decision, and the tool must be a Continuer. Any other shape
+// keeps the rerun gate of a non-idempotent tool. A call with a question
+// that still waits never reaches here, because the run stays idle.
+func continueAsk(t Tool, rec *callRecord) ([]AnsweredQuestion, bool) {
+	if len(rec.questions) == 0 {
+		return nil, false
+	}
+	out := make([]AnsweredQuestion, 0, len(rec.questions))
+	for _, q := range rec.questions {
+		if q.decided == nil {
+			return nil, false
+		}
+		out = append(out, AnsweredQuestion{Request: q.req, Decision: *q.decided})
+	}
+	if _, ok := continuerOf(t); !ok {
+		return nil, false
+	}
+	return out, true
+}
+
 // requestApproval appends fw.approval.requested for a call. The run moves to
 // input-required, and the driver goes idle until Decide.
 func (a *Agent) requestApproval(ctx context.Context, rs *runState, u Block, reason string) error {
@@ -1020,7 +1081,7 @@ func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall)
 			outs[i] = callOutcome{res: p.result}
 			continue
 		}
-		if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input}); err != nil {
+		if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input, Idempotent: p.spec.Idempotent}); err != nil {
 			wg.Wait()
 			return err
 		}
@@ -1068,11 +1129,34 @@ func (a *Agent) invoke(ctx context.Context, rs *runState, p plannedCall, aborted
 		}
 		out.ms = time.Since(start).Milliseconds()
 	}()
+	input := p.use.Input
+	if len(input) == 0 {
+		input = json.RawMessage(`{}`)
+	}
+	res, err := a.callTool(ctx, rs, p, input, aborted)
+	if err != nil {
+		res = ErrorResult(fmt.Sprintf("tool %s: %v", p.use.Name, err))
+	}
+	out.res = res
+	return out
+}
+
+// callTool runs the tool of one planned call. A call with recorded answers
+// goes to the Continuer of the tool instead of Call, and its context holds
+// no asker or connecter, so the continuation cannot ask again.
+func (a *Agent) callTool(ctx context.Context, rs *runState, p plannedCall, input json.RawMessage, aborted *atomic.Bool) (res ToolResult, err error) {
 	callID := p.use.ID
 	info := a.runInfo(rs)
 	info.CallID = callID
 	tctx := WithRunInfo(ctx, info)
 	tctx = WithAgent(tctx, a)
+	if p.answered != nil {
+		cont, ok := continuerOf(p.tool)
+		if !ok {
+			return ToolResult{}, fmt.Errorf("fw: tool %s cannot continue from the recorded answers", p.use.Name)
+		}
+		return cont.Continue(tctx, input, p.answered)
+	}
 	tctx = WithProgress(tctx, func(progress, total float64, message string) {
 		_, _ = a.emit(ctx, rs, EvToolProgress, ToolProgressData{CallID: callID, Progress: progress, Total: total, Message: message})
 	})
@@ -1085,16 +1169,8 @@ func (a *Agent) invoke(ctx context.Context, rs *runState, p plannedCall, aborted
 			_, _ = a.emit(ctx, rs, EvFileChanged, d)
 		}))
 	}
-	input := p.use.Input
-	if len(input) == 0 {
-		input = json.RawMessage(`{}`)
-	}
-	res, err := p.tool.Call(tctx, input)
-	if err != nil {
-		res = ErrorResult(fmt.Sprintf("tool %s: %v", p.use.Name, err))
-	}
-	out.res = res
-	return out
+	res, err = p.tool.Call(tctx, input)
+	return res, err
 }
 
 // asker returns the Asker of one tool call. A question is an approval with

@@ -6,7 +6,8 @@ package fw
 //
 //   - a fw.model.requested without a response sends the request again;
 //   - a fw.tool.requested without a result runs an idempotent tool again, and
-//     asks with the reason "rerun after resume" before any other tool;
+//     asks with the reason "rerun after resume" before another tool, unless
+//     its Continuer can finish from recorded questions and their answers;
 //   - a pending fw.approval.requested waits for Decide.
 
 import (

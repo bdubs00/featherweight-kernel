@@ -87,6 +87,7 @@ func TestEnvOverrides(t *testing.T) {
 		{"empty value is unset", map[string]string{"FW_LISTEN": "  "}, func(c *fw.Config) any { return c.Listen }, ":8080"},
 		{"ax server", map[string]string{"FW_AX_SERVER": "ax:1"}, func(c *fw.Config) any { return c.AX.Server }, "ax:1"},
 		{"spawn", map[string]string{"FW_SPAWN_MAX_DEPTH": "1", "FW_SPAWN_MAX_CHILDREN": "2"}, func(c *fw.Config) any { return c.Spawn }, fw.SpawnConfig{MaxDepth: 1, MaxChildren: 2}},
+		{"spawn exhausted", map[string]string{"FW_SPAWN_DISABLED": "true", "FW_SPAWN_MAX_DEPTH": "0"}, func(c *fw.Config) any { return c.Spawn }, fw.SpawnConfig{Disabled: true, MaxDepth: 0, MaxChildren: 16}},
 		{"budget shape", map[string]string{"FW_BUDGET_MAX_TOOL_CALLS": "9", "FW_BUDGET_MAX_CALLS_PER_TURN": "3", "FW_BUDGET_MAX_REPEATS": "2"}, func(c *fw.Config) any {
 			return []int{c.Budget.MaxToolCalls, c.Budget.MaxCallsPerTurn, c.Budget.MaxRepeats}
 		}, []int{9, 3, 2}},

@@ -216,12 +216,14 @@ type profileBody struct {
 	Budget       *budgetBody `json:"budget"`
 }
 
-// rulesBody is fw.Rules: a default verdict and three rule lists.
+// rulesBody is fw.Rules: a default verdict and three rule lists, plus All,
+// the list of independent clauses that must each agree, nested.
 type rulesBody struct {
-	Default string   `json:"default"`
-	Allow   []string `json:"allow"`
-	Ask     []string `json:"ask"`
-	Deny    []string `json:"deny"`
+	Default string      `json:"default"`
+	Allow   []string    `json:"allow"`
+	Ask     []string    `json:"ask"`
+	Deny    []string    `json:"deny"`
+	All     []rulesBody `json:"all"`
 }
 
 // budgetBody is fw.Budget with a deadline that is a Go duration string,
@@ -353,8 +355,19 @@ func checkGlobs(field string, globs []string) error {
 	return nil
 }
 
+// maxRulesDepth bounds how deeply All clauses nest in a request profile.
+const maxRulesDepth = 8
+
 // rules validates the body and converts it.
 func (r *rulesBody) rules() (*fw.Rules, error) {
+	return r.rulesAt(0)
+}
+
+// rulesAt converts the body at a nesting depth of All clauses.
+func (r *rulesBody) rulesAt(depth int) (*fw.Rules, error) {
+	if depth > maxRulesDepth {
+		return nil, fmt.Errorf("profile.policy.all nests more than %d levels", maxRulesDepth)
+	}
 	def := strings.ToLower(strings.TrimSpace(r.Default))
 	switch def {
 	case "", "allow", "ask", "deny":
@@ -377,7 +390,15 @@ func (r *rulesBody) rules() (*fw.Rules, error) {
 			}
 		}
 	}
-	return &fw.Rules{Default: def, Allow: r.Allow, Ask: r.Ask, Deny: r.Deny}, nil
+	out := &fw.Rules{Default: def, Allow: r.Allow, Ask: r.Ask, Deny: r.Deny}
+	for i := range r.All {
+		c, err := r.All[i].rulesAt(depth + 1)
+		if err != nil {
+			return nil, fmt.Errorf("profile.policy.all[%d]: %w", i, err)
+		}
+		out.All = append(out.All, *c)
+	}
+	return out, nil
 }
 
 func (s *server) createRun(w http.ResponseWriter, r *http.Request) {

@@ -100,6 +100,17 @@ func (a *Agent) ProfileGrants(ctx context.Context, p AgentProfile) ([]ToolGrant,
 // patternRules returns the rules with a pattern whose tool part matches the
 // tool name, deny first, then ask, then allow, without duplicates.
 func patternRules(rules []Rules, tool string) []PatternRule {
+	var clauses []Rules
+	var collect func(Rules)
+	collect = func(r Rules) {
+		clauses = append(clauses, r)
+		for _, child := range r.All {
+			collect(child)
+		}
+	}
+	for _, r := range rules {
+		collect(r)
+	}
 	var out []PatternRule
 	seen := map[PatternRule]bool{}
 	add := func(verdict string, list []string) {
@@ -119,13 +130,13 @@ func patternRules(rules []Rules, tool string) []PatternRule {
 			}
 		}
 	}
-	for _, r := range rules {
+	for _, r := range clauses {
 		add("deny", r.Deny)
 	}
-	for _, r := range rules {
+	for _, r := range clauses {
 		add("ask", r.Ask)
 	}
-	for _, r := range rules {
+	for _, r := range clauses {
 		add("allow", r.Allow)
 	}
 	return out

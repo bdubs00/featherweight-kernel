@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -129,6 +130,9 @@ func (a *Agent) Spawner() Spawner { return a.spawner }
 // both. A remote child acts as the person of the parent, gets the budget
 // of the parent as its cap, and is recorded in the ledger of the parent.
 func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (*Run, error) {
+	if a.cfg.Spawn.Disabled {
+		return nil, fmt.Errorf("%w: spawning is disabled", ErrSpawnLimit)
+	}
 	if a.spawner == nil {
 		req.Parent = parent
 		return a.start(ctx, req)
@@ -141,11 +145,17 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("%w: parent run %s not found", ErrInvalidRequest, parent)
 	}
+	q := p.queuedData()
+	// Rules travel as data. A custom or external policy needs an explicit
+	// remote enforcement protocol; sharing an image does not prove that
+	// the receiving process has the same policy or control-plane binding.
+	if !a.rulesPolicy {
+		return nil, fmt.Errorf("%w: the policy of this agent does not travel to a child in another process", ErrInvalidRequest)
+	}
 	depth := p.depth + 1
 	if max := a.cfg.Spawn.MaxDepth; max > 0 && depth > max {
 		return nil, fmt.Errorf("%w: a child at depth %d is deeper than spawn.maxDepth %d", ErrSpawnLimit, depth, max)
 	}
-	q := p.queuedData()
 	req.Parent = ""
 	req.Principal, req.PrincipalKind = q.Principal, q.PrincipalKind
 	req.Origin = OriginTool
@@ -166,17 +176,14 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		b.Deadline = left
 	}
 	req.Budget = &b
-	// The child gets at most the tools of the parent. A child without a
-	// tool list gets the list of the parent; a child with one keeps it,
-	// because the other process cannot compare the two.
-	if parentTools := a.profileOf(q).Tools; parentTools != nil && (req.Profile == nil || req.Profile.Tools == nil) {
-		prof := AgentProfile{}
-		if req.Profile != nil {
-			prof = *req.Profile
-		}
-		prof.Tools = append([]string(nil), parentTools...)
-		req.Profile = &prof
+	// The child gets at most the tools and the rules of the parent: the
+	// other process cannot compare the two, so this process composes them
+	// into the inline profile of the child before the spawner travels it.
+	prof, err := a.childProfile(ctx, p, req, depth)
+	if err != nil {
+		return nil, err
 	}
+	req.Profile = prof
 	k.mu.Lock()
 	if max := a.cfg.Spawn.MaxChildren; max > 0 && k.kids[parent] >= max {
 		k.mu.Unlock()
@@ -203,6 +210,92 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	k.mu.Unlock()
 	a.decorateChild(child, ref)
 	return child, nil
+}
+
+// childProfile returns the inline profile that travels with a child run in
+// another process, where the child cannot walk the tree of the caller.
+// Rules retain their independent defaults. Tool names are a snapshot of
+// the effective intersection, including opt-in restrictions, even for an
+// unrestricted parent. New or disconnected tools are not granted later.
+func (a *Agent) childProfile(ctx context.Context, parent *runState, req RunRequest, depth int) (*AgentProfile, error) {
+	name := req.Agent
+	if name == "" {
+		name = "default"
+	}
+	if _, ok := a.profiles()[name]; !ok && name != "default" {
+		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, name)
+	}
+	effective := a.profileNamed(name)
+	out := AgentProfile{}
+	if req.Profile != nil {
+		effective = effective.Overlay(*req.Profile)
+		out = *req.Profile
+	}
+	ancestors := a.lineage(parent)
+	merged := a.cfg.Policy.Rules
+	var chain [][]string
+	for _, anc := range ancestors {
+		prof := a.profileOf(anc.queuedData())
+		chain = append(chain, prof.Tools)
+		if prof.Policy != nil {
+			merged = MergeRules(merged, *prof.Policy)
+		}
+	}
+	if effective.Policy != nil {
+		merged = MergeRules(merged, *effective.Policy)
+	}
+	if max := a.cfg.Spawn.MaxDepth; max > 0 && depth >= max {
+		merged = MergeRules(merged, Rules{Deny: []string{"spawn_task"}})
+	}
+	chain = append(chain, effective.Tools)
+	specs, err := a.ToolSpecs(WithRunInfo(WithAgent(ctx, a), a.runInfo(parent)))
+	if err != nil {
+		return nil, fmt.Errorf("fw: list the tools of the agent: %w", err)
+	}
+	out.Tools = concreteToolNames(specs, chain)
+	if len(out.Tools) == 0 && anyGlobs(chain) {
+		return nil, fmt.Errorf("%w: the tools of the child and the tools of the runs above it share no tool", ErrInvalidRequest)
+	}
+	if len(out.Tools) == 0 {
+		// Tool-free actors can still delegate reasoning. Empty Tools means
+		// unrestricted, so a deny-all policy makes this empty cap explicit.
+		merged = MergeRules(merged, Rules{Deny: []string{"*"}})
+	}
+	out.Policy = &merged
+	out.TimeZone = effective.TimeZone
+	if out.TimeZone == "" {
+		out.TimeZone = a.zoneNameOf(ctx, parent)
+	}
+	return &out, nil
+}
+
+// anyGlobs reports whether one list in a chain restricts the tools.
+func anyGlobs(chain [][]string) bool {
+	for _, g := range chain {
+		if g != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func concreteToolNames(specs []ToolSpec, chain [][]string) []string {
+	var out []string
+	for _, spec := range specs {
+		ok := true
+		for _, globs := range chain {
+			if !toolAllowed(globs, spec) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			// Names can contain glob metacharacters (for example from a tool
+			// source). Escape them before using them as profile patterns.
+			out = append(out, strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`, `]`, `\]`).Replace(spec.Name))
+		}
+	}
+	return out
 }
 
 // remoteChild returns where a remote child lives.

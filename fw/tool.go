@@ -113,6 +113,44 @@ func brieferOf(t Tool) (Briefer, bool) {
 	return nil, false
 }
 
+// AnsweredQuestion is one recorded question of a tool call and the decision
+// that answered it. Request is the stored fw.approval.requested with a form
+// schema, and Decision is its fw.approval.decided. Both come from the ledger
+// of the run.
+type AnsweredQuestion struct {
+	Request  ApprovalRequestedData `json:"request"`
+	Decision ApprovalDecidedData   `json:"decision"`
+}
+
+// Continuer is a tool that can complete a call whose question a restart cut
+// off. A call that waits for an answer dies with the process, and the answer
+// lands in the ledger without a tool result. On resume the kernel offers
+// such a call to the tool with the questions of the call and their decided
+// answers, so the tool completes the call from the ledger alone.
+//
+// Continue must answer the call from the answers and nothing else. It must
+// not run the work of the call again, must not ask a new question, and must
+// not start anything that runs past the call. The kernel gives Continue a
+// context with no asker, so a tool that asks again there fails. A tool that
+// cannot answer a call this way does not implement the interface, and the
+// kernel then follows the rerun-after-resume gate of a non-idempotent tool.
+//
+// The kernel finds a Continuer behind middleware that has an Unwrap method.
+type Continuer interface {
+	Continue(ctx context.Context, input json.RawMessage, answered []AnsweredQuestion) (ToolResult, error)
+}
+
+// continuerOf returns the Continuer behind t and its middleware, if any.
+func continuerOf(t Tool) (Continuer, bool) {
+	for depth := 0; t != nil && depth < 16; depth++ {
+		if c, ok := t.(Continuer); ok {
+			return c, true
+		}
+		t = unwrapTool(t)
+	}
+	return nil, false
+}
+
 // ToolSource provides tools that change at runtime, such as an MCP server.
 type ToolSource interface {
 	Tools(ctx context.Context) ([]Tool, error)

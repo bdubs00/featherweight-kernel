@@ -388,15 +388,31 @@ func TestMergeRulesAndOverlay(t *testing.T) {
 	a := Rules{Default: "allow", Allow: []string{"x"}, Ask: []string{"destructive"}}
 	b := Rules{Default: "ask", Deny: []string{"rm"}, Ask: []string{"destructive", "send"}}
 	m := MergeRules(a, b)
-	if m.Default != "ask" || strings.Join(m.Ask, ",") != "destructive,send" || strings.Join(m.Deny, ",") != "rm" || strings.Join(m.Allow, ",") != "x" {
-		t.Fatalf("merged = %+v", m)
+	// The merged rules hold both sides as clauses. The verdict of a call is
+	// exactly the stricter verdict of the two sides: x runs on a and needs
+	// an answer on b, so the merged rules ask.
+	if d := decideRules(t, m, ToolCall{Spec: ToolSpec{Name: "x"}}); d.Verdict != VerdictAsk {
+		t.Fatalf("merged x = %s, want ask", d.Verdict)
+	}
+	if d := decideRules(t, m, ToolCall{Spec: ToolSpec{Name: "rm"}}); d.Verdict != VerdictDeny {
+		t.Fatalf("merged rm = %s, want deny", d.Verdict)
+	}
+	if d := decideRules(t, m, ToolCall{Spec: ToolSpec{Name: "send"}}); d.Verdict != VerdictAsk {
+		t.Fatalf("merged send = %s, want ask", d.Verdict)
 	}
 	base := AgentProfile{Name: "base", System: "s", Instructions: []string{"i1"}, Tools: []string{"a"}, Policy: &a, Budget: &Budget{MaxTurns: 3, Deadline: time.Hour}}
 	over := AgentProfile{Instructions: []string{"i2"}, Tools: []string{"b"}, Model: "fast", Policy: &b, Budget: &Budget{MaxTurns: 9}, Skills: []string{}}
 	got := base.Overlay(over)
+	// The overlay policy is the merged rules, and it cannot loosen a
+	// verdict of b: send stays ask and destructive stays ask.
 	if got.Name != "base" || got.System != "s" || strings.Join(got.Instructions, ",") != "i1,i2" || strings.Join(got.Tools, ",") != "b" ||
-		got.Model != "fast" || got.Policy.Default != "ask" || got.Budget.MaxTurns != 9 || got.Budget.Deadline != time.Hour || got.Skills == nil || len(got.Skills) != 0 {
+		got.Model != "fast" || got.Budget.MaxTurns != 9 || got.Budget.Deadline != time.Hour || got.Skills == nil || len(got.Skills) != 0 {
 		t.Fatalf("overlay = %+v", got)
+	}
+	if p := NewRulesPolicy(*got.Policy); p.Decide(context.Background(), ToolCall{Spec: ToolSpec{Name: "send"}}).Verdict != VerdictAsk ||
+		p.Decide(context.Background(), ToolCall{Spec: ToolSpec{Name: "destructive", Destructive: true}}).Verdict != VerdictAsk ||
+		p.Decide(context.Background(), ToolCall{Spec: ToolSpec{Name: "rm"}}).Verdict != VerdictDeny {
+		t.Fatalf("overlay policy = %+v", *got.Policy)
 	}
 }
 

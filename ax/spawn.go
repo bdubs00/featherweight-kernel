@@ -8,7 +8,7 @@ package ax
 // run through the atenet router with the static token of the fleet and the
 // person of the parent, and follows the run through the native API of the
 // child. The child Task gets FW_PARENT_RUN, FW_PARENT_MEMBER, and the depth
-// that spawn.maxDepth leaves it.
+// that spawn.maxDepth leaves it in FW_SPAWN_MAX_DEPTH.
 
 import (
 	"bytes"
@@ -37,9 +37,10 @@ func init() {
 
 // Variables that a child Task gets beyond the ones of its parent.
 const (
-	EnvParentRun     = "FW_PARENT_RUN"     // the id of the parent run
-	EnvParentMember  = "FW_PARENT_MEMBER"  // the parent process, "ax:<atespace>/<task>"
-	envSpawnMaxDepth = "FW_SPAWN_MAXDEPTH" // the depth that spawn.maxDepth leaves the child
+	EnvParentRun     = "FW_PARENT_RUN"      // the id of the parent run
+	EnvParentMember  = "FW_PARENT_MEMBER"   // the parent process, "ax:<atespace>/<task>"
+	EnvSpawnMaxDepth = "FW_SPAWN_MAX_DEPTH" // the levels below a child that spawn.maxDepth still allows
+	EnvSpawnDisabled = "FW_SPAWN_DISABLED"  // a leaf has no remaining delegation depth
 )
 
 // DefaultServer is the ax API server inside the cluster.
@@ -55,10 +56,14 @@ const (
 )
 
 // droppedEnv names the variables of the parent that a child does not get:
-// the ones that this file sets, and the fleet identity, which the child
-// derives from its own Task.
+// the ones that this file sets, under either spelling of the depth variable
+// that earlier revisions used, and the fleet identity, which the child
+// derives from its own Task. fw reads the depth from FW_SPAWN_MAX_DEPTH,
+// so an inherited value of either name would name the remaining depth of
+// the parent, not of the child, and would be a lie.
 var droppedEnv = map[string]bool{
-	EnvParentRun: true, EnvParentMember: true, envSpawnMaxDepth: true,
+	EnvParentRun: true, EnvParentMember: true, EnvSpawnMaxDepth: true, EnvSpawnDisabled: true,
+	"FW_SPAWN_MAXDEPTH":       true,
 	"FW_WORKBENCH_FLEET_NAME": true, "FW_WORKBENCH_FLEET_URL": true,
 }
 
@@ -207,13 +212,22 @@ func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run) *
 		&v1alpha1.EnvVar{Name: EnvParentRun, Value: parent.ID},
 		&v1alpha1.EnvVar{Name: EnvParentMember, Value: "ax:" + atespace + "/" + task.Metadata.Name},
 	)
+	// Zero maxDepth means unlimited, so a separate flag represents an
+	// exhausted allowance. It also protects direct Go child creation and
+	// custom delegation tools, independently of spawn_task policy rules.
+	disabled := s.cfg.Spawn.Disabled
 	if max := s.cfg.Spawn.MaxDepth; max > 0 {
-		left := max - parent.Depth - 1
-		if left < 0 {
-			left = 0
+		if left := max - parent.Depth - 1; left >= 1 {
+			spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: EnvSpawnMaxDepth, Value: fmt.Sprint(left)})
+		} else {
+			disabled = true
 		}
-		spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: envSpawnMaxDepth, Value: fmt.Sprint(left)})
+	} else {
+		// Preserve an explicitly unlimited tree instead of picking up the
+		// child's default finite maxDepth from its configuration file.
+		spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: EnvSpawnMaxDepth, Value: "0"})
 	}
+	spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: EnvSpawnDisabled, Value: fmt.Sprint(disabled)})
 	r := task.Spec.Resources
 	if r.Requests != (ResourceList{}) || r.Limits != (ResourceList{}) {
 		spec.Resources = &v1alpha1.ResourcesSpec{
@@ -290,7 +304,34 @@ type profileBody struct {
 	Tools        []string    `json:"tools,omitempty"`
 	Model        string      `json:"model,omitempty"`
 	Effort       string      `json:"effort,omitempty"`
+	TimeZone     string      `json:"timeZone,omitempty"`
+	Policy       *rulesBody  `json:"policy,omitempty"`
 	Budget       *budgetBody `json:"budget,omitempty"`
+}
+
+// rulesBody is fw.Rules in the shape that the native API takes.
+type rulesBody struct {
+	Default string      `json:"default,omitempty"`
+	Allow   []string    `json:"allow,omitempty"`
+	Ask     []string    `json:"ask,omitempty"`
+	Deny    []string    `json:"deny,omitempty"`
+	All     []rulesBody `json:"all,omitempty"`
+}
+
+// rulesOf converts the rules of a profile. It returns nil for nil, so
+// a profile without rules stays a profile without rules and the rules of
+// the child process alone hold. The kernel of the parent composes the rules
+// of a child with the base rules of this process before Spawn travels it;
+// this conversion states them the same words that the children read.
+func rulesOf(r *fw.Rules) *rulesBody {
+	if r == nil {
+		return nil
+	}
+	out := &rulesBody{Default: r.Default, Allow: r.Allow, Ask: r.Ask, Deny: r.Deny}
+	for i := range r.All {
+		out.All = append(out.All, *rulesOf(&r.All[i]))
+	}
+	return out
 }
 
 type budgetBody struct {
@@ -320,7 +361,7 @@ func bodyOf(req fw.RunRequest) runBody {
 		Metadata: req.Metadata, Principal: req.Principal, PrincipalKind: req.PrincipalKind}
 	if p := req.Profile; p != nil {
 		body.Profile = &profileBody{System: p.System, Instructions: p.Instructions, Skills: p.Skills, Tools: p.Tools,
-			Model: p.Model, Effort: p.Effort, Budget: budgetOf(p.Budget)}
+			Model: p.Model, Effort: p.Effort, TimeZone: p.TimeZone, Policy: rulesOf(p.Policy), Budget: budgetOf(p.Budget)}
 	}
 	return body
 }

@@ -65,12 +65,21 @@ func (f PolicyFunc) Decide(ctx context.Context, call ToolCall) Decision { return
 // "docs/../secrets/a" does not pass a rule that allows "docs/*".
 //
 // Deny wins over Ask, and Ask wins over Allow. Default applies when no rule
-// matches; it is "allow" when empty.
+// matches; it is "allow" when empty. Empty Rules allow every call.
+//
+// All holds independent policy clauses. Each clause decides the call by
+// itself, with its own lists and its own nested clauses. The effective
+// verdict of the rules is the stricter of the verdict that the own fields
+// give the call and of the verdict of every clause: a call runs only when
+// the own fields and every clause allow it, and one clause that denies or
+// asks holds. Empty All adds nothing.
 type Rules struct {
 	Default string   `yaml:"default,omitempty" json:"default,omitempty"`
 	Allow   []string `yaml:"allow,omitempty" json:"allow,omitempty"`
 	Ask     []string `yaml:"ask,omitempty" json:"ask,omitempty"`
 	Deny    []string `yaml:"deny,omitempty" json:"deny,omitempty"`
+	// All holds the independent clauses of a conjunction, see the type doc.
+	All []Rules `yaml:"all,omitempty" json:"all,omitempty"`
 }
 
 // DefaultRules allow read-only tools, ask before destructive tools, and deny nothing.
@@ -78,53 +87,47 @@ func DefaultRules() Rules {
 	return Rules{Default: "allow", Ask: []string{"destructive"}}
 }
 
-// MergeRules returns the rules that are at least as strict as a and as b:
-// the union of the deny lists, the union of the ask lists, the allow list of
-// a followed by the allow list of b, and the stricter default.
+// MergeRules returns the rules of the conjunction of a and b: for every
+// tool call, the verdict of the merged rules is exactly the stricter of the
+// verdict that a gives the call and the verdict that b gives the call.
+//
+// The merged rules keep the two sides as independent clauses in All, each
+// with its own lists and defaults. No list intersection or default
+// summarization happens: globs overlap and differ, and an own default and
+// an ask in the same clause keep their exact meaning. An own Default of
+// "allow" in a clause stays allow; it can never widen the conjunction,
+// because the merged verdict is the stricter one.
+//
+// A side that holds no own fields, only clauses, contributes its clauses
+// instead of a wrapper, so a chain of merges does not nest. When a and b
+// hold policies of independent authors, such as the base policy of the
+// configuration and the policy of a profile, a parent and a child, the
+// merged rules preserve their conjunction.
 func MergeRules(a, b Rules) Rules {
-	out := Rules{
-		Allow: appendUnique(append([]string(nil), a.Allow...), b.Allow...),
-		Ask:   appendUnique(append([]string(nil), a.Ask...), b.Ask...),
-		Deny:  appendUnique(append([]string(nil), a.Deny...), b.Deny...),
-	}
-	da, db := defaultVerdict(a.Default), defaultVerdict(b.Default)
-	if verdictRank(db) > verdictRank(da) {
-		out.Default = strings.ToLower(b.Default)
-	} else {
-		out.Default = strings.ToLower(a.Default)
-	}
-	return out
+	return Rules{All: append(rulesClauses(a), rulesClauses(b)...)}
 }
 
-func appendUnique(dst []string, more ...string) []string {
-	for _, m := range more {
-		found := false
-		for _, d := range dst {
-			if d == m {
-				found = true
-				break
-			}
+// rulesClauses returns the independent clauses of the conjunction of r. A
+// wrapper that holds no own fields reduces to its clauses, nested ones
+// included, so a chain of merges stays shallow. A side with own fields
+// stays one clause; its own fields keep their exact meaning inside it.
+func rulesClauses(r Rules) []Rules {
+	if r.Default == "" && len(r.Allow) == 0 && len(r.Ask) == 0 && len(r.Deny) == 0 {
+		var out []Rules
+		for _, c := range r.All {
+			out = append(out, rulesClauses(c)...)
 		}
-		if !found {
-			dst = append(dst, m)
-		}
+		return out
 	}
-	return dst
+	return []Rules{r}
 }
 
-func defaultVerdict(s string) Verdict {
-	switch strings.ToLower(s) {
-	case "deny":
-		return VerdictDeny
-	case "ask":
-		return VerdictAsk
-	}
-	return VerdictAllow
-}
-
-// NewRulesPolicy builds a Policy from Rules.
+// NewRulesPolicy builds a Policy from Rules. The policy of the own fields
+// decides first, and every clause of All must agree: the effective verdict
+// is the stricter of the own verdict and of the verdict of every clause,
+// and clauses nest recursively. The reason names the clause that decided.
 func NewRulesPolicy(r Rules) Policy {
-	return PolicyFunc(func(_ context.Context, call ToolCall) Decision {
+	own := PolicyFunc(func(_ context.Context, call ToolCall) Decision {
 		for _, rule := range r.Deny {
 			if ruleMatches(rule, call, false) {
 				return Decision{Verdict: VerdictDeny, Reason: "rule: deny " + rule}
@@ -147,6 +150,22 @@ func NewRulesPolicy(r Rules) Policy {
 			return Decision{Verdict: VerdictAsk, Reason: "default"}
 		}
 		return Decision{Verdict: VerdictAllow, Reason: "default"}
+	})
+	if len(r.All) == 0 {
+		return own
+	}
+	compilers := make([]Policy, 0, len(r.All))
+	for _, c := range r.All {
+		compilers = append(compilers, NewRulesPolicy(c))
+	}
+	return PolicyFunc(func(ctx context.Context, call ToolCall) Decision {
+		d := own.Decide(ctx, call)
+		for _, c := range compilers {
+			if dc := c.Decide(ctx, call); verdictRank(dc.Verdict) > verdictRank(d.Verdict) {
+				d = dc
+			}
+		}
+		return d
 	})
 }
 

@@ -26,6 +26,11 @@ const cutNote = "\n\n[... %d bytes cut here; the result is limited to %d bytes. 
 // cut. An image or a document in a result counts with its size and is
 // dropped with a note when it does not fit. A call that outlives the
 // timeout gets an error result, and the tool sees its context end.
+//
+// A tool that can continue a resumed call (see Continuer) keeps the same
+// limits in its continuation. The middleware forwards the Continuer of the
+// tool behind it only when that tool is one, so an ordinary limited tool
+// never looks like a Continuer and never bypasses the rerun gate.
 func LimitTools(l ToolLimits) ToolMiddleware {
 	return func(t Tool) Tool {
 		spec := t.Spec()
@@ -33,7 +38,11 @@ func LimitTools(l ToolLimits) ToolMiddleware {
 		if lim == (Limit{}) {
 			return t
 		}
-		return &limitedTool{Tool: t, limit: lim}
+		lt := &limitedTool{Tool: t, limit: lim}
+		if _, ok := continuerOf(t); ok {
+			return &limitedContinuer{limitedTool: lt}
+		}
+		return lt
 	}
 }
 
@@ -82,6 +91,47 @@ func (t *limitedTool) Close() error {
 		return c.Close()
 	}
 	return nil
+}
+
+// limitedContinuer is a limited tool whose tool can continue a resumed
+// call. Its Continue holds the same bounds as its Call, so a continuation
+// cannot flood the context window or outlive the timeout. LimitTools
+// builds it only for a tool that is a Continuer behind the middleware, so
+// an ordinary limited tool keeps the rerun-after-resume gate.
+//
+// Any middleware that hides a Continuer and has an Unwrap method needs the
+// same forwarding if the limits of a continuation are to hold behind it:
+// find the Continuer with continuerOf at wrap time and wrap only then.
+type limitedContinuer struct {
+	*limitedTool
+}
+
+// Continue implements Continuer.
+func (t *limitedContinuer) Continue(ctx context.Context, input json.RawMessage, answered []AnsweredQuestion) (ToolResult, error) {
+	name := t.Tool.Spec().Name
+	c, ok := continuerOf(t.Tool)
+	if !ok {
+		return ToolResult{}, fmt.Errorf("fw: tool %s cannot continue from the recorded answers", name)
+	}
+	if n := t.limit.MaxInputBytes; n > 0 && len(input) > n {
+		return ErrorResult(fmt.Sprintf("%s: the input is %d bytes, and the limit is %d bytes. Send less data per call, for example by writing a file in parts.", name, len(input), n)), nil
+	}
+	if d := t.limit.Timeout; d > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, d, errToolTimeout)
+		defer cancel()
+	}
+	res, err := c.Continue(ctx, input, answered)
+	if err != nil && context.Cause(ctx) == errToolTimeout {
+		return ErrorResult(fmt.Sprintf("%s: the call did not finish within %s and was stopped. Try a smaller step.", name, t.limit.Timeout)), nil
+	}
+	if err != nil {
+		return res, err
+	}
+	if n := t.limit.MaxOutputBytes; n > 0 {
+		res = truncateResult(res, n)
+	}
+	return res, nil
 }
 
 // truncateResult bounds a result to n bytes of content. Text blocks are cut

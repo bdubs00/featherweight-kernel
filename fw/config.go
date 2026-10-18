@@ -353,6 +353,9 @@ type MemoryToolConfig struct {
 // Spawner, such as "ax", which runs each child in another process; empty
 // runs the children in this process (docs/ARCHITECTURE.md section 11.9).
 type SpawnConfig struct {
+	// Disabled forbids children even when MaxDepth is zero (unlimited).
+	// AX uses it when a child has exhausted its inherited depth allowance.
+	Disabled    bool   `yaml:"disabled" json:"disabled"`
 	MaxDepth    int    `yaml:"maxDepth" json:"maxDepth"`
 	MaxChildren int    `yaml:"maxChildren" json:"maxChildren"`
 	Driver      string `yaml:"driver,omitempty" json:"driver,omitempty"`

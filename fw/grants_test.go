@@ -75,6 +75,16 @@ func TestProfileGrantsOptionPolicy(t *testing.T) {
 	}
 }
 
+func TestProfileGrantsIncludesComposedPatterns(t *testing.T) {
+	a := newTestAgent(t, newScript().Model(), WithTools(grantTool("files", ToolSpec{ReadOnly: true})))
+	rules := MergeRules(Rules{Deny: []string{"files: path=secrets/*"}}, Rules{Ask: []string{"files: path=docs/*"}})
+	g := grantsByName(t, a, AgentProfile{Name: "x", Policy: &rules})["files"]
+	want := []PatternRule{{Verdict: "deny", Field: "path", Pattern: "secrets/*"}, {Verdict: "ask", Field: "path", Pattern: "docs/*"}}
+	if g.Verdict != "allow" || !slices.Equal(g.Patterns, want) {
+		t.Fatalf("composed grant = %+v", g)
+	}
+}
+
 // The configuration defines every profile but the ones that the loader read
 // from files, and SetProfiles keeps the defined ones as they are.
 func TestProfileLockedAndSetProfiles(t *testing.T) {

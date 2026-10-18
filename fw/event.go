@@ -193,6 +193,12 @@ type ToolRequestedData struct {
 	CallID string          `json:"callId"`
 	Input  json.RawMessage `json:"input"`
 	TaskID string          `json:"taskId,omitempty"` // MCP task handle, when the tool returned one
+	// Idempotent records ToolSpec.Idempotent at invocation time. False,
+	// including a missing field in an older event, requires the file ledger
+	// to fsync the intent before Append succeeds. Recovery still consults
+	// the current tool spec; this field does not pin the tool implementation
+	// or guarantee exactly-once effects.
+	Idempotent bool `json:"idempotent,omitempty"`
 }
 
 // ToolRespondedData is the payload of fw.tool.responded.

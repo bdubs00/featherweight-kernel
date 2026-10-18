@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/surface/native"
 	v1alpha1 "github.com/google/ax/pkg/apis/v1alpha1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -213,6 +216,13 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 // the fakes.
 func newSpawnerUnderTest(t *testing.T, ax *fakeAX, router *fakeRouter) *Spawner {
 	t.Helper()
+	return newSpawnerAt(t, ax, strings.TrimPrefix(router.URL, "http://"))
+}
+
+// newSpawnerAt stashes a parent Task and returns a spawner against the ax
+// fake and a router URL of its caller, which a test decides at will.
+func newSpawnerAt(t *testing.T, ax *fakeAX, routerURL string) *Spawner {
+	t.Helper()
 	prevTask, prevWS := Stashed()
 	t.Cleanup(func() { Stash(prevTask, prevWS) })
 	Stash(&Task{
@@ -221,8 +231,8 @@ func newSpawnerUnderTest(t *testing.T, ax *fakeAX, router *fakeRouter) *Spawner 
 		Spec: TaskSpec{
 			Image:   "ghcr.io/example/fw:toolbox",
 			Command: []string{"fw", "serve"},
-			Env: []EnvVar{{Name: "FW_MODEL", Value: "openai/x"}, {Name: "FW_WORKBENCH_FLEET_NAME", Value: "old"},
-				{Name: EnvParentRun, Value: "stale"}, {Name: "FW_API_TOKEN", Value: "fleet-secret"}},
+			Env: []EnvVar{{Name: "FW_MODEL", Value: "openai/x"}, {Name: "FW_WORKBENCH_FLEET_NAME", Value: "old"}, {Name: "FW_WORKBENCH_FLEET_URL", Value: "http://old"},
+				{Name: EnvParentRun, Value: "stale"}, {Name: "FW_SPAWN_MAX_DEPTH", Value: "9"}, {Name: "FW_SPAWN_MAXDEPTH", Value: "9"}, {Name: EnvSpawnDisabled, Value: "true"}, {Name: "FW_API_TOKEN", Value: "fleet-secret"}},
 			Resources:  ResourcesSpec{Requests: ResourceList{CPU: "500m", Memory: "1Gi"}},
 			Workspaces: []WorkspaceRef{{Name: "repo", Path: "/workspace/repo", Goal: "migrate everything"}},
 			Debug:      true,
@@ -231,7 +241,7 @@ func newSpawnerUnderTest(t *testing.T, ax *fakeAX, router *fakeRouter) *Spawner 
 	t.Setenv("FW_TEST_FLEET_TOKEN", "fleet-secret")
 	cfg := fw.DefaultConfig()
 	cfg.AX.Server = ax.addr
-	cfg.AX.Router = strings.TrimPrefix(router.URL, "http://")
+	cfg.AX.Router = routerURL
 	cfg.Auth.TokenEnv = "FW_TEST_FLEET_TOKEN"
 	cfg.Spawn.MaxDepth = 3
 	s, err := NewSpawner(cfg)
@@ -252,7 +262,8 @@ func TestSpawnCreatesAChildTaskAndStartsItsRun(t *testing.T) {
 	parent := &fw.Run{ID: "01PARENT", Depth: 0}
 	req := fw.RunRequest{Input: "migrate module x", Principal: "ada", PrincipalKind: fw.KindUser,
 		Metadata: map[string]string{fw.MetaParent: parent.ID}, Budget: &fw.Budget{MaxTurns: 3, Deadline: 5 * time.Minute},
-		Profile: &fw.AgentProfile{Tools: []string{"files", "bash"}}}
+		Profile: &fw.AgentProfile{Tools: []string{"files", "bash"}, TimeZone: "America/Chicago",
+			Policy: &fw.Rules{Default: "deny", Deny: []string{"bash"}}}}
 	run, member, err := s.Spawn(ctx, parent, req)
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -278,8 +289,28 @@ func TestSpawnCreatesAChildTaskAndStartsItsRun(t *testing.T) {
 	for _, e := range task.GetSpec().GetEnv() {
 		env[e.GetName()] = e.GetValue()
 	}
-	if env["FW_MODEL"] != "openai/x" || env[EnvParentRun] != "01PARENT" || env[EnvParentMember] != "ax:team/migrator" || env[envSpawnMaxDepth] != "2" || env["FW_API_TOKEN"] != "fleet-secret" {
+	if env["FW_MODEL"] != "openai/x" || env[EnvParentRun] != "01PARENT" || env[EnvParentMember] != "ax:team/migrator" || env[EnvSpawnMaxDepth] != "2" || env["FW_API_TOKEN"] != "fleet-secret" {
 		t.Fatalf("env = %v", env)
+	}
+	// An inherited depth variable under either name is out, and the real
+	// depth variable appears once.
+	depths := 0
+	for _, e := range task.GetSpec().GetEnv() {
+		if e.GetName() == "FW_SPAWN_MAXDEPTH" || e.GetName() == EnvSpawnMaxDepth {
+			depths++
+		}
+	}
+	if depths != 1 {
+		t.Fatalf("the child kept %d depth variables", depths)
+	}
+	disabledVars := 0
+	for _, e := range task.GetSpec().GetEnv() {
+		if e.GetName() == EnvSpawnDisabled {
+			disabledVars++
+		}
+	}
+	if disabledVars != 1 || env[EnvSpawnDisabled] != "false" {
+		t.Fatalf("child kept stale disabled setting: %v", task.GetSpec().GetEnv())
 	}
 	if _, ok := env["FW_WORKBENCH_FLEET_NAME"]; ok {
 		t.Fatal("the child kept the fleet name of the parent")
@@ -304,6 +335,14 @@ func TestSpawnCreatesAChildTaskAndStartsItsRun(t *testing.T) {
 	profile, _ := body["profile"].(map[string]any)
 	if tools, _ := profile["tools"].([]any); len(tools) != 2 {
 		t.Fatalf("profile = %v", profile)
+	}
+	// The time zone and the rules of the profile travel with the run.
+	if profile["timeZone"] != "America/Chicago" {
+		t.Fatalf("the time zone of the profile did not travel: %v", profile)
+	}
+	policy, _ := profile["policy"].(map[string]any)
+	if policy == nil || policy["default"] != "deny" || joinAny(policy["deny"], "deny") != "bash" {
+		t.Fatalf("the policy of the profile did not travel: %v", profile)
 	}
 	if len(keys) != 2 || keys[0] != keys[1] || !strings.HasPrefix(keys[0], "spawn:01PARENT:team/") {
 		t.Fatalf("idempotency keys = %v", keys)
@@ -389,3 +428,145 @@ func TestNewSpawnerNeedsTheRouter(t *testing.T) {
 		}
 	}
 }
+
+// joinAny flattens a JSON list of strings from a decoded body for one
+// assertion.
+func joinAny(v any, field string) string {
+	list, _ := v.([]any)
+	var out []string
+	for _, e := range list {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// TestChildTaskCarriesTheDepthTheConfigExpects walks the depth remnant that
+// the child Task carries as the configuration expects it. A child past the
+// depth of the tree gets no depth variable, because FW_SPAWN_MAX_DEPTH = 0
+// means unlimited in the configuration; FW_SPAWN_DISABLED represents an
+// exhausted allowance independently of the tool policy.
+func TestChildTaskCarriesTheDepthTheConfigExpects(t *testing.T) {
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	s := newSpawnerUnderTest(t, ax, router)
+	base := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img"}}
+	for depth, want := range map[int]string{0: "2", 1: "1", 2: "", 3: ""} {
+		child := s.childTask(base, "team", "c", &fw.Run{ID: "01P", Depth: depth})
+		env := map[string]string{}
+		for _, e := range child.Spec.Env {
+			env[e.Name] = e.Value
+		}
+		if got := env[EnvSpawnMaxDepth]; got != want {
+			t.Fatalf("depth %d leaves FW_SPAWN_MAX_DEPTH = %q, want %q", depth, got, want)
+		}
+		if disabled := env[EnvSpawnDisabled] == "true"; disabled != (depth >= 2) {
+			t.Fatalf("depth %d disabled=%v", depth, disabled)
+		}
+	}
+	s.cfg.Spawn.MaxDepth = 0
+	child := s.childTask(base, "team", "c", &fw.Run{ID: "01P", Depth: 20})
+	for _, e := range child.Spec.Env {
+		if (e.Name == EnvSpawnMaxDepth && e.Value != "0") || (e.Name == EnvSpawnDisabled && e.Value != "false") {
+			t.Fatalf("unlimited depth changed meaning: %v", child.Spec.Env)
+		}
+	}
+}
+
+// TestSpawnCarriesTheComposedProfileThroughTheRoundTrip runs a child Task
+// run against a real native surface: the ax encoding carries the policy and
+// the time zone of the profile, the native surface decodes them, and the
+// child run keeps them in its ledger.
+func TestSpawnCarriesTheComposedProfileThroughTheRoundTrip(t *testing.T) {
+	ax := newFakeAX(t)
+	child, ledger := childProcessAgent(t)
+	srv, err := child.Handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(srv)
+	t.Cleanup(httpServer.Close)
+	s := newSpawnerAt(t, ax, strings.TrimPrefix(httpServer.URL, "http://"))
+
+	parent := &fw.Run{ID: "01PARENT", Depth: 0}
+	policy := fw.MergeRules(fw.Rules{Default: "deny", Allow: []string{"files", "bash: git status"}}, fw.Rules{Ask: []string{"files"}})
+	req := fw.RunRequest{Input: "collect the summaries", Principal: "ada", PrincipalKind: fw.KindUser,
+		Metadata: map[string]string{fw.MetaParent: parent.ID},
+		Profile: &fw.AgentProfile{System: "Be careful.", Tools: []string{"files", "bash*"}, TimeZone: "America/Chicago",
+			Policy: &policy}}
+	run, member, err := s.Spawn(context.Background(), parent, req)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if !strings.HasPrefix(member, "ax:team/migrator-") {
+		t.Fatalf("member = %q", member)
+	}
+	done, err := s.WaitFor(context.Background(), member, run.ID, func(r *fw.Run) bool { return r.State.Terminal() })
+	if err != nil || done.State != fw.StateCompleted || done.Output != "child done" {
+		t.Fatalf("child run = %+v, %v", done, err)
+	}
+	var queued fw.RunQueuedData
+	for ev, err := range ledger.Read(context.Background(), run.ID, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Type == fw.EvRunQueued {
+			if err := ev.Decode(&queued); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if queued.Profile == nil || queued.Profile.Policy == nil {
+		t.Fatalf("queued profile = %+v", queued.Profile)
+	}
+	p := queued.Profile
+	if p.TimeZone != "America/Chicago" || joinAnyListOf(p.Tools) != "files,bash*" || p.System != "Be careful." {
+		t.Fatalf("the profile of the child run lost its shape: %+v", p)
+	}
+	for _, tc := range []struct {
+		name, input string
+		want        fw.Verdict
+	}{
+		{"files", `{}`, fw.VerdictAsk},
+		{"bash", `{"command":"git status"}`, fw.VerdictAllow},
+		{"bash", `{"command":"git push"}`, fw.VerdictDeny},
+		{"http", `{}`, fw.VerdictDeny},
+	} {
+		got := fw.NewRulesPolicy(*p.Policy).Decide(context.Background(), fw.ToolCall{Spec: fw.ToolSpec{Name: tc.name}, Input: json.RawMessage(tc.input)})
+		if got.Verdict != tc.want {
+			t.Fatalf("policy after AX/native roundtrip for %s: %+v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if queued.Metadata[fw.MetaParent] != "01PARENT" {
+		t.Fatalf("the child run lost its parent: %v", queued.Metadata)
+	}
+}
+
+// childProcessAgent is the agent that a child Task runs: one run that a
+// fake model finishes at once, its in-process ledger, and the native
+// surface.
+func childProcessAgent(t *testing.T) (*fw.Agent, fw.Ledger) {
+	t.Helper()
+	m := fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
+		return &fw.Response{Content: []fw.Block{fw.Text("child done")}, StopReason: fw.StopEndTurn, Usage: fw.Usage{InputTokens: 1, OutputTokens: 1}}, nil
+	}}
+	ledger := fw.NewMemLedger()
+	a, err := fw.New(fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}),
+		fw.WithModelName("anthropic/claude-opus-5-5"), fw.WithModel(m), fw.WithLedger(ledger),
+		fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))),
+		fw.WithSurfaces(native.New()))
+	if err != nil {
+		t.Fatalf("fw.New: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		a.Close(ctx)
+	})
+	return a, ledger
+}
+
+// joinAnyListOf joins a list of strings for one assertion.
+func joinAnyListOf(list []string) string { return strings.Join(list, ",") }

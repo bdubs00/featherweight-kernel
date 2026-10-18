@@ -309,6 +309,9 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	var parentRun *Run
 	depth := 0
 	if req.Parent != "" {
+		if a.cfg.Spawn.Disabled {
+			return nil, fmt.Errorf("%w: spawning is disabled", ErrSpawnLimit)
+		}
 		p, err := k.lookup(req.Parent)
 		if err != nil {
 			return nil, fmt.Errorf("%w: parent run %s not found", ErrInvalidRequest, req.Parent)
