@@ -5,10 +5,14 @@ package fw
 // up to one sequence number. The branch keeps the conversation of the
 // source to that point, and with it the prompt cache prefix of the
 // provider, and goes on from there on its own: with a new message, with
-// another model, or the same way again. The source does not change.
+// another model, or the same way again. The source does not change. A
+// branch runs in this process, or, with Spawn and a Spawner that is a
+// Forker, in another process such as a child Task, where it has a
+// workspace of its own.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strconv"
@@ -33,6 +37,10 @@ type ForkRequest struct {
 	Model string `json:"model,omitempty"`
 	// Metadata adds to the metadata of the branch.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// Spawn runs the branch in another process through the Spawner of the
+	// agent, which must be a Forker. The source records the branch as a
+	// child, so Get and WaitFor reach it there.
+	Spawn bool `json:"spawn,omitempty"`
 	// Origin records where the branch came from, such as OriginHTTP.
 	Origin string `json:"-"`
 }
@@ -46,7 +54,7 @@ type ForkRequest struct {
 // goes on at once, as a resumed run does: a model request without an
 // answer is sent again, a pending approval waits for its decision. The
 // caller needs ActionRunOperate on the source and ActionAgentRun on its
-// agent.
+// agent. With req.Spawn, the branch runs in another process (Forker).
 func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, error) {
 	k := a.k
 	if k.isDraining() {
@@ -66,18 +74,105 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	if err != nil {
 		return nil, err
 	}
+	kept, q, err := a.branchOf(ctx, src, rs.queuedData(), evs, &req)
+	if err != nil {
+		return nil, err
+	}
+	if !req.Spawn {
+		return a.appendBranch(q, kept, req)
+	}
+	forker, ok := a.spawner.(Forker)
+	if !ok {
+		return nil, fmt.Errorf("%w: no spawner of this process runs a branch in another process; set spawn.driver", ErrInvalidRequest)
+	}
+	if a.cfg.Spawn.Disabled {
+		return nil, fmt.Errorf("%w: spawning is disabled", ErrSpawnLimit)
+	}
+	depth := rs.depth + 1
+	if max := a.cfg.Spawn.MaxDepth; max > 0 && depth > max {
+		return nil, fmt.Errorf("%w: a branch at depth %d is deeper than spawn.maxDepth %d", ErrSpawnLimit, depth, max)
+	}
+	k.mu.Lock()
+	if max := a.cfg.Spawn.MaxChildren; max > 0 && k.kids[src] >= max {
+		k.mu.Unlock()
+		return nil, fmt.Errorf("%w: run %s already started spawn.maxChildren (%d) child runs", ErrSpawnLimit, src, max)
+	}
+	k.kids[src]++
+	k.mu.Unlock()
+	child, member, err := forker.Fork(ctx, rs.snapshot(), kept, req)
+	if err != nil || child == nil || child.ID == "" || member == "" {
+		k.mu.Lock()
+		k.kids[src]--
+		k.mu.Unlock()
+		if err == nil {
+			err = errors.New("fw: the spawner returned no branch")
+		}
+		return nil, err
+	}
+	ref := childRef{parent: src, member: member, depth: depth}
+	if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: child.ID, Member: member}); err != nil {
+		a.log.Warn("record a remote branch", "run", src, "branch", child.ID, "member", member, "error", err)
+	}
+	k.mu.Lock()
+	k.remote[child.ID] = ref
+	k.mu.Unlock()
+	a.decorateChild(child, ref)
+	a.log.Info("run branched in another process", "run", src, "branch", child.ID, "member", member, "seq", req.Seq)
+	return child, nil
+}
+
+// ForkEvents makes a branch from events that another process kept: the
+// fw.run.queued event first, adjusted for the branch, then the rest in
+// order. The native API serves it to a trusted caller, so a Forker can
+// start a branch on this process. The branch goes on as Fork describes.
+func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest) (*Run, error) {
+	if a.k.isDraining() {
+		return nil, ErrClosed
+	}
+	if len(events) == 0 || events[0].Type != EvRunQueued {
+		return nil, fmt.Errorf("%w: a branch begins with fw.run.queued", ErrInvalidRequest)
+	}
+	var q RunQueuedData
+	if err := events[0].Decode(&q); err != nil {
+		return nil, fmt.Errorf("%w: the fw.run.queued event of the branch does not decode: %v", ErrInvalidRequest, err)
+	}
+	if req.Model != "" {
+		prof := AgentProfile{}
+		if q.Profile != nil {
+			prof = *q.Profile
+		}
+		prof.Model = req.Model
+		q.Profile = &prof
+	}
+	if err := a.checkProfile(q.Profile); err != nil {
+		return nil, err
+	}
+	if err := a.checkModel(RunRequest{Agent: q.Agent, Profile: q.Profile}); err != nil {
+		return nil, err
+	}
+	if _, ok := a.profiles()[q.Agent]; !ok && q.Agent != "default" {
+		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, q.Agent)
+	}
+	if req.Origin != "" {
+		q.Origin = req.Origin
+	}
+	return a.appendBranch(q, events, req)
+}
+
+// branchOf prepares a branch of src: the kept events and the queued data of
+// the branch, with the person in ctx, the metadata of the branch, no
+// parent, and the model of the request. It fills req.Seq when it is zero.
+func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs []Event, req *ForkRequest) ([]Event, RunQueuedData, error) {
 	if len(evs) == 0 || evs[0].Type != EvRunQueued {
-		return nil, fmt.Errorf("fw: run %s: %w", src, ErrRunNotFound)
+		return nil, q, fmt.Errorf("fw: run %s: %w", src, ErrRunNotFound)
 	}
 	last := evs[len(evs)-1].Seq
 	if req.Seq == 0 {
 		req.Seq = last
 	}
 	if req.Seq > last {
-		return nil, fmt.Errorf("%w: the run %s has %d events, so a branch cannot keep %d", ErrInvalidRequest, src, last, req.Seq)
+		return nil, q, fmt.Errorf("%w: the run %s has %d events, so a branch cannot keep %d", ErrInvalidRequest, src, last, req.Seq)
 	}
-
-	q := rs.queuedData()
 	meta := maps.Clone(q.Metadata)
 	if meta == nil {
 		meta = map[string]string{}
@@ -103,11 +198,36 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 		}
 		prof.Model = req.Model
 		if err := a.checkProfile(&prof); err != nil {
-			return nil, err
+			return nil, q, err
 		}
 		q.Profile = &prof
 	}
+	kept := make([]Event, 0, len(evs))
+	for _, e := range evs {
+		if e.Seq > req.Seq {
+			break
+		}
+		if e.Type == EvRunChild {
+			continue // the children belong to the source
+		}
+		if e.Type == EvRunQueued {
+			ne, err := NewEvent(e.Subject, e.Type, q)
+			if err != nil {
+				return nil, q, err
+			}
+			ne.Seq, ne.Time = e.Seq, e.Time
+			e = ne
+		}
+		kept = append(kept, e)
+	}
+	return kept, q, nil
+}
 
+// appendBranch writes a branch into this process: a new run state, the kept
+// events under the new id, the message of the request, and then the resume
+// or the launch of the branch.
+func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*Run, error) {
+	k := a.k
 	id := NewID()
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
@@ -119,19 +239,8 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 		delete(k.runs, id)
 		k.mu.Unlock()
 	}
-	for _, e := range evs {
-		if e.Seq > req.Seq {
-			break
-		}
-		if e.Type == EvRunChild {
-			continue
-		}
-		var ne Event
-		if e.Type == EvRunQueued {
-			ne, err = NewEvent(id, e.Type, q)
-		} else {
-			ne, err = NewEvent(id, e.Type, e.Data)
-		}
+	for _, e := range kept {
+		ne, err := NewEvent(id, e.Type, e.Data)
 		if err != nil {
 			undo()
 			return nil, err
@@ -144,7 +253,7 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 			return nil, err
 		}
 	}
-	a.log.Info("run branched", "run", id, "from", src, "seq", req.Seq, "withMessage", req.Input != "")
+	a.log.Info("run branched", "run", id, "from", q.Metadata[MetaForkOf], "seq", q.Metadata[MetaForkSeq], "withMessage", req.Input != "")
 	if req.Input != "" {
 		if _, err := a.emit(nil, brs, EvMessageReceived, MessageReceivedData{Role: RoleUser, Content: []Block{Text(req.Input)}, Origin: req.Origin}); err != nil {
 			return nil, err

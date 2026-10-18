@@ -158,6 +158,19 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(run("running"))
 	})
+	mux.HandleFunc("POST /v1/runs/fork", func(w http.ResponseWriter, r *http.Request) {
+		if !guard(w, r) {
+			return
+		}
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.mu.Lock()
+		f.keys = append(f.keys, r.Header.Get("Idempotency-Key"))
+		f.body = body
+		f.mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "01BRANCH", "agent": "default", "state": "running", "usage": map[string]any{}})
+	})
 	mux.HandleFunc("GET /v1/runs/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if !guard(w, r) {
 			return
@@ -570,3 +583,30 @@ func childProcessAgent(t *testing.T) (*fw.Agent, fw.Ledger) {
 
 // joinAnyListOf joins a list of strings for one assertion.
 func joinAnyListOf(list []string) string { return strings.Join(list, ",") }
+
+// Fork creates a child Task as Spawn does and starts the branch there from
+// the kept events, with its own idempotency key.
+func TestForkCreatesAChildTaskAndStartsTheBranch(t *testing.T) {
+	ctx := context.Background()
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	s := newSpawnerUnderTest(t, ax, router)
+	parent := &fw.Run{ID: "01PARENT", Depth: 0}
+	events := []fw.Event{{Type: fw.EvRunQueued, Subject: "01PARENT", Seq: 1, Data: json.RawMessage(`{"agent":"default","input":"hello"}`)}, {Type: fw.EvRunStarted, Subject: "01PARENT", Seq: 2, Data: json.RawMessage(`{}`)}}
+	run, member, err := s.Fork(ctx, parent, events, fw.ForkRequest{Input: "try another way"})
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	if run.ID != "01BRANCH" || !strings.HasPrefix(member, "ax:team/migrator-") {
+		t.Fatalf("run = %+v, member %q", run, member)
+	}
+	if tasks := ax.created(); len(tasks) != 1 {
+		t.Fatalf("tasks = %d", len(tasks))
+	}
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	evs, _ := router.body["events"].([]any)
+	if len(evs) != 2 || router.body["input"] != "try another way" || len(router.keys) != 1 || !strings.HasPrefix(router.keys[0], "fork:01PARENT:team/migrator-") {
+		t.Fatalf("the child got body %v with keys %v", router.body, router.keys)
+	}
+}

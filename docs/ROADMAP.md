@@ -49,7 +49,7 @@ Done on 2026-10-18.
 ### Stage 4: Ledger and workspace branching (`fw fork`)
 
 1. **Kernel fork primitive:** Done on 2026-10-18. `Agent.Fork` and `POST /v1/runs/{id}/fork` branch a run at the sequence number `seq`: the branch keeps a copy of the events to that point, with the conversation and the prompt cache prefix of the provider, carries `fw.forkOf` and `fw.forkSeq`, goes on as a resumed run does, and takes a new message or another model (the kernel architecture, section 4.7).
-2. **Speculative child Tasks:** Combine `Fork` with `spawn.driver: ax` so a person or an agent can try alternative prompts, models, or tool choices in parallel AX Tasks and compare the resulting `fw.file.changed` diffs and check outputs.
+2. **Speculative child Tasks:** Done on 2026-10-18. `Fork` with `spawn` runs the branch in a child Task through the `ax` driver, which is a `Forker`: it creates the Task as `spawn_task` does and sends it the kept events through `POST /v1/runs/fork`. The source records the branch as a child, so a person follows it from the front, and each branch has the workspace of its own Task. The MCP tool `fork` of the workbench gives it to people.
 
 ### Stage 5: Final boundary and identity cleanup
 

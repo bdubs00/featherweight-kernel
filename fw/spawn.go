@@ -38,6 +38,15 @@ type Spawner interface {
 	Cancel(ctx context.Context, member, id string) error
 }
 
+// Forker is a Spawner that can start a branch of a run in another process
+// (fork.go). It receives the parent run, the events that the branch keeps,
+// with the fw.run.queued event already adjusted for the branch, and the
+// request. It returns the branch as the other process reports it and the
+// member that holds it, as Spawn does.
+type Forker interface {
+	Fork(ctx context.Context, parent *Run, events []Event, req ForkRequest) (*Run, string, error)
+}
+
 // SpawnerCtor builds a Spawner from the configuration.
 type SpawnerCtor func(ctx context.Context, cfg *Config) (Spawner, error)
 

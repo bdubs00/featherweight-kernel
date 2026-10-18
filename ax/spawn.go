@@ -86,6 +86,7 @@ type Spawner struct {
 }
 
 var _ fw.Spawner = (*Spawner)(nil)
+var _ fw.Forker = (*Spawner)(nil)
 
 // NewSpawner returns the spawner of the configuration. It needs ax.router,
 // because the native API of a child Task is reached through the router.
@@ -177,6 +178,54 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 	}
 	actor := atespace + "/" + child
 	run, err := s.startRun(ctx, actor, parent, req)
+	if err != nil {
+		s.deleteTask(client, atespace, child)
+		return nil, "", err
+	}
+	return run, "ax:" + actor, nil
+}
+
+// Fork implements fw.Forker: it creates a child Task as Spawn does and
+// starts the branch there with the kept events, through POST /v1/runs/fork
+// of the child. The branch has a workspace of its own, the one of the new
+// Task, so two branches never see each other's files.
+func (s *Spawner) Fork(ctx context.Context, parent *fw.Run, events []fw.Event, req fw.ForkRequest) (*fw.Run, string, error) {
+	task, _ := Stashed()
+	if task == nil {
+		return nil, "", errors.New("ax: this process is not an ax Task, so it cannot start a child Task")
+	}
+	atespace, name := Identity(task)
+	if atespace == "" || name == "" {
+		return nil, "", errors.New("ax: the Task of this process has no atespace or no name")
+	}
+	child, err := childName(name)
+	if err != nil {
+		return nil, "", err
+	}
+	client, err := s.ax()
+	if err != nil {
+		return nil, "", err
+	}
+	spec := s.childTask(task, atespace, child, parent)
+	if _, err := client.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: spec}); err != nil {
+		return nil, "", fmt.Errorf("ax: create the child Task %s/%s: %w", atespace, child, err)
+	}
+	s.log.Info("child Task created for a branch", "atespace", atespace, "task", child, "parent", parent.ID)
+	if err := s.awaitRunning(ctx, client, atespace, child); err != nil {
+		s.deleteTask(client, atespace, child)
+		return nil, "", err
+	}
+	actor := atespace + "/" + child
+	if req.Metadata == nil {
+		req.Metadata = map[string]string{}
+	}
+	req.Metadata[fw.MetaParentMember] = "ax:" + atespace + "/" + name
+	body, err := json.Marshal(map[string]any{"events": events, "input": req.Input, "model": req.Model, "metadata": req.Metadata})
+	if err != nil {
+		s.deleteTask(client, atespace, child)
+		return nil, "", fmt.Errorf("ax: encode the branch: %w", err)
+	}
+	run, err := s.startOn(ctx, actor, "/v1/runs/fork", body, "fork:"+parent.ID+":"+actor)
 	if err != nil {
 		s.deleteTask(client, atespace, child)
 		return nil, "", err
@@ -374,11 +423,17 @@ func (s *Spawner) startRun(ctx context.Context, actor string, parent *fw.Run, re
 	if err != nil {
 		return nil, fmt.Errorf("ax: encode the child run: %w", err)
 	}
-	key := "spawn:" + parent.ID + ":" + actor
+	return s.startOn(ctx, actor, "/v1/runs", body, "spawn:"+parent.ID+":"+actor)
+}
+
+// startOn posts a run or a branch to the child and returns the run that the
+// child answers. The child boots after its Task runs, so the request is
+// sent again on a gateway error, with the same idempotency key.
+func (s *Spawner) startOn(ctx context.Context, actor, path string, body []byte, key string) (*fw.Run, error) {
 	deadline := time.Now().Add(startTimeout)
 	wait := time.Second
 	for {
-		status, answer, err := s.do(ctx, http.MethodPost, actor, "/v1/runs", body, key)
+		status, answer, err := s.do(ctx, http.MethodPost, actor, path, body, key)
 		switch {
 		case err == nil && (status == http.StatusCreated || status == http.StatusOK):
 			var run fw.Run

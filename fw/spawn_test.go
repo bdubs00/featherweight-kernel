@@ -32,6 +32,16 @@ func (s *otherSpawner) Spawn(ctx context.Context, _ *Run, req RunRequest) (*Run,
 	return r, "other", nil
 }
 
+// Fork starts the branch in the other agent from the kept events, as the
+// native API of another process does for a trusted caller.
+func (s *otherSpawner) Fork(ctx context.Context, _ *Run, events []Event, req ForkRequest) (*Run, string, error) {
+	r, err := s.other.ForkEvents(ctx, events, req)
+	if err != nil {
+		return nil, "", err
+	}
+	return r, "other", nil
+}
+
 func (s *otherSpawner) Get(ctx context.Context, _, id string) (*Run, error) {
 	return s.other.Get(ctx, id)
 }

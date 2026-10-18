@@ -80,3 +80,53 @@ func TestForkContinuesFromThePrefix(t *testing.T) {
 		t.Fatalf("Fork of an unknown run = %v", err)
 	}
 }
+
+// With spawn, a branch runs in another process through a Forker: the other
+// process gets the kept events, the source records the branch as a child,
+// and Get reaches the branch on its member.
+func TestForkInAnotherProcess(t *testing.T) {
+	other := newTestAgent(t, newScript(endTurn("elsewhere")).Model())
+	sp := &otherSpawner{other: other}
+	a := newTestAgent(t, newScript(endTurn("here")).Model(), WithSpawner(sp))
+	ctx := testCtx(t)
+	src, err := a.Start(ctx, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.WaitFor(ctx, src.ID, func(r *Run) bool { return r.State.Terminal() }); err != nil {
+		t.Fatal(err)
+	}
+	b, err := a.Fork(ctx, src.ID, ForkRequest{Input: "try again elsewhere", Spawn: true})
+	if err != nil {
+		t.Fatalf("Fork with spawn: %v", err)
+	}
+	if b.Member != "other" || b.Metadata[MetaForkOf] != src.ID {
+		t.Fatalf("branch = %+v", b)
+	}
+	got, err := a.WaitFor(ctx, b.ID, func(r *Run) bool { return r.State.Terminal() })
+	if err != nil || got.Output != "elsewhere" {
+		t.Fatalf("branch in the other process = %+v, %v", got, err)
+	}
+	evs, _ := readAll(ctx, a.ledger, src.ID)
+	recorded := false
+	for _, e := range evs {
+		var d RunChildData
+		if e.Type == EvRunChild && e.Decode(&d) == nil && d.Child == b.ID && d.Member == "other" {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Fatal("the source did not record the branch as a child")
+	}
+	if list, _ := other.List(ctx); len(list) != 1 || list[0].Output != "elsewhere" || list[0].Metadata[MetaForkOf] != src.ID {
+		t.Fatalf("the other process holds %+v", list)
+	}
+}
+
+// A branch from events needs a fw.run.queued event first.
+func TestForkEventsNeedsAQueuedEvent(t *testing.T) {
+	a := newTestAgent(t, newScript(endTurn("x")).Model())
+	if _, err := a.ForkEvents(testCtx(t), []Event{{Type: EvRunStarted}}, ForkRequest{}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("ForkEvents without queued = %v", err)
+	}
+}

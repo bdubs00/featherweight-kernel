@@ -100,6 +100,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"POST /v1/runs/{id}/approvals/{approval}", s.remote(s.decide)},
 		{"POST /v1/runs/{id}/cancel", s.remote(s.cancel)},
 		{"POST /v1/runs/{id}/fork", s.remote(s.fork)},
+		{"POST /v1/runs/fork", s.forkEvents},
 		{"GET /v1/runs/{id}/files", s.remote(s.runFiles)},
 		{"GET /v1/runs/{id}/files/{path...}", s.remote(s.runFile)},
 		{"GET /v1/agents", s.listAgents},
@@ -732,16 +733,48 @@ func (s *server) fork(w http.ResponseWriter, r *http.Request) {
 		Input    string            `json:"input"`
 		Model    string            `json:"model"`
 		Metadata map[string]string `json:"metadata"`
+		Spawn    bool              `json:"spawn"`
 	}
 	if !s.decode(w, r, &body) {
 		return
 	}
-	run, err := s.a.Fork(r.Context(), r.PathValue("id"), fw.ForkRequest{Seq: body.Seq, Input: body.Input, Model: body.Model, Metadata: body.Metadata, Origin: fw.OriginHTTP})
+	run, err := s.a.Fork(r.Context(), r.PathValue("id"), fw.ForkRequest{Seq: body.Seq, Input: body.Input, Model: body.Model, Metadata: body.Metadata, Spawn: body.Spawn, Origin: fw.OriginHTTP})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	s.writeRun(w, r, http.StatusOK, run.ID)
+}
+
+// MaxForkBodyBytes bounds the body of POST /v1/runs/fork, which carries the
+// kept events of a branch from another process.
+const MaxForkBodyBytes = 64 << 20
+
+// forkEvents answers POST /v1/runs/fork: a branch from the events that
+// another process kept (fw.Agent.ForkEvents). Only a trusted caller, the
+// static token or a workload, can send it, because the events name the
+// person of the branch.
+func (s *server) forkEvents(w http.ResponseWriter, r *http.Request) {
+	p := fw.PrincipalFrom(r.Context())
+	if p == nil || (p.Kind != fw.KindToken && p.Kind != fw.KindWorkload) {
+		problem(w, r, http.StatusForbidden, "only the static token or a workload can start a branch from events")
+		return
+	}
+	var body struct {
+		Events   []fw.Event        `json:"events"`
+		Input    string            `json:"input"`
+		Model    string            `json:"model"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	if !s.decodeLimit(w, r, &body, MaxForkBodyBytes) {
+		return
+	}
+	run, err := s.a.ForkEvents(r.Context(), body.Events, fw.ForkRequest{Input: body.Input, Model: body.Model, Metadata: body.Metadata, Origin: fw.OriginHTTP})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeRun(w, r, http.StatusCreated, run.ID)
 }
 
 func (s *server) cancel(w http.ResponseWriter, r *http.Request) {

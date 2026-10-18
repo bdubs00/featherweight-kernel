@@ -145,7 +145,7 @@ A run is defined by its ledger and its workspace, so a run can branch. `Agent.Fo
 
 A branch goes on as a resumed run does (section 4.5). A model request without an answer is sent again, a tool call without a result follows the resume rules, and a pending approval waits for its decision, under the approval id that the branch copied. A message in the request, `input`, follows the kept events as a follow-up from the person, so a branch of a finished run goes on in another direction; without a message, a branch that keeps the end of a finished run stays finished. A `model` in the request changes the model of the branch. Because the system prompt, the history, and the tool results of the kept events are the same bytes, the branch keeps the prompt cache prefix of the provider up to the point of the branch.
 
-A branch shares the workspace of its process. Two branches that change files in the same process therefore see each other's changes, and a branch that must have files of its own runs in another process, such as a child Task (section 11.9).
+A branch shares the workspace of its process. Two branches that change files in the same process therefore see each other's changes. With `spawn` in the request, the branch runs in another process: the `Spawner` of the agent must be a `Forker`, which creates the process, a child Task with the `ax` driver, and sends it the kept events through `POST /v1/runs/fork`, a route for the static token or a workload alone, because the events name the person of the branch. The source records such a branch as a child in `fw.run.child`, so `Get` and `WaitFor` reach it on its member, and the branch has the workspace of its own Task: a fresh copy of the Workspace of the parent Task, not the files that the parent changed. Several branches of one run in several Tasks therefore try different prompts or models from the same base, and their `fw.file.changed` events and their outputs compare.
 
 ## 5. The kernel
 
@@ -708,7 +708,8 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | `POST /v1/runs/{id}/messages` | Send a follow-up message. Body fields: `content`, `files`. |
 | `POST /v1/runs/{id}/approvals/{approval}` | Decide a pending approval. Body fields: `decision`, `note`. |
 | `POST /v1/runs/{id}/cancel` | Cancel a run. |
-| `POST /v1/runs/{id}/fork` | Branch a run (section 4.7). Body fields: `seq`, the last event to keep, every event when absent; `input`, a message that follows the kept events; `model`, a selector for the branch; `metadata`. The answer is the branch. |
+| `POST /v1/runs/{id}/fork` | Branch a run (section 4.7). Body fields: `seq`, the last event to keep, every event when absent; `input`, a message that follows the kept events; `model`, a selector for the branch; `metadata`; `spawn`, which runs the branch in another process through the spawner. The answer is the branch. |
+| `POST /v1/runs/fork` | Start a branch from the events that another process kept (section 4.7). Body fields: `events`, `input`, `model`, `metadata`. For the static token or a workload alone. |
 | `GET /v1/runs/{id}/files` | List the files that the run changed (section 7.9). |
 | `GET /v1/runs/{id}/files/{path}` | The content of a file that the run changed, or a view of it under `Accept: application/json`. `?download=1` always returns the content (section 7.9). |
 | `GET /v1/agents` | List agent profiles with their descriptions, instructions, and skills. |
