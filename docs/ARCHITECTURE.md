@@ -314,7 +314,7 @@ The `Secrets` interface resolves a name to a value. The default chain reads `<NA
 
 ### 6.6 OpenAI adapter settings
 
-The adapter speaks the chat completions API over `net/http` with no SDK, so one adapter serves OpenAI, Azure OpenAI, OpenRouter, LiteLLM, vLLM, Ollama, and tabbyAPI. Every call streams. The adapter retries a 429, a 5xx, and a network error that happens before the first response byte. It waits as `Retry-After` names, or with an exponential backoff. It never retries once a stream started. A stream with no byte for `idleTimeout` fails, and a response larger than 16 MB fails. A 401 or a 403 names the secret that the key comes from. A 404 that says the model is unknown lists the models that the server offers. The method `Models` lists them for `fw doctor`.
+The adapter speaks the chat completions API over `net/http` with no SDK, so one adapter serves OpenAI, Azure OpenAI, OpenRouter, LiteLLM, vLLM, Ollama, and tabbyAPI. Every call streams. The adapter retries a 429, a 5xx, and a network error that happens before the first response byte. A connection that is refused or reset before any byte of the answer arrived is retried five times, about fifteen seconds, because under ax a Task boots before its egress policy takes effect. It waits as `Retry-After` names, or with an exponential backoff. It never retries once a stream started. A stream with no byte for `idleTimeout` fails, and a response larger than 16 MB fails. A 401 or a 403 names the secret that the key comes from. A 404 that says the model is unknown lists the models that the server offers. The method `Models` lists them for `fw doctor`.
 
 `providers.openai.options` holds these keys:
 

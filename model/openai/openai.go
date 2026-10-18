@@ -199,10 +199,17 @@ const (
 	// MaxResponseBytes is the most that one response can hold.
 	MaxResponseBytes = 16 << 20
 
-	maxRetries  = 3
-	maxWait     = 60 * time.Second
-	maxBackoff  = 20 * time.Second
-	listTimeout = 15 * time.Second // the wait for the model list on a 404
+	maxRetries = 3
+	// maxNetRetries bounds the retries of a connection error that happened
+	// before any byte of the answer arrived. It is larger than maxRetries,
+	// about fifteen seconds with the default backoff, because under ax a
+	// Task boots before its egress policy takes effect, and the first
+	// requests of a Task fail on a connection that is refused or reset
+	// until the policy is in place.
+	maxNetRetries = 5
+	maxWait       = 60 * time.Second
+	maxBackoff    = 20 * time.Second
+	listTimeout   = 15 * time.Second // the wait for the model list on a 404
 )
 
 // knownOptions lists the keys of providers.openai.options, sorted.

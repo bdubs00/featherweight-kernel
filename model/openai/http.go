@@ -146,9 +146,10 @@ func loadTLS(c fw.TLSConfig) (*tls.Config, error) {
 }
 
 // send sends one request and returns a 2xx response with its body open. It
-// retries a 429, a 5xx, and a connection error that happened before any
-// byte of the answer arrived, up to maxRetries times. Every error carries
-// the openai prefix, the method, and the endpoint without its query.
+// retries a 429 and a 5xx up to maxRetries times, and a connection error
+// that happened before any byte of the answer arrived up to maxNetRetries
+// times. Every error carries the openai prefix, the method, and the
+// endpoint without its query.
 func (m *Model) send(ctx context.Context, method string, u *url.URL, body []byte) (*http.Response, error) {
 	where := clean(u)
 	for attempt := 0; ; attempt++ {
@@ -159,13 +160,14 @@ func (m *Model) send(ctx context.Context, method string, u *url.URL, body []byte
 		var (
 			retry bool
 			wait  = m.delay(attempt)
+			limit = maxRetries
 		)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, fmt.Errorf("openai: %s %s: %w", method, where, cause(ctx))
 			}
 			err = cleanURLError(err, where)
-			retry = retryableNetErr(err)
+			retry, limit = retryableNetErr(err), maxNetRetries
 		} else {
 			apiErr := m.apiError(resp)
 			retryAfter, hasRetryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
@@ -176,7 +178,7 @@ func (m *Model) send(ctx context.Context, method string, u *url.URL, body []byte
 				wait = min(retryAfter, maxWait)
 			}
 		}
-		if !retry || attempt >= maxRetries {
+		if !retry || attempt >= limit {
 			return nil, fmt.Errorf("openai: %s %s: %w", method, where, err)
 		}
 		m.logger(ctx).Warn("openai: retrying the request",

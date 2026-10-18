@@ -876,6 +876,35 @@ func TestNetworkErrorRetry(t *testing.T) {
 	}
 }
 
+// A connection that is reset before any byte of the answer is retried more
+// often than a server error, because under ax the egress policy of a Task
+// lands a few seconds after the Task boots.
+func TestNetworkErrorRetriesLonger(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) <= int32(maxRetries)+1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			conn.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, streamBody)
+	}))
+	t.Cleanup(srv.Close)
+	m := testModelWith(t, settings{base: srv.URL, model: "local"})
+	resp, err := m.Generate(context.Background(), hello)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(maxRetries)+2 || fw.TextOf(resp.Content) != "Hello" {
+		t.Errorf("%d calls, text %q; want %d and Hello", got, fw.TextOf(resp.Content), maxRetries+2)
+	}
+}
+
 func TestConnectionRefused(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close()
