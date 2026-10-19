@@ -222,6 +222,9 @@ func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, rea
 	brs.parent, brs.depth, brs.standIn = q.Parent, q.Depth, true
 	k.mu.Lock()
 	k.runs[id] = brs
+	if q.Parent != "" {
+		k.records[q.Parent] = append(k.records[q.Parent], brs)
+	}
 	delete(k.remote, id)
 	k.kids[parent]--
 	k.mu.Unlock()

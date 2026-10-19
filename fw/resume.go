@@ -118,7 +118,10 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 			continue
 		}
 		if rs.parent != "" {
+			// Neither a record nor a run that is set aside is a child in
+			// the tree of its parent.
 			k.kids[rs.parent]--
+			k.dropChildLocked(rs.parent, rs)
 		}
 		if started[id] {
 			delete(k.runs, id)
@@ -131,6 +134,9 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 			continue
 		}
 		rs.standIn = true
+		if rs.parent != "" {
+			k.records[rs.parent] = append(k.records[rs.parent], rs)
+		}
 		delete(k.remote, id)
 		k.kids[ref.parent]--
 	}

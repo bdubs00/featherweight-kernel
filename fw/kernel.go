@@ -71,6 +71,7 @@ type kernel struct {
 	kids      map[string]int          // child runs started by each run, in its life
 	remote    map[string]childRef     // the children that a Spawner runs in other processes
 	children  map[string][]*runState  // the child runs in this process, by the id of the parent
+	records   map[string][]*runState  // the records of children that never ran (standIn), by the id of the parent; no part of the tree
 	reports   map[string]*childReport // what each child in another process last reported, see tree.go
 	spent     map[string]bool         // the runs whose tree used up a limit and whose runs below were canceled
 
@@ -178,6 +179,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		kids:      map[string]int{},
 		remote:    map[string]childRef{},
 		children:  map[string][]*runState{},
+		records:   map[string][]*runState{},
 		reports:   map[string]*childReport{},
 		spent:     map[string]bool{},
 		sem:       make(chan struct{}, maxRuns),
@@ -688,6 +690,9 @@ func (a *Agent) Children(ctx context.Context, id string) ([]*Run, error) {
 	var kids []*Run
 	for _, child := range a.k.localChildren(id) {
 		kids = append(kids, a.report(child))
+	}
+	for _, rec := range a.k.recordsOf(id) {
+		kids = append(kids, rec.snapshot())
 	}
 	for cid, ref := range a.remoteChildren(id) {
 		r, ok := ref.starting()

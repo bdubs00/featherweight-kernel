@@ -105,6 +105,16 @@ func (k *kernel) localChildren(id string) []*runState {
 	return append([]*runState(nil), k.children[id]...)
 }
 
+// recordsOf returns the records of the children of a run that never ran
+// (recordBranchEnd). They stand in for the children in a listing, and take
+// no part in the tree: no usage, no size, no slot, and no share of
+// spawn.maxDescendants or spawn.maxChildren.
+func (k *kernel) recordsOf(id string) []*runState {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]*runState(nil), k.records[id]...)
+}
+
 // dropChildLocked removes a child from the index of its parent. The caller
 // holds k.mu.
 func (k *kernel) dropChildLocked(parent string, rs *runState) {

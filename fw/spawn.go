@@ -729,7 +729,7 @@ func (a *Agent) findChild(parent *runState, d RunChildData, outcome, why string)
 	}
 	ctx, cancel := context.WithCancel(k.ctx)
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder, find: true}
-	ref := childRef{parent: parent.id, member: d.Member, depth: parent.depth + 1, start: start, key: d.Key}
+	ref := childRef{parent: parent.id, member: d.Member, depth: parent.depth + 1, start: start, key: d.Key, reserved: d.Reserved}
 	a.decorateChild(placeholder, ref)
 	k.mu.Lock()
 	k.remote[d.Child] = ref

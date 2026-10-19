@@ -531,3 +531,81 @@ func TestRestartTellsAChildFromABranch(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The record of a child that never ran is listed among the children of its
+// parent and is no part of its tree, before and after a restart: it holds
+// no share of spawn.maxDescendants, and it gives the parent no tree.
+func TestRecordOfAChildIsNoPartOfTheTree(t *testing.T) {
+	ctx := testCtx(t)
+	l := NewMemLedger()
+	other := newTestAgent(t, newScript(endTurn("child done")).Model())
+	cfg := DefaultConfig()
+	cfg.Spawn.MaxDescendants = 1
+	a := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithLedger(l), WithConfig(cfg),
+		WithSpawner(failingSpawner{&otherSpawner{other: other}}))
+	parent, err := a.Run(ctx, "parent work")
+	mustState(t, parent, err, StateCompleted)
+	if _, err := a.SpawnChild(ctx, parent.ID, NewRunRequest("do x")); err == nil {
+		t.Fatal("the spawner refused nothing")
+	}
+	check := func(a *Agent) {
+		t.Helper()
+		kids, err := a.Children(ctx, parent.ID)
+		if err != nil || len(kids) != 1 || kids[0].State != StateFailed {
+			t.Fatalf("children of the parent = %+v, %v", kids, err)
+		}
+		if r, err := a.Get(ctx, parent.ID); err != nil || r.TreeUsage != nil || r.TreeOpen != 0 {
+			t.Fatalf("the parent with the record of a child = %+v, %v", r, err)
+		}
+	}
+	check(a)
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	a.Close(cctx)
+	cancel()
+	b := newTestAgent(t, newScript().Model(), WithLedger(l), WithConfig(cfg), WithSpawner(&otherSpawner{other: other}))
+	check(b)
+	// The tree of the parent holds one run, and the record holds none of it.
+	if _, err := b.SpawnChild(ctx, parent.ID, NewRunRequest("do y")); err != nil {
+		t.Fatalf("a child beside the record = %v", err)
+	}
+}
+
+// A look for a child after a restart keeps the share of the tree that the
+// child reserved, so the parent does not hand that share to another child
+// while it looks.
+func TestLookKeepsTheShareOfItsChild(t *testing.T) {
+	ctx := testCtx(t)
+	cfg := DefaultConfig()
+	cfg.Spawn.MaxDescendants, cfg.Spawn.MaxChildren = 4, 2
+	other := newTestAgent(t, newScript(endTurn("first done"), endTurn("second done")).Model())
+	sp := newCrashSpawner(other)
+	l := NewMemLedger()
+	cut := &cutLedger{Ledger: l}
+	dead := &deadSpawner{crashSpawner: sp}
+	a := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithLedger(cut), WithConfig(cfg), WithSpawner(dead))
+	parent, err := a.Run(ctx, "parent work")
+	mustState(t, parent, err, StateCompleted)
+	reached, release := sp.stop(beforeEnd)
+	go func() { _, _ = a.SpawnChild(ctx, parent.ID, NewRunRequest("first")) }()
+	<-reached
+	cut.cut.Store(true) // the parent process dies after the child started
+	dead.cut.Store(true)
+	release()
+
+	sp.setFindErr(errors.New("the platform does not answer"))
+	b := newTestAgent(t, newScript().Model(), WithLedger(l), WithConfig(cfg), WithSpawner(sp))
+	if _, err := b.SpawnChild(ctx, parent.ID, NewRunRequest("second")); err != nil {
+		t.Fatal(err)
+	}
+	var shares []int
+	for _, e := range ledgerEvents(t, l, parent.ID) {
+		var d RunChildData
+		if e.Type == EvRunChild && e.Decode(&d) == nil && d.Kind == childSpawn {
+			shares = append(shares, d.Reserved)
+		}
+	}
+	if len(shares) != 2 || shares[0]+shares[1] > cfg.Spawn.MaxDescendants {
+		t.Fatalf("the shares of the two children are %v, more than the %d runs of the tree", shares, cfg.Spawn.MaxDescendants)
+	}
+	sp.setFindErr(nil)
+}
