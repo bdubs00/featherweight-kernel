@@ -366,13 +366,8 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 		q.Profile = &prof
 		q.Resolved = a.withModel(q.Resolved, req.Model)
 	}
-	q.Kept = 0 // the events of the branch that are copies; see RunQueuedData.Kept
-	for _, e := range evs {
-		if e.Seq <= req.Seq && e.Type != EvRunChild {
-			q.Kept++
-		}
-	}
 	kept := make([]Event, 0, len(evs))
+	queued := -1
 	for _, e := range evs {
 		if e.Seq > req.Seq {
 			break
@@ -380,15 +375,22 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 		if e.Type == EvRunChild || e.Type == EvChildReported {
 			continue // the children belong to the source
 		}
-		if e.Type == EvRunQueued {
-			ne, err := NewEvent(e.Subject, e.Type, q)
-			if err != nil {
-				return nil, q, err
-			}
-			ne.Seq, ne.Time = e.Seq, e.Time
-			e = ne
+		if e.Type == EvRunQueued && queued < 0 {
+			queued = len(kept)
 		}
 		kept = append(kept, e)
+	}
+	// Kept is the number of the copies, so it leaves out what the branch
+	// drops, wherever that sits among the kept events (RunQueuedData.Kept).
+	q.Kept = uint64(len(kept))
+	if queued >= 0 {
+		e := kept[queued]
+		ne, err := NewEvent(e.Subject, e.Type, q)
+		if err != nil {
+			return nil, q, err
+		}
+		ne.Seq, ne.Time = e.Seq, e.Time
+		kept[queued] = ne
 	}
 	return kept, q, nil
 }
