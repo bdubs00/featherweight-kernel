@@ -180,3 +180,28 @@ func TestForkEventsCountsTheCopies(t *testing.T) {
 		}
 	}
 }
+
+// TestBranchWithoutWorkIsFinal forks a finished run without a message. The
+// branch stays finished and appends no event of its own, so its last kept
+// event gives it a known usage of zero, for the kernel and for a consumer
+// of the lifecycle events.
+func TestBranchWithoutWorkIsFinal(t *testing.T) {
+	ctx := testCtx(t)
+	a := newTestAgent(t, newScript(endTurn("first")).Model())
+	src, err := a.Run(ctx, "hello")
+	mustState(t, src, err, StateCompleted)
+	b, err := a.Fork(ctx, src.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := ledgerEvents(t, a.Ledger(), b.ID)
+	var q RunQueuedData
+	firstOf(t, evs, EvRunQueued, &q)
+	got, err := a.Get(ctx, b.ID)
+	if err != nil || got.State != StateCompleted || got.UsageSeq != q.Kept || got.Usage != (RunUsage{}) || q.Kept != uint64(len(evs)) {
+		t.Fatalf("branch = %+v, %v; kept %d of %d events", got, err, q.Kept, len(evs))
+	}
+	if life := ProjectRun(lifecycleOnly(evs)); life.State != StateCompleted || life.UsageSeq != q.Kept || life.Usage != (RunUsage{}) {
+		t.Fatalf("lifecycle: state %s, usage %+v at %d", life.State, life.Usage, life.UsageSeq)
+	}
+}

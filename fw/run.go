@@ -244,7 +244,8 @@ type Run struct {
 	// the workbench, sets it on the runs that it brings in.
 	Member string `json:"member,omitempty"`
 	// UsageSeq is the sequence number of the latest event that carried the
-	// totals of the run, fw.run.finished or fw.run.suspended. Usage took
+	// totals of the run, fw.run.finished or fw.run.suspended, or of the last
+	// kept event of a branch that ended with its kept events. Usage took
 	// those totals and then added the usage of the later events that the
 	// projection saw. Zero means that no event carried totals: the run did
 	// not reach either event yet, or an older kernel wrote its ledger. A
