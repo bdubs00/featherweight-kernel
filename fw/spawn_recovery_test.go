@@ -350,25 +350,46 @@ func TestCancelAtTheEndOfAStartReachesTheChild(t *testing.T) {
 // recorded now.
 func aheadClock() Clock { return ClockFunc(func() time.Time { return time.Now().Add(time.Hour) }) }
 
+// keptReason returns why the parent records that a look kept its child, or
+// "" when it records none.
+func keptReason(t *testing.T, l Ledger, parent, child string) string {
+	t.Helper()
+	for _, e := range ledgerEvents(t, l, parent) {
+		var d struct {
+			Child string `json:"child"`
+			Kept  string `json:"kept"`
+		}
+		if e.Type == EvRunChild && json.Unmarshal(e.Data, &d) == nil && d.Child == child && d.Kept != "" {
+			return d.Kept
+		}
+	}
+	return ""
+}
+
+// lookEnded reports whether the look for a child ended: the parent holds
+// the child no longer, or holds it without an open look.
+func lookEnded(a *Agent, child string) bool {
+	ref, ok := a.remoteChild(child)
+	if !ok {
+		return true
+	}
+	_, open := ref.starting()
+	return !open
+}
+
 // A look that cannot tell gives up past its bounds, after several tries of
-// its own: it records the child as failed with the reason, so a person
-// sees why, and it keeps the process of the child, where the child can
-// still run.
+// its own. It keeps the process of the child, where the child can still
+// run, and the parent records why, so a person sees it.
 func TestLookGivesUpPastItsBound(t *testing.T) {
-	ctx := testCtx(t)
 	other := newTestAgent(t, newScript(endTurn("child done")).Model())
 	sp := newCrashSpawner(other)
 	sp.setFindErr(errors.New("the router answered 401"))
 	b, parent, l := crashDuringSpawn(t, sp, beforeEnd, WithClock(aheadClock()))
 	ids, members := recordedChildren(t, l, parent)
 	child, member := ids[0], members[ids[0]]
-	eventually(t, "the look gives up", func() bool {
-		r, err := b.Get(ctx, child)
-		return err == nil && r.State == StateFailed
-	})
-	r, _ := b.Get(ctx, child)
-	if !strings.Contains(r.Error, "could not reach "+member) || !strings.Contains(r.Error, "401") || !strings.Contains(r.Error, "its process stays") {
-		t.Fatalf("the child after the look gave up = %+v", r)
+	eventually(t, "the look gives up", func() bool { return keptReason(t, l, parent, child) != "" })
+	if why := keptReason(t, l, parent, child); !strings.Contains(why, "could not reach "+member) || !strings.Contains(why, "401") || !strings.Contains(why, "its process stays") {
+		t.Fatalf("the parent records that the look kept the child because %q", why)
 	}
 	if sp.alive(member) != nil {
 		t.Fatalf("the look that gave up removed the process %s", member)
@@ -818,6 +839,77 @@ func TestDropLookThatCannotTellRemovesTheProcess(t *testing.T) {
 	sp.mu.Unlock()
 	if abandons != 3 {
 		t.Fatalf("Abandon ran %d times, want 3", abandons)
+	}
+	_ = other.Cancel(ctx, child)
+}
+
+// A look that gives up while the child can still run in its process keeps
+// the child as a child of the parent: the child keeps its share of the
+// tree and its place under spawn.maxChildren, because the kernel cannot
+// know that it never ran.
+func TestLookThatKeepsTheProcessKeepsTheChild(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*Config)
+	}{
+		{"its place under spawn.maxChildren", func(c *Config) { c.Spawn.MaxChildren = 1 }},
+		{"its share of spawn.maxDescendants", func(c *Config) { c.Spawn.MaxDescendants = 2 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testCtx(t)
+			other := newTestAgent(t, newScript(endTurn("child done"), endTurn("second done")).Model())
+			sp := newCrashSpawner(other)
+			sp.setFindErr(errors.New("the router answered 401"))
+			cfg := DefaultConfig()
+			tc.set(cfg)
+			b, parent, l := crashDuringSpawn(t, sp, beforeEnd, WithClock(aheadClock()), WithConfig(cfg))
+			ids, members := recordedChildren(t, l, parent)
+			child, member := ids[0], members[ids[0]]
+			eventually(t, "the look gives up", func() bool { return lookEnded(b, child) })
+			ref, ok := b.remoteChild(child)
+			if !ok || ref.member != member {
+				t.Fatalf("the parent no longer holds the kept child: %+v, %v", ref, ok)
+			}
+			if _, open := ref.starting(); open {
+				t.Fatal("the look of the kept child is still open")
+			}
+			if _, err := b.SpawnChild(ctx, parent, NewRunRequest("second")); !errors.Is(err, ErrSpawnLimit) {
+				t.Fatalf("a second child beside the kept one = %v", err)
+			}
+		})
+	}
+}
+
+// The approved rerun of a call whose child a look kept starts no second
+// child while the first can still run: it says that the child of the call
+// does not answer, and names its process.
+func TestRerunOfACallWhoseChildIsKeptStartsNoSecondChild(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	sp.setFindErr(errors.New("the router answered 401"))
+	sp.mu.Lock()
+	sp.getErr = errors.New("the router answered 401")
+	sp.mu.Unlock()
+	b, parent, l := crashDuringSpawn(t, sp, beforeEnd, WithClock(aheadClock()))
+	ids, members := recordedChildren(t, l, parent)
+	child, member := ids[0], members[ids[0]]
+	eventually(t, "the look gives up", func() bool { return lookEnded(b, child) })
+	approveRerun(t, b, parent)
+	done, err := b.WaitFor(ctx, parent, func(r *Run) bool { return r.State.Terminal() })
+	mustState(t, done, err, StateCompleted)
+	if spawns, _, _ := sp.counts(); spawns != 1 {
+		t.Fatalf("Spawn ran %d times for one call", spawns)
+	}
+	var result string
+	for _, e := range ledgerEvents(t, l, parent) {
+		var d ToolRespondedData
+		if e.Type == EvToolResponded && e.Decode(&d) == nil {
+			result = TextOf(d.Content)
+		}
+	}
+	if !strings.Contains(result, "no second child starts") || !strings.Contains(result, member) {
+		t.Fatalf("the rerun answered %q", result)
 	}
 	_ = other.Cancel(ctx, child)
 }

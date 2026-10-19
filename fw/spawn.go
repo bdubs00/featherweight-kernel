@@ -197,6 +197,12 @@ type RunChildData struct {
 	// reads that child.
 	Ended  string `json:"ended,omitempty"`
 	Reason string `json:"reason,omitempty"`
+
+	// Kept says why a look for the child gave up while the child can still
+	// run in its process. The child stays a child of the parent, with its
+	// share of the tree, its place under spawn.maxChildren, and the key of
+	// its start, and the next start of the parent looks for it again.
+	Kept string `json:"kept,omitempty"`
 }
 
 // The kinds of the first record of a child in another process.
@@ -712,7 +718,7 @@ func (a *Agent) spawnedBefore(ctx context.Context, parent, key string) (*Run, bo
 		}
 		r, err := a.spawner.Get(ctx, ref.member, id)
 		if err != nil {
-			return nil, true, fmt.Errorf("fw: the child %s of an earlier start under the same key runs in %s and does not answer: %w", id, ref.member, err)
+			return nil, true, fmt.Errorf("fw: the child %s of an earlier start under the same key can still run in %s, which does not answer, so no second child starts: %w", id, ref.member, err)
 		}
 		a.decorateChild(r, ref)
 		a.observe(id, ref, r)
@@ -795,10 +801,13 @@ type lookPacer interface {
 // child that no process has is abandoned first and recorded as failed
 // after, so a restart between the two looks again and finds nothing to
 // remove; a failed abandon is tried again until the bounds of a look. A
-// look that cannot tell gives up at those bounds: it records the child as
-// failed with the reason, so a person sees what happened, and keeps its
-// process, because the child can still run there and a delete would end
-// its work. The record names the process. A look for a child whose start
+// look that cannot tell gives up at those bounds and keeps the process,
+// because the child can still run there and a delete would end its work.
+// The kernel cannot know that such a child never ran, so it stays a child
+// of the parent (keep): with its share of the tree, its place under
+// spawn.maxChildren, and the key of its start, so a rerun of the call
+// starts no second child. The parent records why (RunChildData.Kept), so
+// a person sees what happened. A look for a child whose start
 // already ended for its caller cancels the child that it finds and removes
 // its process the same way, because nothing reads that child; at those
 // bounds it removes the process too when it cannot tell. Every removal
@@ -822,6 +831,17 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 		if first, o := p.lookPace(); first > 0 {
 			wait, own = first, o
 		}
+	}
+	// keep ends a look that gives up while the child can still run in its
+	// process: the ref of the child stays as a child of the parent.
+	keep := func(reason string) {
+		a.log.Warn("look for a child gives up and keeps the child", "run", ref.parent, "child", id, "member", ref.member, "reason", reason)
+		if rs, err := k.lookup(ref.parent); err == nil {
+			if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: id, Member: ref.member, Kind: childSpawn, Kept: reason}); err != nil {
+				a.log.Error("record a child that a look kept", "run", ref.parent, "child", id, "error", err)
+			}
+		}
+		done()
 	}
 	began := a.now()
 	removals := 0 // the abandons of this look that failed
@@ -878,7 +898,13 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 			}
 			if aerr == nil || (late && removals >= lookTries) {
 				switch {
+				case aerr != nil && !errors.Is(err, ErrRunNotFound):
+					// The process stays, and the child can run there.
+					keep(reason + "; its process could not be removed: " + aerr.Error())
+					return
 				case aerr != nil:
+					// No process has the run, so the child cannot run, and
+					// its share comes back.
 					reason += "; its process could not be removed: " + aerr.Error()
 				case !missing:
 					reason += "; its process was removed, because nothing reads the child"
@@ -890,10 +916,7 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 			}
 			err = aerr
 		case late:
-			reason += "; its process stays, because the child can still run there"
-			a.log.Warn("look for a child gives up", "run", ref.parent, "child", id, "member", ref.member, "tries", tries, "reason", reason)
-			a.recordBranchEnd(id, ref.parent, q, end, reason)
-			done()
+			keep(reason + "; its process stays, because the child can still run there")
 			return
 		}
 		a.log.Warn("look for a child after a restart", "run", ref.parent, "child", id, "member", ref.member, "retryIn", wait, "error", err)
