@@ -36,8 +36,9 @@ type crashSpawner struct {
 	abandonGate  chan struct{} // when set, Abandon waits for it
 	abandonAt    chan struct{} // closed when an Abandon waits at the gate
 
-	finds     int // the calls of Find
-	findFails int // that many calls of Find fail first with findErr, when set
+	finds     int   // the calls of Find
+	findFails int   // that many calls of Find fail first with findErr, when set
+	getErr    error // Get fails with it, as a child that does not answer
 }
 
 // lookPace shortens the looks of a test: ten milliseconds between the
@@ -172,6 +173,12 @@ func (s *crashSpawner) Find(ctx context.Context, member, id string) (*Run, error
 }
 
 func (s *crashSpawner) Get(ctx context.Context, member, id string) (*Run, error) {
+	s.mu.Lock()
+	gerr := s.getErr
+	s.mu.Unlock()
+	if gerr != nil {
+		return nil, gerr
+	}
 	if err := s.alive(member); err != nil {
 		return nil, err
 	}
