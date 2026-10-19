@@ -83,6 +83,7 @@ type cursor struct {
 	compactSeq uint64    // the latest fw.context.compacted
 	toolCalls  int       // fw.tool.requested events in the run
 	keptTurns  int       // the turns that a branch kept from its source (RunQueuedData.Kept)
+	keptOpen   bool      // a kept turn is open, and the branch did not make its model call yet
 	keptCalls  int       // the tool calls that a branch kept from its source
 	prints     []uint64  // fingerprint of each tool_use block of every response, in order
 	priorN     int       // prints before the latest response
@@ -137,13 +138,18 @@ func analyze(events []Event) *cursor {
 			if e.Seq <= c.queued.Kept {
 				c.keptTurns++
 			}
+			c.keptOpen = e.Seq <= c.queued.Kept
 			c.turnOpen = true
 			c.turnSeq = e.Seq
 		case EvTurnFinished:
-			c.turnOpen = false
+			c.turnOpen, c.keptOpen = false, false
 		case EvModelRequested:
 			c.unseen = false
 		case EvModelResponded:
+			if c.keptOpen && e.Seq > c.queued.Kept {
+				c.keptTurns-- // the branch made the call of the turn that it kept open
+			}
+			c.keptOpen = false
 			var d ModelRespondedData
 			if err := e.Decode(&d); err != nil {
 				continue
@@ -683,10 +689,11 @@ func (a *Agent) overBudget(rs *runState, c *cursor) (string, float64, bool) {
 	rs.mu.Unlock()
 	// A branch is charged for its own work only: the usage leaves out the
 	// events that it kept from its source, and so do the turns and the
-	// tool calls here.
+	// tool calls here. A kept turn that is still open is the turn of the
+	// branch, because the branch makes its model call.
 	turns, calls := c.turns-c.keptTurns, c.toolCalls-c.keptCalls
 	next := turns
-	if !c.turnOpen {
+	if !c.turnOpen || c.keptOpen {
 		next++
 	}
 	tokens := u.InputTokens + u.OutputTokens

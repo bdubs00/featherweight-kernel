@@ -205,3 +205,32 @@ func TestBranchWithoutWorkIsFinal(t *testing.T) {
 		t.Fatalf("lifecycle: state %s, usage %+v at %d", life.State, life.Usage, life.UsageSeq)
 	}
 }
+
+// TestBranchMidTurnCountsTheTurn forks a run at its fw.model.requested. The
+// branch keeps the open turn and makes its model call itself, so the turn
+// is its own: in its usage and in maxTurns, which then stops a second turn.
+func TestBranchMidTurnCountsTheTurn(t *testing.T) {
+	ctx := testCtx(t)
+	a := newTestAgent(t, newScript(endTurn("first"), callTools(use("c1", "echo", `{"text":"a"}`)), endTurn("never")).Model(), WithTools(echoTool(nil)))
+	src, err := a.Run(ctx, "hello", WithRunBudget(Budget{MaxTurns: 1}))
+	mustState(t, src, err, StateCompleted)
+	var at uint64
+	for _, e := range ledgerEvents(t, a.Ledger(), src.ID) {
+		if e.Type == EvModelRequested {
+			at = e.Seq
+		}
+	}
+	b, err := a.Fork(ctx, src.ID, ForkRequest{Seq: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = a.WaitFor(ctx, b.ID, func(r *Run) bool { return r.State.Terminal() })
+	mustState(t, b, err, StateFailed)
+	evs := ledgerEvents(t, a.Ledger(), b.ID)
+	if b.Error != "budget exceeded: maxTurns" || b.Usage.Turns != 1 || countType(evs, EvModelResponded) != 1 || b.Usage.ToolCalls != 1 {
+		t.Fatalf("branch = %+v, events %v", b, eventTypes(evs))
+	}
+	if r := ProjectRun(evs); r.Usage != b.Usage {
+		t.Fatalf("ledger usage %+v, status %+v", r.Usage, b.Usage)
+	}
+}

@@ -255,6 +255,9 @@ type Run struct {
 	// kept is RunQueuedData.Kept: the events of a branch that are copies of
 	// the events of its source, whose usage the branch leaves out.
 	kept uint64
+	// keptTurn is true while a turn that the branch kept is open and no
+	// model call of it followed.
+	keptTurn bool
 }
 
 // RunRequest describes a run to start.
