@@ -920,7 +920,14 @@ func (a *Agent) Events(ctx context.Context, id string, from uint64) (<-chan Even
 			case !LeavesFinished(e.Type):
 				ended = false
 			}
-			if ended && rs.lastSeq() <= e.Seq {
+			// The watch reads an event as soon as the ledger stores it,
+			// before the run applies it, so the stream waits for the run:
+			// a Get after the end then reads the state that ended it.
+			if !ended {
+				continue
+			}
+			applied, ok := rs.appliedThrough(wctx, e.Seq)
+			if !ok || applied <= e.Seq {
 				return
 			}
 		}
@@ -1377,6 +1384,25 @@ func (rs *runState) lastSeq() uint64 {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return rs.run.Seq
+}
+
+// appliedThrough waits until the run applied the event seq, and returns the
+// sequence number of the last event that the run applied. It returns false
+// when ctx ends first.
+func (rs *runState) appliedThrough(ctx context.Context, seq uint64) (uint64, bool) {
+	for {
+		rs.mu.Lock()
+		cur, changed := rs.run.Seq, rs.changed
+		rs.mu.Unlock()
+		if cur >= seq {
+			return cur, true
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return cur, false
+		}
+	}
 }
 
 // queuedData returns the request of the run as fw.run.queued recorded it.
