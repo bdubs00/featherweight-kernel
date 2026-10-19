@@ -367,7 +367,7 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 // in the kept fw.run.queued, so a model of the request must replace the
 // model there too. A branch of a run from an older ledger has no resolved
 // profile and reads the model from its inline profile.
-func (a *Agent) withModel(p *AgentProfile, model string) *AgentProfile {
+func (a *Agent) withModel(p *ResolvedProfile, model string) *ResolvedProfile {
 	if p == nil {
 		return nil
 	}

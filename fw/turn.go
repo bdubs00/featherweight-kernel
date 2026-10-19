@@ -439,8 +439,15 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		specs = append(specs, t.Spec())
 	}
 	effort := prof.Effort
-	if effort == "" {
+	if effort == "" && c.queued.Resolved == nil {
 		effort = a.cfg.Effort
+	}
+	if c.queued.Resolved != nil {
+		text, err := a.textOf(ctx, rs, c.queued)
+		if err != nil {
+			return err
+		}
+		prof.System, prof.Instructions = text.system, text.instructions
 	}
 	provider, name := SplitSelector(selector)
 	system := a.SystemPrompt(prof, c.queued.Instructions)
@@ -623,13 +630,13 @@ func (a *Agent) fail(ctx context.Context, rs *runState, msg string) error {
 
 // profileOf returns the effective profile of a run: the profile that the
 // kernel resolved when it queued the run (resolveProfile), for the life of
-// the run. Only the policy of the named profile now applies on top, as a
-// tightening (tighten). A run from the ledger of an older kernel has no
-// resolved profile, so the named profile now with the inline profile of
-// the request on top stands in for it.
+// the run, without its text (textOf). Only the policy of the named profile
+// now applies on top, as a tightening (tighten). A run from the ledger of
+// an older kernel has no resolved profile, so the named profile now with
+// the inline profile of the request on top stands in for it.
 func (a *Agent) profileOf(q RunQueuedData) AgentProfile {
 	if q.Resolved != nil {
-		prof := *q.Resolved
+		prof := q.Resolved.profile(q.Agent)
 		prof.Policy = tighten(prof.Policy, a.profileNamed(q.Agent).Policy)
 		return prof
 	}
@@ -820,6 +827,23 @@ func (a *Agent) policyFor(rs *runState, prof AgentProfile) Policy {
 		return o.policy
 	}
 	base := a.Policy()
+	merged, ok := a.runRules(rs, prof)
+	if !ok {
+		return base
+	}
+	extra := NewRulesPolicy(merged)
+	return PolicyFunc(func(ctx context.Context, call ToolCall) Decision {
+		d1, d2 := base.Decide(ctx, call), extra.Decide(ctx, call)
+		if verdictRank(d2.Verdict) > verdictRank(d1.Verdict) {
+			return d2
+		}
+		return d1
+	})
+}
+
+// runRules returns the rules of the profile of a run and of every ancestor
+// as one conjunction, and false when there are none.
+func (a *Agent) runRules(rs *runState, prof AgentProfile) (Rules, bool) {
 	var rules []Rules
 	if prof.Policy != nil {
 		rules = append(rules, *prof.Policy)
@@ -830,20 +854,30 @@ func (a *Agent) policyFor(rs *runState, prof AgentProfile) Policy {
 		}
 	}
 	if len(rules) == 0 {
-		return base
+		return Rules{}, false
 	}
 	merged := rules[0]
 	for _, r := range rules[1:] {
 		merged = MergeRules(merged, r)
 	}
-	extra := NewRulesPolicy(merged)
-	return PolicyFunc(func(ctx context.Context, call ToolCall) Decision {
-		d1, d2 := base.Decide(ctx, call), extra.Decide(ctx, call)
-		if verdictRank(d2.Verdict) > verdictRank(d1.Verdict) {
-			return d2
-		}
-		return d1
-	})
+	return merged, true
+}
+
+// recheck decides a call that a person allowed again, by the rules of the
+// profile and of every ancestor, because a person can add a rule while the
+// call waits. Only a deny counts. The policy of the process asked for the
+// approval and is not asked again, and a replay allows every call.
+func (a *Agent) recheck(ctx context.Context, rs *runState, prof AgentProfile, t Tool, u Block) Decision {
+	if o := a.k.override(rs.id); o != nil && o.policy != nil {
+		return Decision{Verdict: VerdictAllow}
+	}
+	merged, ok := a.runRules(rs, prof)
+	if !ok {
+		return Decision{Verdict: VerdictAllow}
+	}
+	pctx := WithRunInfo(ctx, RunInfo{RunID: rs.id, Agent: rs.agent, CallID: u.ID})
+	call := ResolveCall(pctx, t, ToolCall{RunID: rs.id, Agent: rs.agent, CallID: u.ID, Spec: t.Spec(), Input: u.Input})
+	return NewRulesPolicy(merged).Decide(pctx, call)
 }
 
 func verdictRank(v Verdict) int {
@@ -932,10 +966,14 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 			// when the person is still not connected.
 			p.run = true
 		case rec.decision != nil && rec.decisionSeq > rec.requestedSeq:
-			if rec.decision.Decision == "allow" {
-				p.run = true
-			} else {
+			if rec.decision.Decision != "allow" {
 				p.result = ErrorResult(deniedBy(rec.decision))
+			} else if d := a.recheck(ctx, rs, prof, t, u); d.Verdict == VerdictDeny {
+				// A deny that a profile gained while the call waited for
+				// its approval wins over the allow.
+				p.result = ErrorResult("denied by policy: " + d.Reason)
+			} else {
+				p.run = true
 			}
 		case rec.requestedSeq > 0:
 			// The call started before a restart and has no result.

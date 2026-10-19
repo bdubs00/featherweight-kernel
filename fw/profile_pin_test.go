@@ -112,6 +112,16 @@ func (r *pinRecorder) expect(t *testing.T, from, to int, model, system, tools st
 	}
 }
 
+// expectAt checks the request at index i.
+func (r *pinRecorder) expectAt(t *testing.T, i int, model, system, tools string) {
+	t.Helper()
+	c := r.call(i)
+	if c.model != model || !strings.HasPrefix(c.system, system) || c.tools != tools {
+		t.Fatalf("request %d = model %q, tools %q, system %q; want model %q, tools %q, system %q",
+			i, c.model, c.tools, c.system, model, tools, system)
+	}
+}
+
 func (r *pinRecorder) call(i int) pinCall {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -145,13 +155,13 @@ func pinLedger(t *testing.T, dir string) *FileLedger {
 
 // pinAgent builds an agent with the tools alpha, beta, gamma, and the
 // destructive tool delta, whose models answer through rec.
-func pinAgent(t *testing.T, cfg *Config, l Ledger, rec *pinRecorder) *Agent {
+func pinAgent(t *testing.T, cfg *Config, l Ledger, rec *pinRecorder, opts ...Option) *Agent {
 	t.Helper()
 	t.Setenv("FW_ATESPACE", "")
 	delta := NewTool(ToolSpec{Name: "delta", Destructive: true}, func(context.Context, json.RawMessage) (ToolResult, error) {
 		return TextResult("delta"), nil
 	})
-	a, err := New(
+	a, err := New(append([]Option{
 		WithoutDefaults(),
 		WithConfig(cfg),
 		WithAuthn(NoAuthn{}),
@@ -160,7 +170,7 @@ func pinAgent(t *testing.T, cfg *Config, l Ledger, rec *pinRecorder) *Agent {
 		WithLogger(quietLogger()),
 		WithModelMiddleware(rec.middleware),
 		WithTools(pinTool("alpha"), pinTool("beta"), pinTool("gamma"), delta),
-	)
+	}, opts...)...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -188,6 +198,25 @@ func deniedByPolicy(t *testing.T, l Ledger, run, call string) {
 		return
 	}
 	t.Fatalf("no result of %s", call)
+}
+
+// driftNotes returns the metadata of every fw.run.annotated of a run that
+// records a change of its text after a restart.
+func driftNotes(t *testing.T, l Ledger, run string) []map[string]string {
+	t.Helper()
+	var out []map[string]string
+	for _, e := range ledgerEvents(t, l, run) {
+		var d RunAnnotatedData
+		if e.Type != EvRunAnnotated || e.Decode(&d) != nil {
+			continue
+		}
+		if _, ok := d.Metadata["fw.drift.system"]; ok {
+			out = append(out, d.Metadata)
+		} else if _, ok := d.Metadata["fw.drift.instructions"]; ok {
+			out = append(out, d.Metadata)
+		}
+	}
+	return out
 }
 
 func setProfiles(t *testing.T, a *Agent, set map[string]AgentProfile) {
@@ -252,8 +281,10 @@ func TestRunKeepsItsProfileAfterSetProfiles(t *testing.T) {
 	closePin(a)
 
 	// After a restart, the configuration holds the new profile, another
-	// default model, and another budget. The recovered run still uses what
-	// it was queued with. A budget of one tool call would stop it.
+	// default model, and another budget. The recovered run keeps the model,
+	// the tools, and the budget that it was queued with. A budget of one
+	// tool call would stop it. The text of the profile is not in the
+	// ledger, so the run goes on with the text now and records the change.
 	cfg2 := pinConfig(t, "pintest/base2")
 	cfg2.Budget = Budget{MaxTurns: 50, MaxToolCalls: 1}
 	cfg2.Agents = map[string]AgentProfile{"worker": next}
@@ -270,8 +301,11 @@ func TestRunKeepsItsProfileAfterSetProfiles(t *testing.T) {
 	if r.Output != "three" {
 		t.Fatalf("output after the restart = %q", r.Output)
 	}
-	rec.expect(t, 4, 6, "old", "You are the old worker.", "alpha,beta")
+	rec.expect(t, 4, 6, "old", "You are the new worker.", "alpha,beta")
 	deniedByPolicy(t, b.Ledger(), r.ID, "c2")
+	if n := len(driftNotes(t, b.Ledger(), r.ID)); n != 1 {
+		t.Fatalf("%d records of the changed text, want 1", n)
+	}
 }
 
 // A run that waits for an approval goes on with the profile that it was
@@ -294,8 +328,9 @@ func TestWaitingRunKeepsItsProfile(t *testing.T) {
 }
 
 // A run that a shutdown suspended in the middle of a model call resumes at
-// the next start with the profile that it was queued with, although the
-// configuration of that start holds another profile.
+// the next start with the model that it was queued with, although the
+// configuration of that start holds another profile. It takes the text of
+// the profile now and records the change.
 func TestSuspendedRunResumesWithItsProfile(t *testing.T) {
 	ctx := testCtx(t)
 	dir := filepath.Join(t.TempDir(), "runs")
@@ -325,7 +360,11 @@ func TestSuspendedRunResumesWithItsProfile(t *testing.T) {
 	if got.Output != "finished later" {
 		t.Fatalf("output = %q", got.Output)
 	}
-	rec.expect(t, 0, 2, "old", "Old.", "alpha,beta,gamma,delta")
+	rec.expectAt(t, 0, "old", "Old.", "alpha,beta,gamma,delta")
+	rec.expect(t, 1, 2, "old", "New.", "alpha,beta,gamma,delta")
+	if n := len(driftNotes(t, b.Ledger(), r.ID)); n != 1 {
+		t.Fatalf("%d records of the changed text, want 1", n)
+	}
 }
 
 // A change of the default model, of a name in models, or of the effort in

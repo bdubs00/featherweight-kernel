@@ -36,15 +36,9 @@ func (a *Agent) SystemPrompt(prof AgentProfile, instructions string) string {
 		system = DefaultSystemPrompt
 	}
 	sb.WriteString(system)
-	var extra []string
-	for _, s := range prof.Instructions {
-		if s = strings.TrimSpace(s); s != "" {
-			extra = append(extra, s)
-		}
-	}
-	if len(extra) > 0 {
+	if extra := joinInstructions(prof.Instructions); extra != "" {
 		sb.WriteString(instructionsHeading)
-		sb.WriteString(strings.Join(extra, "\n\n"))
+		sb.WriteString(extra)
 	}
 	if s := strings.TrimSpace(instructions); s != "" {
 		sb.WriteString(runHeading)
@@ -56,6 +50,19 @@ func (a *Agent) SystemPrompt(prof AgentProfile, instructions string) string {
 		sb.WriteString(list)
 	}
 	return sb.String()
+}
+
+// joinInstructions returns the instructions of a profile as the system
+// prompt holds them: each without the space around it, the empty ones left
+// out, joined by a blank line.
+func joinInstructions(instructions []string) string {
+	var out []string
+	for _, s := range instructions {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return strings.Join(out, "\n\n")
 }
 
 // SkillsIndex renders the skills that the globs allow as one line each:

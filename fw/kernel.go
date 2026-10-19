@@ -95,6 +95,7 @@ type runState struct {
 	parent string        // the parent run, or ""
 	depth  int           // 0 for a top-level run
 	queued RunQueuedData // the request, as fw.run.queued recorded it
+	text   *runText      // the text of the run, in memory only (textOf)
 
 	emitMu    sync.Mutex
 	events    []Event // the full log while a driver holds a reference
@@ -309,8 +310,14 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	if req.Agent == "" {
 		req.Agent = "default"
 	}
-	if _, ok := a.profiles()[req.Agent]; !ok && req.Agent != "default" {
+	// The request reads the profile once, so a SetProfiles meanwhile cannot
+	// split it between two versions.
+	named, ok := a.ProfileNamed(req.Agent)
+	if !ok && req.Agent != "default" {
 		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, req.Agent)
+	}
+	if !ok {
+		named = AgentProfile{Name: req.Agent}
 	}
 	if err := a.Authorize(ctx, ActionAgentRun, Target{Agent: req.Agent}); err != nil {
 		return nil, err
@@ -334,7 +341,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	if err := a.checkProfile(req.Profile); err != nil {
 		return nil, err
 	}
-	if err := a.checkModel(req); err != nil {
+	if err := a.checkModelOf(named, req.Profile); err != nil {
 		return nil, err
 	}
 	if len(req.Instructions) > maxInstructionBytes {
@@ -367,8 +374,8 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	if err != nil {
 		return nil, err
 	}
-	extra := a.extraTools(ctx, req, parent)
-	resolved := a.resolveProfile(ctx, req, parent)
+	extra := a.extraTools(ctx, req, named, parent)
+	resolved, text := a.resolveProfile(ctx, req, named, parent)
 	req.Metadata = inheritBatch(req.Metadata, parentRun)
 	meta := a.annotate(ctx, &req, parentRun, req.Metadata)
 	if req.IdempotencyKey != "" {
@@ -397,7 +404,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, err
 	}
 	rs := k.newRunState(req.ID, req.Agent, "")
-	rs.parent, rs.depth = req.Parent, depth
+	rs.parent, rs.depth, rs.text = req.Parent, depth, text
 	_ = ev.Decode(&rs.queued)
 	if parent != nil {
 		// A child shares the trace of its parent, so one trace shows the tree.
@@ -643,15 +650,18 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 // the configuration. The kernel has no built-in default, so a process
 // without a model refuses the run here, before anything is recorded.
 func (a *Agent) checkModel(req RunRequest) error {
+	named, _ := a.ProfileNamed(req.Agent)
+	return a.checkModelOf(named, req.Profile)
+}
+
+// checkModelOf is checkModel for a named profile that the caller read.
+func (a *Agent) checkModelOf(named AgentProfile, inline *AgentProfile) error {
 	if a.model != nil {
 		return nil
 	}
-	model := ""
-	if p, ok := a.ProfileNamed(req.Agent); ok {
-		model = p.Model
-	}
-	if req.Profile != nil && req.Profile.Model != "" {
-		model = req.Profile.Model
+	model := named.Model
+	if inline != nil && inline.Model != "" {
+		model = inline.Model
 	}
 	if a.cfg.ModelSelector(model) == "" {
 		return fmt.Errorf("%w: %w", ErrInvalidRequest, ErrNoModel)
