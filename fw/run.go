@@ -199,12 +199,18 @@ type Approval struct {
 	Connect *ConnectRequest `json:"connect,omitempty"`
 }
 
-// RunUsage is the usage of a run so far.
+// RunUsage is the usage of a run so far. Every field is a sum, so the
+// usages of several runs add field by field.
 type RunUsage struct {
 	Usage
 	Turns     int     `json:"turns"`
 	ToolCalls int     `json:"toolCalls,omitempty"`
 	CostUSD   float64 `json:"costUSD,omitempty"`
+	// UnpricedTokens counts the tokens of the model calls whose model has
+	// no price in the price table that computed CostUSD. CostUSD leaves
+	// them out, so their cost is unknown, not zero. A price of zero is a
+	// price. Without a price table, every token is unpriced.
+	UnpricedTokens int `json:"unpricedTokens,omitempty"`
 }
 
 // Run is the status object of a run. It is a projection of the ledger.
@@ -237,6 +243,14 @@ type Run struct {
 	// package that shows the runs of other processes, such as the fleet of
 	// the workbench, sets it on the runs that it brings in.
 	Member string `json:"member,omitempty"`
+	// UsageSeq is the sequence number of the latest event that carried the
+	// totals of the run, fw.run.finished or fw.run.suspended. Usage took
+	// those totals and then added the usage of the later events that the
+	// projection saw. Zero means that no event carried totals: the run did
+	// not reach either event yet, or an older kernel wrote its ledger. A
+	// consumer that receives only the lifecycle events of a run, such as
+	// the front of a fleet, knows the usage of the run up to this event.
+	UsageSeq uint64 `json:"usageSeq,omitempty"`
 }
 
 // RunRequest describes a run to start.

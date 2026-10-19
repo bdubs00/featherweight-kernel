@@ -85,9 +85,9 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.loop.detected` | tool, count, period, action (`warned`, `failed`) |
 | `fw.error` | message, retryable |
 | `fw.turn.finished` | turn number |
-| `fw.run.suspended` | reason |
+| `fw.run.suspended` | reason, totals (the usage of the run so far, section 8.2) |
 | `fw.run.resumed` | from seq |
-| `fw.run.finished` | outcome (`completed`, `failed`, `canceled`), output, error |
+| `fw.run.finished` | outcome (`completed`, `failed`, `canceled`), output, error, totals (the usage of the run so far, section 8.2) |
 
 The raw provider blocks in `fw.model.responded` are stored unchanged. They include thinking blocks. The kernel sends them back to the same provider on the next turn, because the provider requires the blocks it produced.
 
@@ -738,6 +738,8 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 }
 ```
 
+`usage` sums the work of the run: the input, output, cache read, and cache write tokens of its model calls, its turns, its tool calls, and `costUSD`, the cost of the calls whose model has a price (section 5.2). `unpricedTokens` counts the tokens of the calls whose model has no price, because their cost is unknown, not zero. A price of zero is a price. The kernel records the usage of the run so far as `totals` on every `fw.run.finished` and `fw.run.suspended`, across follow-ups, so a run that finishes again carries more. The projection takes those totals in place of its own sum, and `usageSeq` is the sequence number of the latest event that carried them. The ledger gives the same usage with and without the totals, because they are the sum of the events before them. After a restart with another price table, the work before the latest totals keeps the cost at the prices of its time. A consumer that receives only the lifecycle events of a run therefore knows its usage each time the run finishes or is suspended (section 9.4).
+
 The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET /v1/agents/{name}`. The workbench serves `PUT` and `DELETE /v1/agents/{name}` and `GET /v1/whoami`, the caller with its roles and its teams.
 
 An extension adds routes to this surface (section 12.8). The workbench adds the page, the browser sign-in, home, results, transcripts, the builder, the fleet, usage, and connections (the workbench architecture, section 2).
@@ -816,6 +818,8 @@ The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each mes
 ### 9.4 Egress
 
 The setting `bus.egress` names a subject prefix, for example `fw.events`. The `bus` projection publishes each ledger event to `<prefix>.<atespace>.<agent>.<type>`. The setting `bus.egressTypes` limits the published types. Each event carries `node`, the name of the process from the key `node` of the configuration, so a consumer that follows many processes knows which one holds the run; the front of a fleet reads the stream this way (the workbench architecture, section 4.8). Consumers include audit, billing, dashboards, and other agents. The observer appends each event to a queue, and one goroutine publishes the queue in order, so a ledger append never waits for the bus. If the bus refuses, the kernel keeps up to 10,000 events and tries again with a pause that doubles up to 30 seconds. A boot without the bus loses no event, and a shutdown sends what is queued while the bus answers.
+
+The stream is not a ledger. Past 10,000 events the queue drops the oldest, and a crash loses what is queued, so a consumer that adds up the tokens of `fw.model.responded` can miss some. A consumer also does not need `fw.model.responded`, which carries the content of the run: `fw.run.finished` and `fw.run.suspended` carry the totals of the run (section 8.2), and the projection sets the usage from them. A consumer of the lifecycle events alone, such as the front of a fleet, therefore knows the tokens, the turns, the tool calls, and the cost of every run that finished or was suspended, and a lost event costs nothing once the next one arrives. The cost in the totals is the cost at the prices of the process that ran the calls. A consumer with a price table of its own does not price the calls again, because the totals do not name the model of each call; its prices apply only to the increments that it receives after the totals. The tokens that the process had no price for are `unpricedTokens`, so a consumer shows an unknown cost and not a cost of zero.
 
 ### 9.5 Request and reply
 
@@ -899,7 +903,7 @@ A linked package adds its own series to the registry of the metrics surface with
 
 Use Prometheus for trends, errors, and latency. Do not use it to bill people or to audit usage. A scrape misses what a process does between its last scrape and its exit. Prometheus never sees a process that it does not scrape. A counter starts again at zero after a restart, so a total over a long range is an estimate.
 
-The ledger of each process records every model call with its tokens, and `fw events <run> --format jsonl` exports it. Bus egress (section 9.4) sends the same events to a consumer for billing or audit. The kernel enforces each budget from the ledger, not from Prometheus. The dashboard of the workbench therefore shows no usage page. `GET /v1/usage` and the MCP tool `usage` of the workbench still answer, and both are deprecated. The result of a run keeps the usage of that run beside its limits (the workbench architecture, section 6.3).
+The ledger of each process records every model call with its tokens, and `fw events <run> --format jsonl` exports it. Bus egress (section 9.4) sends the same events to a consumer for billing or audit, and the totals on `fw.run.finished` give the usage of each run without the content of its calls. The kernel enforces each budget from the ledger, not from Prometheus. The dashboard of the workbench therefore shows no usage page. `GET /v1/usage` and the MCP tool `usage` of the workbench still answer, and both are deprecated. The result of a run keeps the usage of that run beside its limits (the workbench architecture, section 6.3).
 
 #### Scrape configuration, alerts, and a dashboard
 
