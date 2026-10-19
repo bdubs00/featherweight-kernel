@@ -1,6 +1,7 @@
 package native
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -75,5 +76,66 @@ func TestTrustedCallerNamesTheIDOfARun(t *testing.T) {
 	resp, _ = do(t, "POST", srv.URL+"/v1/runs", `{"input":"mine","id":"`+fw.NewID()+`"}`, "Authorization", "Bearer alice-token")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("a person named the id of a run: status %d", resp.StatusCode)
+	}
+}
+
+// childSpawner runs each child in another agent, as a child Task would.
+type childSpawner struct{ other *fw.Agent }
+
+func (s childSpawner) Spawn(ctx context.Context, _ *fw.Run, req fw.RunRequest) (*fw.Run, string, error) {
+	r, err := s.other.Start(ctx, req.Input, fw.WithRequest(req))
+	return r, "ax:team/child", err
+}
+func (s childSpawner) Plan(*fw.Run, fw.RunRequest) (string, error) { return "ax:team/child", nil }
+func (s childSpawner) Find(ctx context.Context, _, id string) (*fw.Run, error) {
+	return s.other.Get(ctx, id)
+}
+func (s childSpawner) Abandon(context.Context, string) error { return nil }
+func (s childSpawner) Get(ctx context.Context, _, id string) (*fw.Run, error) {
+	return s.other.Get(ctx, id)
+}
+func (s childSpawner) WaitFor(ctx context.Context, _, id string, done func(*fw.Run) bool) (*fw.Run, error) {
+	return s.other.WaitFor(ctx, id, done)
+}
+func (s childSpawner) Decide(ctx context.Context, _, id string, d fw.ApprovalDecision) error {
+	return s.other.Decide(ctx, id, d)
+}
+func (s childSpawner) Cancel(ctx context.Context, _, id string) error { return s.other.Cancel(ctx, id) }
+
+// TestTrustedCallerCannotTakeTheIDOfAChild checks that a trusted caller
+// cannot start a run under the id of a child of another person's run, so
+// the parent and its person keep reading the child. The id of a run that
+// exists is a conflict, and an id that is not an id of a run is refused.
+func TestTrustedCallerCannotTakeTheIDOfAChild(t *testing.T) {
+	callers := tokenMap{
+		"alice-token": {Subject: "alice", Kind: fw.KindUser},
+		"svc-token":   {Subject: "svc", Kind: fw.KindWorkload},
+	}
+	other := newAgent(t, newScript(endTurn("child done")).model())
+	a := newAgent(t, newScript(endTurn("parent done"), endTurn("impostor")).model(),
+		fw.WithAuthn(callers), fw.WithSpawner(childSpawner{other}))
+	srv := serve(t, a)
+	resp, b := do(t, "POST", srv.URL+"/v1/runs", `{"input":"parent work","wait":true}`, "Authorization", "Bearer alice-token")
+	parent := decodeRun(t, resp, b, http.StatusOK)
+	child, err := a.SpawnChild(t.Context(), parent.ID, fw.NewRunRequest("do x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, b = do(t, "POST", srv.URL+"/v1/runs", `{"input":"impostor","principal":"alice","id":"`+child.ID+`"}`, "Authorization", "Bearer svc-token")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a workload named the id of a child: status %d: %s", resp.StatusCode, b)
+	}
+	got, err := a.WaitFor(t.Context(), child.ID, func(r *fw.Run) bool { return r.State.Terminal() })
+	if err != nil || got.Member != "ax:team/child" || got.Output != "child done" {
+		t.Fatalf("the child after the attempt = %+v, %v", got, err)
+	}
+	resp, b = do(t, "POST", srv.URL+"/v1/runs", `{"input":"again","id":"`+parent.ID+`"}`, "Authorization", "Bearer svc-token")
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("POST with the id of a run that exists: status %d: %s", resp.StatusCode, b)
+	}
+	resp, b = do(t, "POST", srv.URL+"/v1/runs", `{"input":"odd","id":"index.jsonl"}`, "Authorization", "Bearer svc-token")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST with an id that is not an id of a run: status %d: %s", resp.StatusCode, b)
 	}
 }

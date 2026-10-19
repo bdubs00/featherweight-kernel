@@ -78,7 +78,7 @@ func TestSpawnChildRecordIsDurableBeforeTheSpawner(t *testing.T) {
 			recs = append(recs, d)
 		}
 	}
-	if len(recs) != 2 || recs[0].Child != child.ID || recs[0].Started || recs[0].Key != "k1" || recs[0].Input != "do x" ||
+	if len(recs) != 2 || recs[0].Child != child.ID || recs[0].Started || !strings.HasPrefix(recs[0].Key, "k1#") || recs[0].Input != "do x" ||
 		recs[0].Metadata[MetaParent] != parent.ID || !recs[1].Started || recs[1].Member != "other" {
 		t.Fatalf("records of the child = %+v", recs)
 	}
@@ -148,8 +148,8 @@ func (failingSpawner) Spawn(context.Context, *Run, RunRequest) (*Run, string, er
 }
 
 // A start that the spawner refuses is recorded as a failed child with the
-// reason, so a restart does not look for it, and it does not count toward
-// spawn.maxChildren.
+// reason, so a restart does not look for it. The parent lists it, and it
+// does not count toward spawn.maxChildren.
 func TestSpawnChildThatTheSpawnerRefuses(t *testing.T) {
 	ctx := testCtx(t)
 	l := NewMemLedger()
@@ -168,6 +168,14 @@ func TestSpawnChildThatTheSpawnerRefuses(t *testing.T) {
 	if err != nil || r.State != StateFailed || !strings.Contains(r.Error, "did not start in other") || !strings.Contains(r.Error, "no room") {
 		t.Fatalf("the refused child = %+v, %v", r, err)
 	}
+	listed := func(a *Agent) {
+		t.Helper()
+		kids, err := a.Children(ctx, parent.ID)
+		if err != nil || len(kids) != 1 || kids[0].ID != d.Child || kids[0].State != StateFailed || kids[0].Parent != parent.ID {
+			t.Fatalf("children of the parent = %+v, %v", kids, err)
+		}
+	}
+	listed(a)
 	// The next process does not look for the refused child, and the slot
 	// of spawn.maxChildren is free here and there.
 	b := newTestAgent(t, newScript().Model(), WithLedger(l), WithConfig(cfg), WithSpawner(&otherSpawner{other: other}))
@@ -177,6 +185,7 @@ func TestSpawnChildThatTheSpawnerRefuses(t *testing.T) {
 	if r, err := b.Get(ctx, d.Child); err != nil || r.State != StateFailed {
 		t.Fatalf("the refused child after the restart = %+v, %v", r, err)
 	}
+	listed(b)
 	if _, err := b.SpawnChild(ctx, parent.ID, NewRunRequest("do y")); err != nil {
 		t.Fatalf("a child after the refused one = %v", err)
 	}

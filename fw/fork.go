@@ -86,6 +86,9 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	if err := a.Authorize(ctx, ActionAgentRun, Target{Agent: rs.agent}); err != nil {
 		return nil, err
 	}
+	if err := rs.drivable(); err != nil {
+		return nil, err
+	}
 	evs, err := readAll(ctx, a.ledger, src)
 	if err != nil {
 		return nil, err
@@ -148,17 +151,17 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 }
 
 // Starting counts the branches and the children of this process whose
-// start in another process is still open, with the children that it looks
-// for after a restart. The status of the process is not idle while one
-// is, so a controller does not put the process to sleep before its child
-// has its run.
+// start in another process is still open. The status of the process is not
+// idle while one is, so a controller does not put the process to sleep
+// before its child has its run. A look for a child after a restart does
+// not count: it goes on at the next start, so a sleep loses nothing.
 func (a *Agent) Starting() int {
 	k := a.k
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	n := 0
 	for _, ref := range k.remote {
-		if _, ok := ref.starting(); ok {
+		if _, ok := ref.starting(); ok && !ref.start.find {
 			n++
 		}
 	}
@@ -205,11 +208,14 @@ func (a *Agent) startBranch(ctx context.Context, forker Forker, ref childRef, q 
 // recordBranchEnd records a branch or a child of spawn_task that never
 // reached its process as a run of this process with the outcome and the
 // reason, under the id of the branch or the child, and stops counting it as
-// a child in another process.
+// a child in another process. The record stands in for the run: nothing
+// drives it here. A child of spawn_task names its parent in q, so the
+// parent lists it, and it does not count toward spawn.maxChildren.
 func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, reason string) {
 	k := a.k
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
+	brs.parent, brs.depth, brs.standIn = q.Parent, q.Depth, true
 	k.mu.Lock()
 	k.runs[id] = brs
 	delete(k.remote, id)
@@ -292,6 +298,9 @@ func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest)
 			}
 			return nil, fmt.Errorf("%w: a run with the id %s exists", ErrInvalidRequest, req.ID)
 		}
+		if err := a.checkNamedID(ctx, RunRequest{ID: req.ID}); err != nil {
+			return nil, err
+		}
 	}
 	return a.appendBranch(q, events, req)
 }
@@ -372,6 +381,10 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
 	k.mu.Lock()
+	if err := k.claimableLocked(id); err != nil {
+		k.mu.Unlock()
+		return nil, err
+	}
 	k.runs[id] = brs
 	k.mu.Unlock()
 	undo := func() {
