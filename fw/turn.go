@@ -458,6 +458,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		System:    system,
 		Tools:     specs,
 		Effort:    effort,
+		EffortSet: c.queued.Resolved != nil,
 		MaxTokens: defaultMaxTokens,
 		Metadata:  map[string]string{"runId": rs.id, "agent": rs.agent},
 	}

@@ -259,7 +259,7 @@ type Model interface {
 }
 ```
 
-`Request` carries the system prompt, the messages, the tool specifications, the effort level, and the output token limit. Messages use a small provider-neutral block set: text, image, document, tool use, tool result, and opaque. The opaque block carries provider data such as thinking blocks without interpretation.
+`Request` carries the system prompt, the messages, the tool specifications, the effort level, and the output token limit. An adapter fills an empty effort with the `effort` of the configuration that opened it, unless `EffortSet` is true: then the empty effort is the effort of the call: the Anthropic adapter sends its default, `high`, and the Gemini and OpenAI adapters send no effort, so the model uses its own default. The kernel sets `EffortSet` for a run with a resolved profile (section 12.5). Messages use a small provider-neutral block set: text, image, document, tool use, tool result, and opaque. The opaque block carries provider data such as thinking blocks without interpretation.
 
 ### 6.2 Adapters
 
@@ -1164,7 +1164,7 @@ The kernel resolves the profile of a run once, when it queues the run, and recor
 | Field | In the resolved profile |
 |---|---|
 | model | the selector, through `models` and the `model` of the configuration, so a change of either does not reach the run |
-| effort | the overlay, else the `effort` of the configuration; a run without one keeps none |
+| effort | the overlay, else the `effort` of the configuration; a run queued without one asks for the default of the provider, also after the configuration names an effort (section 6.1) |
 | skills, tools | the allowlists of the overlay |
 | time zone | the overlay, else the zone of the parent, else `time.zone`; `fw.run.started` records the zone that wins (section 5.8) |
 | budget | the budget of the overlay, with each zero field taken from `budget:` in `fw.yaml`; the budget of the request stays in its own field and wins over it |
