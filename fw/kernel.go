@@ -66,14 +66,16 @@ type kernel struct {
 
 	mu        sync.Mutex
 	runs      map[string]*runState
-	idem      map[string]string       // idempotency key to run id
-	overrides map[string]*runOverride // per-run tools and policy, for replay
-	kids      map[string]int          // child runs started by each run, in its life
-	remote    map[string]childRef     // the children that a Spawner runs in other processes
-	children  map[string][]*runState  // the child runs in this process, by the id of the parent
-	records   map[string][]*runState  // the records of children that never ran (standIn), by the id of the parent; no part of the tree
-	reports   map[string]*childReport // what each child in another process last reported, see tree.go
-	spent     map[string]bool         // the runs whose tree used up a limit and whose runs below were canceled
+	idem      map[string]string          // idempotency key to run id
+	overrides map[string]*runOverride    // per-run tools and policy, for replay
+	kids      map[string]int             // child runs started by each run, in its life
+	remote    map[string]childRef        // the children that a Spawner runs in other processes
+	children  map[string][]*runState     // the child runs in this process, by the id of the parent
+	records   map[string][]*runState     // the records of children that never ran (standIn), by the id of the parent; no part of the tree
+	remoteOf  map[string]map[string]bool // the ids of remote, by the id of the parent
+	reports   map[string]*childReport    // what each child in another process last reported, see tree.go
+	spent     map[string]string          // the runs whose tree used up a limit, with the reason of the cancels under them
+	retrying  map[string]bool            // the runs whose stop tries a failed cancel again
 
 	sem      chan struct{} // one slot per active run, Config.MaxRuns slots
 	childSem chan struct{} // one slot per working child run, Config.Spawn.MaxRunning slots; nil for no limit
@@ -180,8 +182,10 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		remote:    map[string]childRef{},
 		children:  map[string][]*runState{},
 		records:   map[string][]*runState{},
+		remoteOf:  map[string]map[string]bool{},
 		reports:   map[string]*childReport{},
-		spent:     map[string]bool{},
+		spent:     map[string]string{},
+		retrying:  map[string]bool{},
 		sem:       make(chan struct{}, maxRuns),
 		drainCh:   make(chan struct{}),
 		closedCh:  make(chan struct{}),
@@ -1070,14 +1074,17 @@ func normalizeDecision(d ApprovalDecision) (string, error) {
 }
 
 // Cancel cancels a run. It stops the model call or the tools in flight and
-// appends fw.run.finished with outcome canceled. Cancel on a finished run
-// does nothing.
+// appends fw.run.finished with outcome canceled. Then it cancels every run
+// under it that is still open, at any depth, in this process and in other
+// processes, also below a child that finished. Cancel on a finished run
+// appends nothing to it, and cancels the runs under it that are still
+// open. A branch is a run of its own, and Cancel leaves it alone.
 func (a *Agent) Cancel(ctx context.Context, id string) error {
 	return a.cancelRun(ctx, id, "canceled")
 }
 
 // cancelRun is Cancel with the error that fw.run.finished records for the
-// run and for each of its children in this process.
+// run and for each run under it in this process.
 func (a *Agent) cancelRun(ctx context.Context, id, reason string) error {
 	rs, err := a.k.lookup(id)
 	if err != nil {
@@ -1117,6 +1124,19 @@ func (a *Agent) cancelRun(ctx context.Context, id, reason string) error {
 	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
 		return err
 	}
+	if err := a.cancelOne(rs, reason); err != nil {
+		return err
+	}
+	// A canceled run takes the runs under it along, so no run works for a
+	// parent that is gone.
+	a.cancelBelow(rs, reason)
+	return nil
+}
+
+// cancelOne cancels the run rs alone: it stops what the run does and
+// appends fw.run.finished with outcome canceled and the reason. A run that
+// finished stays as it is.
+func (a *Agent) cancelOne(rs *runState, reason string) error {
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
 	rs.mu.Lock()
@@ -1130,26 +1150,11 @@ func (a *Agent) cancelRun(ctx context.Context, id, reason string) error {
 	if cancel != nil {
 		cancel()
 	}
-	_, err = a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: reason})
+	_, err := a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: reason})
 	rs.mu.Lock()
 	rs.canceling = false
 	rs.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	// A canceled run takes its children with it, so no child works for a
-	// parent that is gone.
-	for _, child := range a.k.localChildren(rs.id) {
-		if cerr := a.cancelRun(context.Background(), child.id, reason); cerr != nil {
-			a.log.Warn("cancel child run", "run", child.id, "parent", rs.id, "error", cerr)
-		}
-	}
-	for cid, ref := range a.remoteChildren(rs.id) {
-		if cerr := a.spawner.Cancel(context.Background(), ref.member, cid); cerr != nil {
-			a.log.Warn("cancel remote child run", "run", cid, "member", ref.member, "parent", rs.id, "error", cerr)
-		}
-	}
-	return nil
+	return err
 }
 
 // emit appends one event of a run. See emitLocked.

@@ -62,6 +62,35 @@ func TestSpawnTaskRefusesWhenTheTreeBudgetIsUsedUp(t *testing.T) {
 	}
 }
 
+// TestSpawnTaskRefusesWhenTheTreeOfAnAncestorIsUsedUp proves that
+// spawn_task refuses a child of a run whose own budget has room, because
+// the tree of an ancestor used up a limit, and that the result names the
+// ancestor and says that the tree shares the limit.
+func TestSpawnTaskRefusesWhenTheTreeOfAnAncestorIsUsedUp(t *testing.T) {
+	ctx := testCtx(t)
+	s := newScripted()
+	s.say("root", endTurn("root done"))
+	s.say("spender", endTurn("spent"))
+	s.say("sibling", endTurn("sibling done"))
+	a := newSpawnAgent(t, s.Model())
+	root, err := a.Run(ctx, "root", fw.WithRunBudget(fw.Budget{MaxTokens: 30}))
+	mustState(t, root, err, fw.StateCompleted)
+	// The root and one child use the 30 tokens of the tree of the root.
+	spender, err := a.Run(ctx, "spender", fw.WithParent(root.ID), fw.WithRunBudget(fw.Budget{MaxTokens: 1000}))
+	mustState(t, spender, err, fw.StateCompleted)
+	sibling, err := a.Run(ctx, "sibling", fw.WithParent(root.ID), fw.WithRunBudget(fw.Budget{MaxTokens: 1000}))
+	if err == nil {
+		t.Fatalf("a child of a spent tree started: %+v", sibling)
+	}
+	// A child of the spender has room of its own, 15 of 1000 tokens, but
+	// not in the tree of the root.
+	spawn := builtinTool(t, "spawn_task", fw.DefaultConfig())
+	res := call(t, runCtx(ctx, a, spender.ID), spawn, `{"input":"grandchild"}`)
+	for _, want := range []string{"no child can start", "shares with the runs under it", "run " + root.ID + " and the runs under it", "budget.maxTokens", "which the whole tree shares"} {
+		mustFail(t, res, want)
+	}
+}
+
 // TestSpawnTaskRefusesPastTheTreeSize proves that the model reads which
 // limit stops a child past spawn.maxDescendants, and goes on without it.
 func TestSpawnTaskRefusesPastTheTreeSize(t *testing.T) {

@@ -359,13 +359,18 @@ const ScopeTree = "tree"
 // child grows, so a restart of the parent knows what the tree of the child
 // used. TreeUsage is the usage of the child and of every run under it, as
 // the child reported it (Run.TreeUsage), State is the state of the child,
-// and Open is its Run.TreeOpen.
+// Open is its Run.TreeOpen, and Working its Run.TreeWorking. The kernel
+// also records a read that shows that the child stopped or started to
+// work, so a restart of the parent reads again only a child that works.
+// The event changes nothing of the parent: a finished parent stays
+// finished, as after fw.run.annotated.
 type ChildReportedData struct {
 	Child     string   `json:"child"`
 	Member    string   `json:"member,omitempty"`
 	State     RunState `json:"state"`
 	TreeUsage RunUsage `json:"treeUsage"`
 	Open      int      `json:"open,omitempty"`
+	Working   int      `json:"working,omitempty"`
 }
 
 // ErrorData is the payload of fw.error.

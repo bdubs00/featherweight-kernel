@@ -299,10 +299,13 @@ type Run struct {
 	// another process reads the whole tree of a child in one read.
 	TreeUsage *RunUsage `json:"treeUsage,omitempty"`
 	// TreeOpen counts the runs under the run that have not finished, as
-	// the kernel knows them, with TreeUsage. A parent in another process
-	// goes on reading a finished child while it is not zero, because the
-	// tree of the child can still grow.
-	TreeOpen int `json:"treeOpen,omitempty"`
+	// the kernel knows them, with TreeUsage, and TreeWorking the runs of
+	// those that work: queued or running. A parent in another process goes
+	// on reading a finished child while TreeWorking is not zero, because
+	// the tree of the child still grows; a run that waits for a person
+	// does not count, and nothing reads it in the background.
+	TreeOpen    int `json:"treeOpen,omitempty"`
+	TreeWorking int `json:"treeWorking,omitempty"`
 	// kept is RunQueuedData.Kept: the events of a branch that are copies of
 	// the events of its source, whose usage the branch leaves out.
 	kept uint64

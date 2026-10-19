@@ -89,8 +89,8 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 			k.children[q.Parent] = append(k.children[q.Parent], rs)
 		}
 		for _, d := range remote {
-			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1, key: d.Key,
-				reserved: d.Reserved, branch: d.branch()}
+			k.setRemoteLocked(d.Child, childRef{parent: id, member: d.Member, depth: q.Depth + 1, key: d.Key,
+				reserved: d.Reserved, branch: d.branch(), known: d.Kind != ""})
 			k.kids[id]++
 			started[d.Child] = d.Started
 			if d.placed() || d.spawning() {
@@ -137,7 +137,7 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 		if rs.parent != "" {
 			k.records[rs.parent] = append(k.records[rs.parent], rs)
 		}
-		delete(k.remote, id)
+		k.dropRemoteLocked(id)
 		k.kids[ref.parent]--
 	}
 	kept := unfinished[:0]
@@ -150,9 +150,15 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 			kept = append(kept, rs)
 		}
 	}
-	for id, d := range reports {
-		if _, ok := k.remote[id]; ok {
-			k.reports[id] = &childReport{tree: d.TreeUsage, state: d.State, open: d.Open, rec: d}
+	// A child that a kernel of this version recorded starts from what its
+	// parent recorded last, or from its start when nothing came after it.
+	// A child of an older kernel has no known state, so nothing reads it
+	// in the background (followOnce).
+	for id, ref := range k.remote {
+		if d, ok := reports[id]; ok {
+			k.reports[id] = &childReport{tree: d.TreeUsage, state: d.State, open: d.Open, work: d.Working, rec: d}
+		} else if ref.known && !ref.branch {
+			k.reports[id] = &childReport{state: StateRunning}
 		}
 	}
 	unfinished = kept

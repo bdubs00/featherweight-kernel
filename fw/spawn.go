@@ -289,7 +289,10 @@ func inheritBatch(meta map[string]string, parent *Run) map[string]string {
 // of a child of spawn_task. reserved is the number of runs of the tree of
 // the parent that the child holds (spawn.maxDescendants). A branch is a
 // run of its own: it shares no budget and no count with the tree of its
-// source.
+// source. known is true for a child that a kernel of this version
+// recorded, with the kind of its record: its last known state is the start
+// until a read or a fw.child.reported says more. A child of an older
+// kernel has no known state.
 type childRef struct {
 	parent   string
 	member   string
@@ -298,6 +301,7 @@ type childRef struct {
 	key      string
 	reserved int
 	branch   bool
+	known    bool
 }
 
 // branchStart is the start of a branch or a child in another process
@@ -404,11 +408,18 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	// The child spends from the tree of the parent and of every ancestor,
 	// so it alone can never spend more than the tightest one has left. The
 	// parent counts what the child reports, and siblings share what is
-	// left as they go.
-	if o, spent := a.limitSpent(p); spent {
+	// left as they go. The check and the cap come from one read of the
+	// usage, and a room that is not above zero refuses the child, because
+	// a cap of zero would be no limit.
+	room, o, spent := a.spendRoom(p)
+	if spent {
 		return nil, o.refusal()
 	}
-	b = b.Cap(a.roomOf(p).budget())
+	rest, ok := room.budget()
+	if !ok {
+		return nil, fmt.Errorf("%w: the trees above run %s have less than one unit left of a limit", ErrTreeBudget, p.id)
+	}
+	b = b.Cap(rest)
 	if left, ok := a.timeLeft(ctx, p, a.now()); ok && (b.Deadline <= 0 || left < b.Deadline) {
 		if left < time.Second {
 			left = time.Second
@@ -451,7 +462,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder}
-	ref := childRef{parent: parent, member: member, depth: depth, start: start, key: key}
+	ref := childRef{parent: parent, member: member, depth: depth, start: start, key: key, known: true}
 	a.decorateChild(placeholder, ref)
 	k.mu.Lock()
 	for key != "" && a.keyedLocked(parent, key) {
@@ -478,14 +489,14 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	}
 	intent.Reserved = ref.reserved
 	k.kids[parent]++
-	k.remote[req.ID] = ref
+	k.setRemoteLocked(req.ID, ref)
 	k.mu.Unlock()
 	// The record must be on disk before the process exists: a restart then
 	// knows the child, wherever the start stopped. The file ledger syncs
 	// every fw.run.child event.
 	if _, err := a.emit(nil, p, EvRunChild, intent); err != nil {
 		k.mu.Lock()
-		delete(k.remote, req.ID)
+		k.dropRemoteLocked(req.ID)
 		k.kids[parent]--
 		close(start.done)
 		k.mu.Unlock()
@@ -538,7 +549,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		cancel()
 	}
 	k.mu.Lock()
-	k.remote[req.ID] = ref
+	k.setRemoteLocked(req.ID, ref)
 	close(start.done)
 	k.mu.Unlock()
 	a.log.Info("child started in another process", "run", parent, "child", req.ID, "member", got)
@@ -729,10 +740,10 @@ func (a *Agent) findChild(parent *runState, d RunChildData, outcome, why string)
 	}
 	ctx, cancel := context.WithCancel(k.ctx)
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder, find: true}
-	ref := childRef{parent: parent.id, member: d.Member, depth: parent.depth + 1, start: start, key: d.Key, reserved: d.Reserved}
+	ref := childRef{parent: parent.id, member: d.Member, depth: parent.depth + 1, start: start, key: d.Key, reserved: d.Reserved, known: d.Kind != ""}
 	a.decorateChild(placeholder, ref)
 	k.mu.Lock()
-	k.remote[d.Child] = ref
+	k.setRemoteLocked(d.Child, ref)
 	k.mu.Unlock()
 	go a.find(ctx, planner, ref, d.Child, q, outcome, why)
 }
@@ -767,7 +778,7 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 	deadline := at.Add(lookLimit)
 	wait := time.Second
 	for {
-		_, err := planner.Find(ctx, ref.member, id)
+		found, err := planner.Find(ctx, ref.member, id)
 		if ctx.Err() != nil {
 			// This process shuts down. The record of the child stays as it
 			// is, and the next start looks again.
@@ -777,6 +788,10 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 		if err == nil {
 			a.adoptChild(ctx, ref, id)
 			done()
+			// The read of the look counts the tree of the child, and a tree
+			// that a stop spent meanwhile cancels the child at once.
+			a.decorateChild(found, ref)
+			a.observe(id, ref, found)
 			return
 		}
 		missing := errors.Is(err, ErrRunNotFound)
@@ -933,10 +948,8 @@ func (a *Agent) remoteChildren(parent string) map[string]childRef {
 	a.k.mu.Lock()
 	defer a.k.mu.Unlock()
 	out := map[string]childRef{}
-	for id, ref := range a.k.remote {
-		if ref.parent == parent {
-			out[id] = ref
-		}
+	for id := range a.k.remoteOf[parent] {
+		out[id] = a.k.remote[id]
 	}
 	return out
 }

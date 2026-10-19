@@ -146,7 +146,7 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 		a.log.Warn("record a remote branch", "run", src, "branch", req.ID, "member", member, "error", err)
 	}
 	k.mu.Lock()
-	k.remote[req.ID] = ref
+	k.setRemoteLocked(req.ID, ref)
 	k.mu.Unlock()
 	a.log.Info("run branched in another process", "run", src, "branch", req.ID, "member", member, "seq", req.Seq)
 	go a.startBranch(bctx, forker, ref, q, kept, req)
@@ -225,7 +225,7 @@ func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, rea
 	if q.Parent != "" {
 		k.records[q.Parent] = append(k.records[q.Parent], brs)
 	}
-	delete(k.remote, id)
+	k.dropRemoteLocked(id)
 	k.kids[parent]--
 	k.mu.Unlock()
 	if _, err := a.emit(nil, brs, EvRunQueued, q); err != nil {
