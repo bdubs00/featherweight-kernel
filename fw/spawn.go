@@ -770,20 +770,35 @@ func (a *Agent) findChild(parent *runState, d RunChildData, outcome, why string)
 	go a.find(ctx, planner, ref, d.Child, q, outcome, why)
 }
 
-// lookLimit bounds the look for a child, counted from the record of the
-// child, which the id of the child dates. Past it, a look that cannot tell
-// gives up, so a lasting error, such as a token that the router refuses,
-// does not keep the look going forever, and the bound holds over restarts.
-const lookLimit = 15 * time.Minute
+// The bounds of a look for a child. A look that cannot tell gives up once
+// the record of the child, which the id of the child dates, is lookLimit
+// old, and this process looked lookTries times over at least lookOwn of
+// its own. So a lasting error, such as a token that the router refuses,
+// does not keep the look going forever, and a look that begins long after
+// the record, as after a long stop of the parent, still tries a passing
+// error, such as an outage of the platform, several times.
+const (
+	lookLimit = 15 * time.Minute
+	lookTries = 5
+	lookOwn   = 3 * time.Minute
+)
+
+// lookPacer lets a spawner of a test of this package shorten a look: the
+// first wait between two tries, and lookOwn. Zero keeps one second and
+// lookOwn.
+type lookPacer interface {
+	lookPace() (first, own time.Duration)
+}
 
 // find asks the planner for a child until it tells, or until this process
 // shuts down. Each look that cannot tell waits longer, up to a minute. A
 // child that no process has is abandoned first and recorded as failed
 // after, so a restart between the two looks again and finds nothing to
-// remove; a failed abandon is tried again. Past lookLimit, the look gives
-// up: it abandons the process, because a child that the parent cannot
-// reach can never report to it, and records the child as failed with the
-// reason, so a person sees what happened. A look for a child whose start
+// remove; a failed abandon is tried again until the bounds of a look. A
+// look that cannot tell gives up at those bounds: it records the child as
+// failed with the reason, so a person sees what happened, and keeps its
+// process, because the child can still run there and a delete would end
+// its work. The record names the process. A look for a child whose start
 // already ended for its caller cancels the child that it finds and removes
 // its process the same way, because nothing reads that child. Every call
 // to the spawner ends before the look ends, so none outlives Close.
@@ -800,8 +815,14 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 		at = a.now()
 	}
 	deadline := at.Add(lookLimit)
-	wait := time.Second
-	for {
+	wait, own := time.Second, lookOwn
+	if p, ok := planner.(lookPacer); ok {
+		if first, o := p.lookPace(); first > 0 {
+			wait, own = first, o
+		}
+	}
+	began := a.now()
+	for tries := 1; ; tries++ {
 		found, err := planner.Find(ctx, ref.member, id)
 		if ctx.Err() != nil {
 			// This process shuts down. The record of the child stays as it
@@ -837,8 +858,10 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 		default:
 			end, reason = "failed", "this process could not reach "+ref.member+" to look for the child: "+err.Error()
 		}
-		late := !a.now().Before(deadline)
-		if missing || late {
+		now := a.now()
+		late := !now.Before(deadline) && tries >= lookTries && now.Sub(began) >= own
+		switch {
+		case missing:
 			aerr := a.abandonNow(planner, id, ref.member)
 			if ctx.Err() != nil {
 				done()
@@ -854,6 +877,12 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 				return
 			}
 			err = aerr
+		case late:
+			reason += "; its process stays, because the child can still run there"
+			a.log.Warn("look for a child gives up", "run", ref.parent, "child", id, "member", ref.member, "tries", tries, "reason", reason)
+			a.recordBranchEnd(id, ref.parent, q, end, reason)
+			done()
+			return
 		}
 		a.log.Warn("look for a child after a restart", "run", ref.parent, "child", id, "member", ref.member, "retryIn", wait, "error", err)
 		select {
