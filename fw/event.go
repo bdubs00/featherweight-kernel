@@ -281,6 +281,9 @@ type ErrorData struct {
 // RunSuspendedData is the payload of fw.run.suspended.
 type RunSuspendedData struct {
 	Reason string `json:"reason"`
+	// Totals is the usage of the run before this event, as for
+	// RunFinishedData.
+	Totals *RunUsage `json:"totals,omitempty"`
 }
 
 // RunResumedData is the payload of fw.run.resumed.
@@ -293,6 +296,17 @@ type RunFinishedData struct {
 	Outcome string `json:"outcome"`
 	Output  string `json:"output,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Totals is the usage of the run before this event, as the kernel knows
+	// it: the sum over every earlier event of the run, across follow-ups,
+	// so a run that finishes again carries more. The kernel sets it on
+	// every fw.run.finished and fw.run.suspended that it appends. The
+	// projection takes the totals in place of its own sum (see Run.Apply),
+	// so a consumer that receives only the lifecycle events of a run, such
+	// as the front of a fleet, knows the usage of the run without
+	// fw.model.responded. CostUSD is the cost at the prices of the kernel
+	// that ran the calls, and UnpricedTokens counts the tokens that it had
+	// no price for. An event of an older kernel has no totals.
+	Totals *RunUsage `json:"totals,omitempty"`
 }
 
 // IDTime returns the time that an id from NewID holds, to the

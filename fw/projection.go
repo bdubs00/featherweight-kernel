@@ -204,7 +204,8 @@ func receivedMessage(e Event) (Message, bool) {
 
 // ProjectRun builds the status object of a run from its events. The prices
 // argument is optional. When it knows the model of a response, the cost of
-// that response enters the usage.
+// that response enters the usage. Otherwise the tokens of the response
+// enter UnpricedTokens.
 func ProjectRun(events []Event, prices ...Prices) *Run {
 	var p Prices
 	if len(prices) > 0 {
@@ -217,7 +218,19 @@ func ProjectRun(events []Event, prices ...Prices) *Run {
 	return r
 }
 
-// Apply folds one event into the run status. A nil prices adds no cost.
+// Apply folds one event into the run status. A nil prices adds no cost,
+// so every token is unpriced.
+//
+// The usage grows with each fw.model.responded, fw.run.annotated, and
+// fw.context.compacted, and with each fw.turn.started and
+// fw.tool.requested. A fw.run.finished or fw.run.suspended with totals
+// sets the usage to the totals instead, because the kernel that appended
+// the event knew every earlier event of the run: a consumer that saw the
+// increments counts nothing twice, and a consumer that missed some, such
+// as the front of a fleet that receives only the lifecycle events,
+// catches up. The cost then is the cost at the prices of that kernel; the
+// prices argument applies only to the increments after the totals. An
+// event of an older kernel has no totals and changes the usage in no way.
 func (r *Run) Apply(e Event, prices Prices) {
 	if r.ID == "" {
 		r.ID = e.Subject
@@ -272,10 +285,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 		if e.Decode(&d) != nil {
 			return
 		}
-		r.Usage.Usage = r.Usage.Usage.Add(d.Usage)
-		if p, ok := priceOf(prices, d.Provider, d.Model); ok {
-			r.Usage.CostUSD += Cost(d.Usage, p)
-		}
+		r.addUsage(d.Usage, d.Provider, d.Model, prices)
 	case EvRunAnnotated:
 		var d RunAnnotatedData
 		if e.Decode(&d) != nil {
@@ -292,20 +302,14 @@ func (r *Run) Apply(e Event, prices Prices) {
 			}
 		}
 		if d.Usage != nil {
-			r.Usage.Usage = r.Usage.Usage.Add(*d.Usage)
-			if p, ok := priceOf(prices, d.Provider, d.Model); ok {
-				r.Usage.CostUSD += Cost(*d.Usage, p)
-			}
+			r.addUsage(*d.Usage, d.Provider, d.Model, prices)
 		}
 	case EvContextCompacted:
 		var d ContextCompactedData
 		if e.Decode(&d) != nil || d.Usage == nil {
 			return
 		}
-		r.Usage.Usage = r.Usage.Usage.Add(*d.Usage)
-		if p, ok := priceOf(prices, d.Provider, d.Model); ok {
-			r.Usage.CostUSD += Cost(*d.Usage, p)
-		}
+		r.addUsage(*d.Usage, d.Provider, d.Model, prices)
 	case EvToolRequested:
 		r.Usage.ToolCalls++
 	case EvApprovalRequested:
@@ -337,12 +341,17 @@ func (r *Run) Apply(e Event, prices Prices) {
 			r.State = StateRunning
 		}
 	case EvRunSuspended:
+		var d RunSuspendedData
+		if e.Decode(&d) == nil {
+			r.setTotals(d.Totals, e.Seq)
+		}
 		r.State = StateSuspended
 	case EvRunFinished:
 		var d RunFinishedData
 		if e.Decode(&d) != nil {
 			return
 		}
+		r.setTotals(d.Totals, e.Seq)
 		r.Pending = nil
 		switch d.Outcome {
 		case OutcomeCompleted:
@@ -354,6 +363,29 @@ func (r *Run) Apply(e Event, prices Prices) {
 		}
 		r.Output, r.Error = d.Output, d.Error
 	}
+}
+
+// addUsage adds the usage of one model call. With a price for its model,
+// the cost of the call enters CostUSD. Without one, its tokens enter
+// UnpricedTokens, because their cost is unknown, not zero.
+func (r *Run) addUsage(u Usage, provider, model string, prices Prices) {
+	r.Usage.Usage = r.Usage.Usage.Add(u)
+	if p, ok := priceOf(prices, provider, model); ok {
+		r.Usage.CostUSD += Cost(u, p)
+		return
+	}
+	r.Usage.UnpricedTokens += u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens
+}
+
+// setTotals sets the usage to the totals of a fw.run.finished or
+// fw.run.suspended at seq. Nil totals, from an older kernel, change
+// nothing.
+func (r *Run) setTotals(t *RunUsage, seq uint64) {
+	if t == nil {
+		return
+	}
+	r.Usage = *t
+	r.UsageSeq = seq
 }
 
 // priceOf looks up a price by "provider/model", then by the model alone.

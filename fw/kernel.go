@@ -958,11 +958,29 @@ func (a *Agent) emit(guard context.Context, rs *runState, typ string, data any) 
 // its run context, so a canceled or suspended driver never appends after the
 // event that stopped it.
 func (a *Agent) emitLocked(guard context.Context, rs *runState, typ string, data any) (Event, error) {
-	e, err := NewEvent(rs.id, typ, data)
+	e, err := NewEvent(rs.id, typ, withTotals(rs, data))
 	if err != nil {
 		return Event{}, err
 	}
 	return a.appendLocked(guard, rs, e)
+}
+
+// withTotals sets the totals of the run on the data of fw.run.finished and
+// fw.run.suspended: the usage of the run as the status holds it before the
+// event, which is the projection of every earlier event. The caller holds
+// rs.emitMu, so no other event of the run changes the usage meanwhile.
+// Every other data passes unchanged. The events that a branch copies from
+// its source keep the totals that the source recorded (see appendBranch).
+func withTotals(rs *runState, data any) any {
+	switch d := data.(type) {
+	case RunFinishedData:
+		d.Totals = rs.usage()
+		return d
+	case RunSuspendedData:
+		d.Totals = rs.usage()
+		return d
+	}
+	return data
 }
 
 // appendLocked is the one path of every event: it sets the time from the
@@ -1121,6 +1139,14 @@ func (rs *runState) snapshot() *Run {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	return cloneRun(&rs.run)
+}
+
+// usage returns a copy of the usage of the run.
+func (rs *runState) usage() *RunUsage {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	u := rs.run.Usage
+	return &u
 }
 
 func (rs *runState) lastSeq() uint64 {
