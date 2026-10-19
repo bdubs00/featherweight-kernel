@@ -39,6 +39,10 @@ type Tracer struct {
 
 	mu   sync.Mutex
 	runs map[string]*runTrace // open runs by id
+	// kept holds RunQueuedData.Kept of a branch until its last kept event:
+	// the events up to it are copies of its source, whose trace has their
+	// spans.
+	kept map[string]uint64
 }
 
 type runTrace struct {
@@ -91,7 +95,7 @@ func NewTracer(ctx context.Context, serviceName string) (*Tracer, func(context.C
 // NewTracerFrom builds the trace projection on a tracer provider that the
 // caller owns.
 func NewTracerFrom(tp trace.TracerProvider) *Tracer {
-	return &Tracer{tracer: tp.Tracer(instrumentationName), runs: map[string]*runTrace{}}
+	return &Tracer{tracer: tp.Tracer(instrumentationName), runs: map[string]*runTrace{}, kept: map[string]uint64{}}
 }
 
 // Observe implements fw.Observer.
@@ -100,9 +104,22 @@ func (t *Tracer) Observe(e fw.Event) {
 	defer t.mu.Unlock()
 	ts := eventTime(e)
 	rt := t.runs[e.Subject]
+	if k := t.kept[e.Subject]; e.Seq != 0 && e.Seq <= k {
+		// A copy of an event of the source opens no span and counts no
+		// usage again: the trace of the source holds it.
+		if e.Seq == k {
+			delete(t.kept, e.Subject)
+		}
+		return
+	}
 	switch e.Type {
 	case fw.EvRunQueued:
-		// The run span starts at fw.run.started.
+		// The run span starts at fw.run.started. The fw.run.queued of a
+		// branch names its copies.
+		var d fw.RunQueuedData
+		if e.Decode(&d) == nil && d.Kept > e.Seq {
+			t.kept[e.Subject] = d.Kept
+		}
 		return
 	case fw.EvRunFinished:
 		if rt == nil {
