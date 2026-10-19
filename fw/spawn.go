@@ -800,8 +800,10 @@ type lookPacer interface {
 // process, because the child can still run there and a delete would end
 // its work. The record names the process. A look for a child whose start
 // already ended for its caller cancels the child that it finds and removes
-// its process the same way, because nothing reads that child. Every call
-// to the spawner ends before the look ends, so none outlives Close.
+// its process the same way, because nothing reads that child; at those
+// bounds it removes the process too when it cannot tell. Every removal
+// tries the abandon lookTries times before it gives up on it. Every call to
+// the spawner ends before the look ends, so none outlives Close.
 func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id string, q RunQueuedData, outcome, why string) {
 	k := a.k
 	defer ref.start.cancel()
@@ -822,6 +824,7 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 		}
 	}
 	began := a.now()
+	removals := 0 // the abandons of this look that failed
 	for tries := 1; ; tries++ {
 		found, err := planner.Find(ctx, ref.member, id)
 		if ctx.Err() != nil {
@@ -860,16 +863,25 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 		}
 		now := a.now()
 		late := !now.Before(deadline) && tries >= lookTries && now.Sub(began) >= own
+		// A look for a child that nothing reads removes its process at the
+		// bounds even when it cannot tell whether the child runs there.
+		remove := missing || (ref.start.drop && late)
 		switch {
-		case missing:
+		case remove:
 			aerr := a.abandonNow(planner, id, ref.member)
 			if ctx.Err() != nil {
 				done()
 				return
 			}
-			if aerr == nil || late {
-				if aerr != nil {
+			if aerr != nil {
+				removals++
+			}
+			if aerr == nil || (late && removals >= lookTries) {
+				switch {
+				case aerr != nil:
 					reason += "; its process could not be removed: " + aerr.Error()
+				case !missing:
+					reason += "; its process was removed, because nothing reads the child"
 				}
 				a.log.Warn("child lost in a restart", "run", ref.parent, "child", id, "member", ref.member, "reason", reason)
 				a.recordBranchEnd(id, ref.parent, q, end, reason)

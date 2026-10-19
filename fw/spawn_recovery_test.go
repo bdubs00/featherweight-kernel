@@ -766,3 +766,58 @@ func TestLateLookTriesAPassingErrorAgain(t *testing.T) {
 		t.Fatalf("the found child of an ended parent = %+v, %v", r, err)
 	}
 }
+
+// seedDroppedChild writes the ledger of an ended parent with a child whose
+// start already ended for its caller, recorded an hour ago, and starts
+// that child in its process.
+func seedDroppedChild(t *testing.T, sp *crashSpawner, other *Agent) (Ledger, string, string) {
+	t.Helper()
+	ctx := testCtx(t)
+	parent, child := NewID(), idAt(time.Now().Add(-time.Hour))
+	member := taskOf(child)
+	if _, err := other.Start(ctx, "child work", WithRequest(RunRequest{ID: child, Input: "child work"})); err != nil {
+		t.Fatal(err)
+	}
+	sp.mu.Lock()
+	sp.tasks[member] = true
+	sp.mu.Unlock()
+	intent := RunChildData{Child: child, Member: member, Kind: childSpawn, Metadata: map[string]string{MetaParent: parent}, Input: "child work"}
+	ended := intent
+	ended.Ended, ended.Reason = "failed", "the child did not start in "+member+": the process is gone"
+	l := NewMemLedger()
+	seed(t, l, parent,
+		MustEvent(parent, EvRunQueued, RunQueuedData{Agent: "default", Input: "parent work"}),
+		MustEvent(parent, EvRunChild, intent),
+		MustEvent(parent, EvRunChild, ended),
+		MustEvent(parent, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: "parent done"}))
+	return l, parent, child
+}
+
+// A look for a child whose start already ended for its caller removes the
+// process of the child at its bounds even when it cannot tell whether the
+// child runs there, as when the router does not answer while the platform
+// does: nothing reads that child. It tries a failed abandon again.
+func TestDropLookThatCannotTellRemovesTheProcess(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	l, _, child := seedDroppedChild(t, sp, other)
+	member := taskOf(child)
+	sp.setFindErr(errors.New("ax: the child answered 502: Bad Gateway"))
+	sp.mu.Lock()
+	sp.abandonFails = 2
+	sp.mu.Unlock()
+	b := newTestAgent(t, newScript().Model(), WithLedger(l), WithSpawner(sp))
+	eventually(t, "the process of the child that nothing reads goes", func() bool { return sp.alive(member) != nil })
+	eventually(t, "the child is recorded as failed", func() bool {
+		r, err := b.Get(ctx, child)
+		return err == nil && r.State == StateFailed && strings.Contains(r.Error, "nothing reads the child")
+	})
+	sp.mu.Lock()
+	abandons := sp.abandons
+	sp.mu.Unlock()
+	if abandons != 3 {
+		t.Fatalf("Abandon ran %d times, want 3", abandons)
+	}
+	_ = other.Cancel(ctx, child)
+}
