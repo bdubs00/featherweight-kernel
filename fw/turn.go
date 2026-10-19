@@ -437,18 +437,7 @@ func (a *Agent) brief(ctx context.Context, rs *runState, tools []Tool) string {
 func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
 	if o, over := a.overBudget(rs, c); over {
-		if _, err := a.emit(ctx, rs, EvBudgetExceeded, o.data()); err != nil {
-			return err
-		}
-		if err := a.finish(ctx, rs, OutcomeFailed, "", "budget exceeded: "+o.text(rs.id)); err != nil {
-			return err
-		}
-		// No run under the owner of a shared limit can spend more, so the
-		// open ones stop now instead of at their next step.
-		if o.shared() {
-			a.stopTree(o)
-		}
-		return nil
+		return a.stopOver(ctx, rs, o)
 	}
 	selector := a.selectorOf(c.queued, prof)
 	model, err := a.openModel(ctx, selector)
@@ -486,8 +475,16 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	}
 	extra := (len(req.System) + jsonSize(specs)) / bytesPerToken
 	if !c.turnOpen {
+		before := *rs.usage()
 		if err := a.maybeCompact(ctx, rs, model, req, extra); err != nil {
 			return err
+		}
+		// A compaction is a model call of its own, so the budget is checked
+		// again before the call of the turn.
+		if *rs.usage() != before {
+			if o, over := a.overBudget(rs, c); over {
+				return a.stopOver(ctx, rs, o)
+			}
 		}
 	}
 
@@ -564,6 +561,22 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		Model:      name,
 	})
 	return err
+}
+
+// stopOver ends a run at the limit o: it appends fw.budget.exceeded and
+// finishes the run as failed. No run under the owner of a shared limit can
+// spend more, so the open ones stop now instead of at their next step.
+func (a *Agent) stopOver(ctx context.Context, rs *runState, o overrun) error {
+	if _, err := a.emit(ctx, rs, EvBudgetExceeded, o.data()); err != nil {
+		return err
+	}
+	if err := a.finish(ctx, rs, OutcomeFailed, "", "budget exceeded: "+o.text(rs.id)); err != nil {
+		return err
+	}
+	if o.shared() {
+		a.stopTree(o)
+	}
+	return nil
 }
 
 // stepResponse acts on the stop reason of the latest response.
