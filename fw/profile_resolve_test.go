@@ -267,3 +267,26 @@ func TestInlineTextWithASecretRecordsNoChange(t *testing.T) {
 		}
 	}
 }
+
+// EffortOr fills an empty effort with the effort of the model unless the
+// request sets it, and a summary call takes the effort of the turn with
+// that mark.
+func TestEffortOrAndTheSummaryCall(t *testing.T) {
+	for _, c := range []struct {
+		req  Request
+		want string
+	}{
+		{Request{}, "max"},
+		{Request{Effort: "low"}, "low"},
+		{Request{EffortSet: true}, ""},
+		{Request{Effort: "low", EffortSet: true}, "low"},
+	} {
+		if got := c.req.EffortOr("max"); got != c.want {
+			t.Errorf("%+v.EffortOr(max) = %q, want %q", c.req, got, c.want)
+		}
+	}
+	b := &boundModel{next: &Request{EffortSet: true}}
+	if r := b.fill(&Request{}); r.EffortOr("max") != "" {
+		t.Errorf("summary request = %+v, want the empty effort of the turn", r)
+	}
+}

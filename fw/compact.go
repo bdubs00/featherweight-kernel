@@ -236,8 +236,8 @@ func (b *boundModel) fill(req *Request) *Request {
 	if r.Tools == nil {
 		r.Tools = b.next.Tools
 	}
-	if r.Effort == "" {
-		r.Effort = b.next.Effort
+	if r.Effort == "" && !r.EffortSet {
+		r.Effort, r.EffortSet = b.next.Effort, b.next.EffortSet
 	}
 	if r.MaxTokens == 0 {
 		r.MaxTokens = b.next.MaxTokens

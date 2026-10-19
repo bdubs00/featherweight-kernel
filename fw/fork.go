@@ -76,6 +76,9 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	if k.isDraining() {
 		return nil, ErrClosed
 	}
+	if err := CheckMetadata(req.Metadata); err != nil {
+		return nil, err
+	}
 	rs, err := k.lookup(src)
 	if err != nil {
 		return nil, err
@@ -208,6 +211,7 @@ func (a *Agent) startBranch(ctx context.Context, forker Forker, ref childRef, q 
 // a child in another process.
 func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, reason string) {
 	k := a.k
+	q.Kept = 0 // the record holds no event of the source
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
 	k.mu.Lock()
@@ -300,10 +304,19 @@ func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest)
 // branchOf prepares a branch of src: the kept events and the queued data of
 // the branch, with the person in ctx, the metadata of the branch, no
 // parent, and the model of the request. It fills req.Seq when it is zero.
+// The queued data starts from fw.run.queued as the ledger of src stores
+// it, with every secret replaced, and not from q, which this process
+// holds as the request gave it. The branch, also in another process,
+// therefore reads what the model of src read.
 func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs []Event, req *ForkRequest) ([]Event, RunQueuedData, error) {
 	if len(evs) == 0 || evs[0].Type != EvRunQueued {
 		return nil, q, fmt.Errorf("fw: run %s: %w", src, ErrRunNotFound)
 	}
+	var stored RunQueuedData
+	if err := evs[0].Decode(&stored); err != nil {
+		return nil, q, fmt.Errorf("fw: run %s: decode fw.run.queued: %w", src, err)
+	}
+	q = stored
 	last := evs[len(evs)-1].Seq
 	if req.Seq == 0 {
 		req.Seq = last
@@ -340,6 +353,12 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 		}
 		q.Profile = &prof
 		q.Resolved = a.withModel(q.Resolved, req.Model)
+	}
+	q.Kept = 0 // the events of the branch that are copies; see RunQueuedData.Kept
+	for _, e := range evs {
+		if e.Seq <= req.Seq && e.Type != EvRunChild {
+			q.Kept++
+		}
 	}
 	kept := make([]Event, 0, len(evs))
 	for _, e := range evs {

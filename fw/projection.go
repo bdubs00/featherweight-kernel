@@ -231,14 +231,25 @@ func ProjectRun(events []Event, prices ...Prices) *Run {
 // catches up. The cost then is the cost at the prices of that kernel; the
 // prices argument applies only to the increments after the totals. An
 // event of an older kernel has no totals and changes the usage in no way.
+//
+// A branch (RunQueuedData.Kept) counts its own work only. The events that
+// it kept from its source add no usage and set no totals, because the
+// source holds that usage.
+//
+// A fw.run.queued with a lower sequence number than an event that Apply
+// already folded, which a bus can deliver late, gives the run its
+// identity and changes nothing else: the state, the usage, and the time
+// of the latest change stay, and the metadata and the title of later
+// annotations win.
 func (r *Run) Apply(e Event, prices Prices) {
 	if r.ID == "" {
 		r.ID = e.Subject
 	}
+	late := e.Seq != 0 && e.Seq < r.Seq
 	if e.Seq > r.Seq {
 		r.Seq = e.Seq
 	}
-	if !e.Time.IsZero() {
+	if !e.Time.IsZero() && !late {
 		r.UpdatedAt = e.Time
 	}
 	switch e.Type {
@@ -248,16 +259,29 @@ func (r *Run) Apply(e Event, prices Prices) {
 			return
 		}
 		r.Agent, r.Input, r.Origin = d.Agent, d.Input, d.Origin
-		r.Principal, r.Parent, r.Metadata = d.Principal, d.Parent, d.Metadata
+		r.Principal, r.Parent = d.Principal, d.Parent
 		r.Depth, r.ExtraTools = d.Depth, d.ExtraTools
-		r.Title = strings.TrimSpace(d.Metadata[MetaTitle])
-		if r.Title == "" {
-			r.Title = TitleFrom(d.Input)
-		}
-		r.State = StateQueued
+		r.kept = d.Kept
 		r.CreatedAt = e.Time
+		title := strings.TrimSpace(d.Metadata[MetaTitle])
+		if title == "" {
+			title = TitleFrom(d.Input)
+		}
+		if late {
+			if len(d.Metadata) > 0 {
+				md := maps.Clone(d.Metadata)
+				maps.Copy(md, r.Metadata)
+				r.Metadata = md
+			}
+			if r.Title == "" {
+				r.Title = title
+			}
+			return
+		}
+		r.Metadata, r.Title = d.Metadata, title
+		r.State = StateQueued
 	case EvRunStarted, EvRunResumed, EvTurnStarted:
-		if e.Type == EvTurnStarted {
+		if e.Type == EvTurnStarted && !r.keptEvent(e) {
 			r.Usage.Turns++
 		}
 		if r.State.Terminal() {
@@ -282,7 +306,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
 		}
-		if e.Decode(&d) != nil {
+		if r.keptEvent(e) || e.Decode(&d) != nil {
 			return
 		}
 		r.addUsage(d.Usage, d.Provider, d.Model, prices)
@@ -301,17 +325,19 @@ func (r *Run) Apply(e Event, prices Prices) {
 				r.Title = t
 			}
 		}
-		if d.Usage != nil {
+		if d.Usage != nil && !r.keptEvent(e) {
 			r.addUsage(*d.Usage, d.Provider, d.Model, prices)
 		}
 	case EvContextCompacted:
 		var d ContextCompactedData
-		if e.Decode(&d) != nil || d.Usage == nil {
+		if r.keptEvent(e) || e.Decode(&d) != nil || d.Usage == nil {
 			return
 		}
 		r.addUsage(*d.Usage, d.Provider, d.Model, prices)
 	case EvToolRequested:
-		r.Usage.ToolCalls++
+		if !r.keptEvent(e) {
+			r.Usage.ToolCalls++
+		}
 	case EvApprovalRequested:
 		var d ApprovalRequestedData
 		if e.Decode(&d) != nil {
@@ -343,7 +369,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 	case EvRunSuspended:
 		var d RunSuspendedData
 		if e.Decode(&d) == nil {
-			r.setTotals(d.Totals, e.Seq)
+			r.setTotals(d.Totals, e)
 		}
 		r.State = StateSuspended
 	case EvRunFinished:
@@ -351,7 +377,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 		if e.Decode(&d) != nil {
 			return
 		}
-		r.setTotals(d.Totals, e.Seq)
+		r.setTotals(d.Totals, e)
 		r.Pending = nil
 		switch d.Outcome {
 		case OutcomeCompleted:
@@ -378,15 +404,19 @@ func (r *Run) addUsage(u Usage, provider, model string, prices Prices) {
 }
 
 // setTotals sets the usage to the totals of a fw.run.finished or
-// fw.run.suspended at seq. Nil totals, from an older kernel, change
-// nothing.
-func (r *Run) setTotals(t *RunUsage, seq uint64) {
-	if t == nil {
+// fw.run.suspended. Nil totals, from an older kernel, and the totals of an
+// event that a branch kept from its source change nothing.
+func (r *Run) setTotals(t *RunUsage, e Event) {
+	if t == nil || r.keptEvent(e) {
 		return
 	}
 	r.Usage = *t
-	r.UsageSeq = seq
+	r.UsageSeq = e.Seq
 }
+
+// keptEvent reports whether e is one of the events that a branch kept from
+// its source (RunQueuedData.Kept).
+func (r *Run) keptEvent(e Event) bool { return e.Seq != 0 && e.Seq <= r.kept }
 
 // priceOf looks up a price by "provider/model", then by the model alone.
 func priceOf(prices Prices, provider, model string) (Price, bool) {

@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // Redacted replaces a secret in a ledger event.
@@ -128,16 +131,89 @@ func (r *redactor) text(s string) string {
 }
 
 // holds reports whether raw JSON can hold a secret. It is the fast path:
-// most events hold none, and the kernel appends them unchanged.
+// most events hold none, and the kernel appends them unchanged. An escape
+// in a JSON string can hide a secret from a look at the raw bytes, such
+// as "\t" between the word Bearer and a token, or "\u0041" for the
+// letter A of a key. The check therefore also reads raw with every escape
+// resolved, so it finds every secret that the full pass over the strings
+// finds.
 func (r *redactor) holds(raw []byte) bool {
+	views := [][]byte{raw}
+	if bytes.IndexByte(raw, '\\') >= 0 {
+		views = append(views, unescapeJSON(raw))
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, v := range r.values {
-		if bytes.Contains(raw, []byte(v)) || bytes.Contains(raw, jsonText(v)) {
+	for _, view := range views {
+		for _, v := range r.values {
+			if bytes.Contains(view, []byte(v)) || bytes.Contains(view, jsonText(v)) {
+				return true
+			}
+		}
+		if anyShape.Match(view) {
 			return true
 		}
 	}
-	return anyShape.Match(raw)
+	return false
+}
+
+// unescapeJSON returns raw JSON with every escape resolved: the one-letter
+// escapes such as \t and \n, and \uXXXX, also as a surrogate pair. The
+// result is no longer JSON. The text of each string of raw appears in it
+// as the string holds it.
+func unescapeJSON(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c != '\\' || i+1 == len(raw) {
+			out = append(out, c)
+			continue
+		}
+		i++
+		switch e := raw[i]; e {
+		case 'b':
+			out = append(out, '\b')
+		case 'f':
+			out = append(out, '\f')
+		case 'n':
+			out = append(out, '\n')
+		case 'r':
+			out = append(out, '\r')
+		case 't':
+			out = append(out, '\t')
+		case 'u':
+			r, n := hexRune(raw[i+1:])
+			if n == 0 {
+				out = append(out, '\\', 'u')
+				continue
+			}
+			if utf16.IsSurrogate(r) && len(raw) >= i+1+n+6 && raw[i+1+n] == '\\' && raw[i+2+n] == 'u' {
+				if r2, m := hexRune(raw[i+3+n:]); m != 0 {
+					if d := utf16.DecodeRune(r, r2); d != utf8.RuneError {
+						r, n = d, n+2+m
+					}
+				}
+			}
+			out = utf8.AppendRune(out, r)
+			i += n
+		default:
+			out = append(out, e) // \", \\, and \/
+		}
+	}
+	return out
+}
+
+// hexRune reads the four hex digits of a \u escape. It returns the rune and
+// 4, or 0 when b does not start with four hex digits.
+func hexRune(b []byte) (rune, int) {
+	if len(b) < 4 {
+		return 0, 0
+	}
+	v, err := strconv.ParseUint(string(b[:4]), 16, 32)
+	if err != nil {
+		return 0, 0
+	}
+	return rune(v), 4
 }
 
 // jsonText returns v as it appears inside a JSON string.

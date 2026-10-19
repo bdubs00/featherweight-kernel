@@ -131,6 +131,12 @@ type RunQueuedData struct {
 	Parent        string  `json:"parent,omitempty"`
 	Depth         int     `json:"depth,omitempty"`
 	Files         []Block `json:"files,omitempty"` // file blocks that reference the attachments
+	// Kept is set on the branch of a run (Agent.Fork): the number of events
+	// at the start of the ledger of the branch that it kept from its
+	// source, this event included. The usage of the branch leaves them out,
+	// because the source holds that usage (see Run.Apply). Only a fork sets
+	// it; a request cannot.
+	Kept uint64 `json:"kept,omitempty"`
 	// ExtraTools names the tools that the inline profile gives the run
 	// beyond the tool list of its named profile, so every surface can tell
 	// the person.

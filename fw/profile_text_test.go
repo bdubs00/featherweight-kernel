@@ -10,6 +10,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -297,4 +300,213 @@ func TestDenyAddedWhileApprovalWaitsWins(t *testing.T) {
 	r, err = a.Wait(ctx, r.ID)
 	mustState(t, r, err, StateCompleted)
 	deniedByPolicy(t, l, r.ID, "d1")
+}
+
+// A branch of a branch keeps the text of the first source in this process,
+// although the branch between them made no model call: a branch without a
+// message of a finished run, and a branch that waits for an approval.
+func TestBranchOfBranchKeepsTheText(t *testing.T) {
+	ctx := testCtx(t)
+	rec := &pinRecorder{}
+	l := NewMemLedger()
+	a := pinAgent(t, pinConfig(t, "pintest/base"), l, rec)
+	setProfiles(t, a, map[string]AgentProfile{"worker": {System: "Old."}})
+	rec.script(endTurn("one"), callTools(use("d1", "delta", `{}`)))
+	s, err := a.Run(ctx, "first", AsAgent("worker"))
+	mustState(t, s, err, StateCompleted)
+	w, err := a.Run(ctx, "change something", AsAgent("worker"))
+	mustState(t, w, err, StateInputRequired)
+	setProfiles(t, a, map[string]AgentProfile{"worker": {System: "New."}})
+
+	finished, err := a.Fork(ctx, s.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := a.Fork(ctx, w.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.Get(ctx, waiting.ID); err != nil || got.State != StateInputRequired {
+		t.Fatalf("branch of the waiting run = %+v, %v", got, err)
+	}
+	for i, mid := range []string{finished.ID, waiting.ID} {
+		rec.script(endTurn("two"))
+		b, err := a.Fork(ctx, mid, ForkRequest{Input: "go on"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := a.Wait(ctx, b.ID)
+		if err == nil && got.State == StateInputRequired {
+			// The branch of the waiting run copied its approval.
+			if err := a.Decide(ctx, b.ID, ApprovalDecision{ApprovalID: got.Pending.ID, Decision: "allow"}); err != nil {
+				t.Fatal(err)
+			}
+			got, err = a.Wait(ctx, b.ID)
+		}
+		mustState(t, got, err, StateCompleted)
+		rec.expectAt(t, 2+i, "base", "Old.", "alpha,beta,gamma,delta")
+		if n := driftNotes(t, l, b.ID); len(n) != 0 {
+			t.Fatalf("branch %d records a change: %v", i, n)
+		}
+	}
+}
+
+// An inline instruction with a token behind "Bearer" and a tab never
+// reaches the ledger, and the model reads the same text before and after
+// a restart, with no record of a change.
+func TestInlineTokenBehindAnEscapeStaysOut(t *testing.T) {
+	ctx := testCtx(t)
+	dir := filepath.Join(t.TempDir(), "runs")
+	rec := &pinRecorder{}
+	start := func() *Agent {
+		cfg := pinConfig(t, "pintest/base")
+		cfg.Agents = map[string]AgentProfile{"worker": {}}
+		return pinAgent(t, cfg, pinLedger(t, dir), rec)
+	}
+	a := start()
+	instr := "Call the API with Authorization: Bearer\tabcdefghijklmnopqrstuvwxyz0123."
+	rec.script(endTurn("one"))
+	r, err := a.Run(ctx, "work", AsAgent("worker"), WithRunProfile(AgentProfile{Instructions: []string{instr}}))
+	mustState(t, r, err, StateCompleted)
+	eventsHold(t, a.Ledger(), r.ID, "abcdefghijklmnopqrstuvwxyz0123")
+	closePin(a)
+
+	b := start()
+	rec.script(endTurn("two"))
+	if err := b.Send(ctx, r.ID, UserText("more"), OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Wait(ctx, r.ID)
+	mustState(t, got, err, StateCompleted)
+	if before, after := rec.call(0).system, rec.call(1).system; before != after || strings.Contains(after, "abcdefghijklmnopqrstuvwxyz0123") {
+		t.Fatalf("system prompt before the restart %q, after %q", before, after)
+	}
+	if n := driftNotes(t, b.Ledger(), r.ID); len(n) != 0 {
+		t.Fatalf("records of a change, but nothing changed: %v", n)
+	}
+}
+
+// A branch in another process starts from fw.run.queued as the source
+// stores it: a secret that only the source knows stays out of the other
+// ledger, and the model of the branch reads what the model of the source
+// read, with no record of a change.
+func TestRemoteBranchTakesTheStoredRequest(t *testing.T) {
+	ctx := testCtx(t)
+	t.Setenv("SOURCE_ONLY_TOKEN", "srcsecret-77a1b2c3")
+	profiles := func() map[string]AgentProfile { return map[string]AgentProfile{"worker": {System: "Same."}} }
+	there := &pinRecorder{}
+	recA := &pinRecorder{}
+	cfgA := pinConfig(t, "pintest/base")
+	cfgA.Agents = profiles()
+	sp := &otherSpawner{}
+	a := pinAgent(t, cfgA, NewMemLedger(), recA, WithSpawner(sp))
+	if err := os.Unsetenv("SOURCE_ONLY_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+	cfgB := pinConfig(t, "pintest/base")
+	cfgB.Agents = profiles()
+	lb := NewMemLedger()
+	sp.other = pinAgent(t, cfgB, lb, there)
+
+	recA.script(endTurn("one"))
+	inline := AgentProfile{Instructions: []string{"Use the code srcsecret-77a1b2c3 for the vault."}}
+	r, err := a.Run(ctx, "work srcsecret-77a1b2c3", AsAgent("worker"), WithRunProfile(inline))
+	mustState(t, r, err, StateCompleted)
+	there.script(endTurn("branch"))
+	b, err := a.Fork(ctx, r.ID, ForkRequest{Input: "go on", Spawn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.Wait(ctx, b.ID)
+	mustState(t, got, err, StateCompleted)
+	if src, br := recA.call(0).system, there.call(0).system; src != br {
+		t.Fatalf("the branch reads %q, the source read %q", br, src)
+	}
+	if n := driftNotes(t, lb, b.ID); len(n) != 0 {
+		t.Fatalf("records of a change, but nothing changed: %v", n)
+	}
+	eventsHold(t, lb, b.ID, "srcsecret-77a1b2c3")
+}
+
+// Only the kernel sets the keys of a change of the text: a start, a
+// branch, and an annotation that name one are refused, and the check of a
+// surface refuses them too. The keys that trusted paths set, such as
+// fw.batch and fw.parent, still pass.
+func TestRequestCannotSetKernelMetadata(t *testing.T) {
+	ctx := testCtx(t)
+	rec := &pinRecorder{}
+	a := pinAgent(t, pinConfig(t, "pintest/base"), NewMemLedger(), rec)
+	rec.script(endTurn("one"))
+	r, err := a.Run(ctx, "work", WithMetadata(map[string]string{MetaBatch: "job-1", MetaParent: "elsewhere"}))
+	mustState(t, r, err, StateCompleted)
+	if err := CheckMetadata(map[string]string{MetaBatch: "job-1", MetaParent: "elsewhere", MetaTitle: "A title"}); err != nil {
+		t.Fatalf("CheckMetadata refuses the keys of trusted paths: %v", err)
+	}
+	for _, key := range []string{"fw.drift.system", "fw.drift.instructions"} {
+		meta := map[string]string{key: "sha256:aaaa -> sha256:bbbb"}
+		if err := CheckMetadata(meta); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("CheckMetadata(%s) = %v", key, err)
+		}
+		if got, err := a.Start(ctx, "work", WithMetadata(meta)); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("a start with %s = %+v, %v", key, got, err)
+		}
+		if got, err := a.Fork(ctx, r.ID, ForkRequest{Input: "again", Metadata: meta}); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("a branch with %s = %+v, %v", key, got, err)
+		}
+		if err := a.Annotate(ctx, r.ID, RunAnnotatedData{Metadata: meta}); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("an annotation with %s = %v", key, err)
+		}
+	}
+}
+
+// The keys that the kernel sets do not count against the bound of the
+// metadata: a run with the most entries that a request can give it still
+// takes an annotation after the kernel recorded a change of its text, and
+// after it kept an idempotency key.
+func TestKernelMetadataDoesNotCountAgainstTheBound(t *testing.T) {
+	ctx := testCtx(t)
+	dir := filepath.Join(t.TempDir(), "runs")
+	rec := &pinRecorder{}
+	start := func(system string) *Agent {
+		cfg := pinConfig(t, "pintest/base")
+		cfg.Agents = map[string]AgentProfile{"worker": {System: system, Instructions: []string{system}}}
+		return pinAgent(t, cfg, pinLedger(t, dir), rec)
+	}
+	a := start("Old.")
+	meta := map[string]string{}
+	for i := range MaxMetadataEntries {
+		meta[fmt.Sprintf("k%02d", i)] = "v"
+	}
+	rec.script(endTurn("one"))
+	r, err := a.Run(ctx, "work", AsAgent("worker"), WithMetadata(meta), WithIdempotencyKey("key-1"))
+	mustState(t, r, err, StateCompleted)
+	closePin(a)
+
+	b := start("New.")
+	rec.script(endTurn("two"))
+	if err := b.Send(ctx, r.ID, UserText("more"), OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Wait(ctx, r.ID)
+	mustState(t, got, err, StateCompleted)
+	if n := len(driftNotes(t, b.Ledger(), r.ID)); n != 1 {
+		t.Fatalf("%d records of the change, want 1", n)
+	}
+	if err := b.Annotate(ctx, r.ID, RunAnnotatedData{Usage: &Usage{InputTokens: 1}}); err != nil {
+		t.Fatalf("a usage annotation fails: %v", err)
+	}
+	if err := b.Annotate(ctx, r.ID, RunAnnotatedData{Metadata: map[string]string{"k00": "w"}}); err != nil {
+		t.Fatalf("an annotation that replaces an entry fails: %v", err)
+	}
+	if err := b.Annotate(ctx, r.ID, RunAnnotatedData{Metadata: map[string]string{"one-more": "x"}}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("an annotation past the bound = %v, want a refusal", err)
+	}
+	// A branch carries fw.forkOf and fw.forkSeq on top of the entries.
+	br, err := b.Fork(ctx, r.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Annotate(ctx, br.ID, RunAnnotatedData{Usage: &Usage{InputTokens: 1}}); err != nil {
+		t.Fatalf("a usage annotation of the branch fails: %v", err)
+	}
 }

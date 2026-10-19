@@ -1,6 +1,7 @@
 package fw
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -118,5 +119,45 @@ func TestLedgerHoldsNoSecret(t *testing.T) {
 	}
 	if got := a.Redact("log " + key); got != "log [redacted]" {
 		t.Errorf("Redact = %q", got)
+	}
+}
+
+// The quick check of the raw JSON of an event never misses a secret that
+// the pass over its strings replaces, also behind a JSON escape, so the
+// redaction of an event and the redaction of each of its strings agree.
+func TestRedactorDataSeesThroughEscapes(t *testing.T) {
+	r := newRedactor([]string{"VAULT_TOKEN=vault\"quoted\\value"})
+	for _, s := range []string{
+		"Authorization: Bearer\tabcdefghijklmnopqrstuvwxyz0123.",
+		"Authorization: Bearer\nabcdefghijklmnopqrstuvwxyz0123",
+		"key\tAKIAIOSFODNN7EXAMPLE\tend",
+		"https://bot\t@host.example/x and https://bot@host.example/y",
+		"the value vault\"quoted\\value of the variable",
+		"a <b> & c with ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+		"nothing \t secret \n here",
+	} {
+		raw, err := json.Marshal(map[string]string{"text": s})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]string
+		if err := json.Unmarshal(r.data(raw), &got); err != nil {
+			t.Fatal(err)
+		}
+		if want := r.text(s); got["text"] != want {
+			t.Errorf("data(%q) = %q, want %q", s, got["text"], want)
+		}
+	}
+	// A \u escape can spell a key, so the quick check reads the escape.
+	raw := json.RawMessage(`{"text":"key AKIAIOSFODNN7EXAMPLE and 😀 ghp_abcdefghijklmnopqrstuvwxyz0123456789"}`)
+	var got map[string]string
+	if err := json.Unmarshal(r.data(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := "key [redacted] and \U0001F600 [redacted]"; got["text"] != want {
+		t.Errorf("text = %q, want %q", got["text"], want)
+	}
+	if !bytes.Equal(unescapeJSON([]byte(`a\"b\\c\/d\teé😀\q`)), []byte("a\"b\\c/d\teé\U0001F600q")) {
+		t.Errorf("unescapeJSON = %q", unescapeJSON([]byte(`a\"b\\c\/d\teé😀\q`)))
 	}
 }

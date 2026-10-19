@@ -81,13 +81,31 @@ func TextOf(blocks []Block) string {
 }
 
 // Request is one model call.
+//
+// A model fills an empty Effort with the effort that it was opened with,
+// the effort of the configuration of its process, unless EffortSet is
+// true: then Effort is the effort of the call as it is, and an empty one
+// means the default of the provider (see EffortOr). The kernel sets
+// EffortSet for a run with a resolved profile, so a run keeps the effort
+// that it was queued with when the configuration changes.
 type Request struct {
 	System    string            `json:"system,omitempty"`
 	Messages  []Message         `json:"messages"`
 	Tools     []ToolSpec        `json:"tools,omitempty"`
 	Effort    string            `json:"effort,omitempty"` // low, medium, high, xhigh, max
+	EffortSet bool              `json:"effortSet,omitempty"`
 	MaxTokens int               `json:"maxTokens,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"` // run id, agent, for provider-side logging
+}
+
+// EffortOr returns the effort that a model sends for the request: Effort,
+// else def, the effort that the model was opened with. With EffortSet, an
+// empty Effort stays empty, and the model uses the default of its provider.
+func (r *Request) EffortOr(def string) string {
+	if r.Effort != "" || r.EffortSet {
+		return r.Effort
+	}
+	return def
 }
 
 // Usage counts tokens for one call.
