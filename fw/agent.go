@@ -362,7 +362,14 @@ func (a *Agent) Model() Model { return a.model }
 // ModelFor returns the model for a selector or a name from Config.Models,
 // opening and caching it on first use.
 func (a *Agent) ModelFor(ctx context.Context, name string) (Model, error) {
-	selector := a.cfg.ModelSelector(name)
+	return a.openModel(ctx, a.cfg.ModelSelector(name))
+}
+
+// openModel returns the model for a selector as it stands, opening and
+// caching it on first use. A run opens the selector of its resolved
+// profile this way, so a name in Config.Models never maps it to another
+// model.
+func (a *Agent) openModel(ctx context.Context, selector string) (Model, error) {
 	a.modelsMu.Lock()
 	defer a.modelsMu.Unlock()
 	if m, ok := a.models[selector]; ok {

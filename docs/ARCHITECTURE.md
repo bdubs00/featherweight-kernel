@@ -67,7 +67,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 
 | Type | Data |
 |---|---|
-| `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5) |
+| `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5) |
 | `fw.run.started` | model, tool names, brief (the sections that tools add to the system prompt), time zone |
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2) |
 | `fw.message.received` | role, content, origin (`http`, `a2a`, `mcp`, `bus`, `cli`, `kernel`), note kind |
@@ -135,7 +135,7 @@ A tool that implements `fw.Continuer` is another exception to step 3 when every 
 
 ### 4.6 Replay
 
-The command `fw replay <ledger> --model <selector>` runs a recorded run again against a different model. It answers every tool call from the recorded `fw.tool.responded` events instead of running the tool. It uses the brief of the recorded run (section 7.8), so the replay sees the memory index that the recorded run saw. The result is a second ledger. A diff of the two ledgers is a regression test for a model change or a prompt change. This covers the common evaluation case with no extra framework.
+The command `fw replay <ledger> --model <selector>` runs a recorded run again against a different model. It answers every tool call from the recorded `fw.tool.responded` events instead of running the tool. It uses the brief of the recorded run (section 7.8), so the replay sees the memory index that the recorded run saw. The replay is a new run, so the kernel resolves its profile again (section 12.5): the named profile of the replaying process with the inline profile of the recorded run on top. A change of the prompt in the configuration therefore shows in the replay. The result is a second ledger. A diff of the two ledgers is a regression test for a model change or a prompt change. This covers the common evaluation case with no extra framework.
 
 A recorded result matches the tool name and its JSON input. Object key order and whitespace do not matter; number literals keep their precision and spelling, so `1` and `1.0` are distinct. Repeated identical calls consume recorded results in ledger order. Replay serves calls serially in model-response order, including tools that are normally parallel-safe. A different input, an exhausted result queue, or a result without a recorded input produces an explicit error result; it never falls back to the live tool. This is argument-aware fixture replay, not a guarantee of identical model output or a pinned execution environment. The replay overrides are process-local and do not survive a restart.
 
@@ -143,7 +143,7 @@ A recorded result matches the tool name and its JSON input. Object key order and
 
 A run is defined by its ledger and its workspace, so a run can branch. `Agent.Fork` and `POST /v1/runs/{id}/fork` make a new run whose ledger begins with a copy of the events of the source up to one sequence number, `seq`; without one, every event. The copied events get the id of the branch, new event ids, and the time of the copy; the `fw.run.queued` event of the branch names the person who branched as its principal and carries the metadata `fw.forkOf`, the id of the source, and `fw.forkSeq`, the sequence number kept. The branch has no parent, and the children of the source stay with the source. The source does not change.
 
-A branch goes on as a resumed run does (section 4.5). A model request without an answer is sent again, a tool call without a result follows the resume rules, and a pending approval waits for its decision, under the approval id that the branch copied. A message in the request, `input`, follows the kept events as a follow-up from the person, so a branch of a finished run goes on in another direction; without a message, a branch that keeps the end of a finished run stays finished. A `model` in the request changes the model of the branch. Because the system prompt, the history, and the tool results of the kept events are the same bytes, the branch keeps the prompt cache prefix of the provider up to the point of the branch.
+A branch goes on as a resumed run does (section 4.5). A model request without an answer is sent again, a tool call without a result follows the resume rules, and a pending approval waits for its decision, under the approval id that the branch copied. A message in the request, `input`, follows the kept events as a follow-up from the person, so a branch of a finished run goes on in another direction; without a message, a branch that keeps the end of a finished run stays finished. The branch keeps the resolved profile of its source (section 12.5), because it copies the `fw.run.queued` event of the source, so a change of the profile after the start of the source does not reach the branch. A `model` in the request changes the model of the branch: it replaces the model in the resolved profile and in the inline profile. Because the system prompt, the history, and the tool results of the kept events are the same bytes, the branch keeps the prompt cache prefix of the provider up to the point of the branch.
 
 A branch shares the workspace of its process. Two branches that change files in the same process therefore see each other's changes. With `spawn` in the request, the branch runs in another process: the `Spawner` of the agent must be a `Forker`. A `Forker` works in two steps, because the other process takes a while to run and the caller does not wait for it. `Place` creates the process, a child Task with the `ax` driver, and names it at once. The kernel then gives the branch its id, records it in the source as a child in `fw.run.child` with that member, and answers the caller with the branch as queued, with `Member` set; the route answers 202. `Branch` runs in the background: once the process runs, it sends the kept events through `POST /v1/runs/fork`, a route for the static token or a workload alone, because the events name the person of the branch, and the process takes the branch under the id that the body names. Until then the source answers `Get` for the branch, `WaitFor` waits for the start, `Decide` has nothing to decide, and `Cancel` ends the start. The status of the source is not idle while a start is open (`Agent.Starting`), so the suspend controller of the workbench does not put it to sleep before its child has the branch. The source records the branch twice in `fw.run.child`: when it places the branch, with the person and the metadata of the branch, and again once the process took it, with `started`. If the source process goes away during the start, nothing sends the branch, so at its next start the source records a placed branch without a start as a failed run with the reason, from the facts in the event, and the `Forker` abandons the process it placed: the `ax` driver deletes the empty child Task. A shutdown of the source ends every open start the same way, as canceled. A branch is therefore never lost without a trace, and nothing of it stays behind in the fleet. A branch that its process does not take, because the Task never runs or refuses the events, and a branch whose start was canceled are recorded in the source process under the id of the branch, as a failed run with the reason or as a canceled run, so nothing is lost without a trace; after a restart that record wins over the `fw.run.child` event. The `ax` driver deletes a child Task that did not take its branch. The branch has the workspace of its own Task: a fresh copy of the Workspace of the parent Task, not the files that the parent changed. Several branches of one run in several Tasks therefore try different prompts or models from the same base, and their `fw.file.changed` events and their outputs compare.
 
@@ -151,7 +151,7 @@ A branch shares the workspace of its process. Two branches that change files in 
 
 ### 5.1 Run and turn
 
-A run is one conversation with one agent profile, one budget, and one ledger. A turn is one model call and the tool calls that it requests. The loop for a run is:
+A run is one conversation with one agent profile, one budget, and one ledger. The kernel resolves the profile and the budget once, when it queues the run, and the run keeps them for its life (section 12.5). A turn is one model call and the tool calls that it requests. The loop for a run is:
 
 1. Build the request from the profile system prompt, the tool specifications, and the message history.
 2. Call the model with streaming. Append `fw.model.requested` and `fw.model.responded`.
@@ -178,7 +178,7 @@ A budget has seven limits. Four bound the size of a run, and three bound its sha
 
 The kernel compares usage with the budget before every model call. When a limit is reached, it appends `fw.budget.exceeded` and finishes the run with outcome `failed`. A call past `maxCallsPerTurn` or `maxToolCalls` does not run. The model reads an error result that names the limit, and the run ends at the next model call. Cost needs a price table. The price table is a plug with an empty default, so `maxCostUSD` is off until you supply prices.
 
-A run takes its budget from the request, then from the profile, then from `budget:` in `fw.yaml`. A zero field means no limit for that field. A child run (section 11.9) is capped by the budget of its parent. If a child or any of its ancestors uses up its working time, the child stops.
+A run takes its budget from the request, then from the profile, then from `budget:` in `fw.yaml`. The kernel takes the budget of the profile and of `fw.yaml` when it queues the run and records them in the resolved profile (section 12.5), so a later change of either reaches new runs only. A zero field means no limit for that field. A child run (section 11.9) is capped by the budget of its parent. If a child or any of its ancestors uses up its working time, the child stops.
 
 ### 5.3 Approvals
 
@@ -466,7 +466,7 @@ type Policy interface {
 }
 ```
 
-The default policy allows read-only tools, asks before destructive tools, and denies nothing. Rules in `fw.yaml` change this per tool name, per flag, or per profile. A profile policy combines with the global policy, and the stricter verdict wins, so a profile can tighten the rules but not loosen them. A child run also carries the rules of every ancestor. With `policy.external`, a control plane outside the process decides every tool call in place of the rules (section 13.5). The policy of a profile and the rules of the ancestors can still only make its verdict stricter. A security team therefore changes the policy without a rebuild.
+The default policy allows read-only tools, asks before destructive tools, and denies nothing. Rules in `fw.yaml` change this per tool name, per flag, or per profile. A profile policy combines with the global policy, and the stricter verdict wins, so a profile can tighten the rules but not loosen them. A child run also carries the rules of every ancestor. A run keeps the rules of the profile that it was queued with (section 12.5), and the rules that its profile has now apply on top. A rule that a person adds to a profile therefore takes effect at once on the runs that are already going, and a rule that they remove stays in force for those runs. The rules of `fw.yaml` and a policy from a Go option are not part of a profile and apply as they are now. With `policy.external`, a control plane outside the process decides every tool call in place of the rules (section 13.5). The policy of a profile and the rules of the ancestors can still only make its verdict stricter. A security team therefore changes the policy without a rebuild.
 
 `fw.MergeRules` preserves independent policies under `all` clauses. Each clause evaluates its own default, tool patterns, and argument rules; the strictest verdict wins. Flattening allow or ask lists across defaults is not equivalent. The native API and AX child requests carry these clauses intact.
 
@@ -1020,7 +1020,7 @@ An agent creates other agents with the `spawn_task` tool. The tool starts a chil
 
 The kernel keeps a child inside its parent:
 
-- A child uses only tools that its own profile and every ancestor allow.
+- A child uses only tools that its own profile and every ancestor allow. The tools and the rules of an ancestor are those of its resolved profile (section 12.5).
 - A child carries the policy rules of every ancestor, and the stricter verdict wins.
 - The budget of a child is capped by the budget of its parent, and its deadline is the earliest deadline of its ancestors.
 - `spawn.maxDepth` (default 3) bounds how deep the tree goes, and `spawn.maxChildren` (default 16) bounds how many children one run starts in its life. Zero leaves a limit unbounded. `spawn.disabled` forbids children, including direct Go child creation; AX uses it for exhausted depth. `spawn.driver` names a `Spawner` that runs the children in other processes (below). Past either bound, `spawn_task` returns an error result.
@@ -1155,7 +1155,29 @@ Instructions reach the model in three layers, and every layer is a plain text:
 
 After the three layers, the system prompt lists the skills that the profile allows (see below). Last come the sections that tools add at the start of the run, such as the memory index (section 7.8).
 
-A request can also carry an inline profile in the field `profile`. It overlays the named profile for that run. A set system prompt, model, effort, or time zone replaces the value. Its instructions follow the instructions of the named profile. A tool or skill list replaces the list. The policy becomes the stricter of the two, and the budget takes the set fields. The kernel stores the inline profile and the instructions in `fw.run.queued`, so a resume and a replay see the same prompt. A tool list in an inline profile can give a run tools that the tool list of its agent leaves out. The kernel names them in `extraTools` of `fw.run.queued` and of the run object, and leaves out a tool that an ancestor does not allow. Every surface tells the person. Under the first message, the conversation says "For this run only, reviewer can also run shell commands". The result of the MCP `run` tool ends with the same fact, and `fw run` prints it on standard error. The command line builds an inline profile from flags such as `--system`, `--tools`, and `--max-turns`.
+A request can also carry an inline profile in the field `profile`. It overlays the named profile for that run. A set system prompt, model, effort, or time zone replaces the value. Its instructions follow the instructions of the named profile. A tool or skill list replaces the list. The policy becomes the stricter of the two, and the budget takes the set fields. The kernel stores the inline profile and the instructions in `fw.run.queued`, so a replay sees the same inline profile and the same instructions. A tool list in an inline profile can give a run tools that the tool list of its agent leaves out. The kernel names them in `extraTools` of `fw.run.queued` and of the run object, and leaves out a tool that an ancestor does not allow. Every surface tells the person. Under the first message, the conversation says "For this run only, reviewer can also run shell commands". The result of the MCP `run` tool ends with the same fact, and `fw run` prints it on standard error. The command line builds an inline profile from flags such as `--system`, `--tools`, and `--max-turns`.
+
+The kernel resolves the profile of a run once, when it queues the run, and records it in `fw.run.queued` as `resolved`, next to the inline profile of the request. The run uses the resolved profile for its life: in every turn, after a follow-up, after an approval, after a suspend, after a restart, and in a branch. A change to the profile through `Agent.SetProfiles`, in a file under `$FW_HOME/agents`, or in `fw.yaml` therefore reaches new runs only, and each run names the configuration that it ran with. The fields are these:
+
+| Field | In the resolved profile |
+|---|---|
+| system prompt, instructions | the overlay; `fw.DefaultSystemPrompt` for a profile without a system prompt |
+| model | the selector, through `models` and the `model` of the configuration, so a change of either does not reach the run |
+| effort | the overlay, else the `effort` of the configuration |
+| skills, tools | the allowlists of the overlay |
+| time zone | the overlay, else the zone of the parent, else `time.zone`; `fw.run.started` records the zone that wins (section 5.8) |
+| budget | the budget of the overlay, with each zero field taken from `budget:` in `fw.yaml`; the budget of the request stays in its own field and wins over it |
+| policy | the rules of the overlay, with the rules of the named profile now on top as a tightening (section 7.5) |
+| access | never part of it |
+
+The kernel reads some parts of a run as they are now, because they are not configuration of the run or because they decide authorization:
+
+- Access. Who can view or operate the agent and its runs follows the access block of the profile now and the authorization of the process (section 13.2). The resolved profile never grants access that the configuration took away.
+- The policy of the process, from `policy:` in `fw.yaml`, a Go option, or `policy.external`. A change to the tool list of a profile reaches new runs only, so a person who must take a tool away from a run that is already going denies the tool in the policy of the profile.
+- The tools that are connected, such as the tools of an MCP server, and the skills that are installed. The kernel reads them at each model call, so the skill index in the system prompt matches what the `skill` tool serves.
+- The settings of the process, such as `compaction`, `time.noteAfter`, `tools.limits`, and `spawn`.
+
+A run from the ledger of an older kernel has no resolved profile and reads the named profile at each step. The resolved profile holds no secret, because the kernel removes secrets from it as from every event (section 4.2). The system prompt is in `fw.run.queued` and in no other event.
 
 A skill is a directory with a `SKILL.md` file whose front matter names and describes it. The skills live under `$FW_HOME/skills`, or under the directories in `tools.skills`, and under the ax Workspace skills path. The system prompt lists the skills that the profile allows, one line each. The `skill` tool returns the body of one skill and the list of its other files. The MCP server of the workbench serves the same files as resources under `fw://skills/<name>`. A profile with no `skills` entry sees every skill, and a profile with an empty list sees none.
 
@@ -1218,8 +1240,9 @@ func (a *Agent) AuthorizeAll(ctx context.Context, checks []AuthzCheck) []error
 func (a *Agent) RunClock(ctx context.Context, id string) (RunClock, error)
 
 // RunBudget returns the effective budget of a run: its own budget, merged
-// with the budget of its profile and of the configuration, and capped by
-// the budget of its parent.
+// with the budget of its profile and of the configuration as the kernel
+// resolved them when it queued the run, and capped by the budget of its
+// parent.
 func (a *Agent) RunBudget(ctx context.Context, id string) (Budget, error)
 
 // TitleFrom makes a short title from the input of a run (section 8.2).
@@ -1377,7 +1400,7 @@ The kernel enforces this through the `Authz` plug on every call that carries a p
 
 ### 13.3 Managing agents
 
-The kernel reads its profiles from `fw.yaml`, from the `FW_AGENTS_*` variables, from Go options, and from the files under `$FW_HOME/agents`, and it writes none. A linked package that manages agents for people, the workbench, writes a file and hands the kernel the new set with `Agent.SetProfiles`, so a run can name the new profile at once. `SetProfiles` checks every profile with `Agent.CheckProfile`, which judges the name and the fields of a profile and changes nothing. A profile that the configuration defines is fixed: `Agent.ProfileLocked` reports it, and `SetProfiles` refuses a change to it, because the configuration wins over a file at the next start. The loader names the profiles that it read from files in `Config.FileProfiles`, so the kernel knows which profiles are fixed.
+The kernel reads its profiles from `fw.yaml`, from the `FW_AGENTS_*` variables, from Go options, and from the files under `$FW_HOME/agents`, and it writes none. A linked package that manages agents for people, the workbench, writes a file and hands the kernel the new set with `Agent.SetProfiles`, so a run can name the new profile at once. A run that is already queued keeps the profile that it was queued with (section 12.5). `SetProfiles` checks every profile with `Agent.CheckProfile`, which judges the name and the fields of a profile and changes nothing. A profile that the configuration defines is fixed: `Agent.ProfileLocked` reports it, and `SetProfiles` refuses a change to it, because the configuration wins over a file at the next start. The loader names the profiles that it read from files in `Config.FileProfiles`, so the kernel knows which profiles are fixed.
 
 The actions `agent.create`, `agent.edit`, and `agent.delete` stay in the kernel, because they define the roles of section 13.2. The workbench authorizes a write with them, gives a new profile to its creator as the first owner, and serves `PUT` and `DELETE /v1/agents/{name}`, `PUT /v1/agents/{name}?dryRun=true`, the MCP tools, and the verbs `put` and `delete` of `fw agents` (the workbench architecture, section 10). `Agent.ProfileGrants` gives the verdict of each tool of an agent, and the view of one agent carries it in plain words as `abilities`.
 

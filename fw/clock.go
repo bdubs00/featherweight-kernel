@@ -394,7 +394,10 @@ func (a *Agent) timeLeft(ctx context.Context, rs *runState, now time.Time) (time
 }
 
 // ownBudget returns the budget of one run without the cap of its
-// ancestors: the request, then the profile, then the configuration.
+// ancestors: the request, then the profile, then the configuration. The
+// resolved profile of a run already holds the budget of the configuration
+// as it was when the kernel queued the run, so a later change of the
+// configuration does not reach the run.
 func (a *Agent) ownBudget(rs *runState) Budget {
 	q := rs.queuedData()
 	var b Budget
@@ -403,6 +406,9 @@ func (a *Agent) ownBudget(rs *runState) Budget {
 	}
 	if prof := a.profileOf(q); prof.Budget != nil {
 		b = b.Merge(*prof.Budget)
+	}
+	if q.Resolved != nil {
+		return b
 	}
 	return b.Merge(a.cfg.Budget)
 }

@@ -267,6 +267,7 @@ func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest)
 		}
 		prof.Model = req.Model
 		q.Profile = &prof
+		q.Resolved = a.withModel(q.Resolved, req.Model)
 	}
 	if err := a.checkProfile(q.Profile); err != nil {
 		return nil, err
@@ -340,6 +341,7 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 			return nil, q, err
 		}
 		q.Profile = &prof
+		q.Resolved = a.withModel(q.Resolved, req.Model)
 	}
 	kept := make([]Event, 0, len(evs))
 	for _, e := range evs {
@@ -360,6 +362,20 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 		kept = append(kept, e)
 	}
 	return kept, q, nil
+}
+
+// withModel returns a copy of the resolved profile of a branch with the
+// model of the request. The branch keeps the resolved profile of its source
+// in the kept fw.run.queued, so a model of the request must replace the
+// model there too. A branch of a run from an older ledger has no resolved
+// profile and reads the model from its inline profile.
+func (a *Agent) withModel(p *AgentProfile, model string) *AgentProfile {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	cp.Model = a.cfg.ModelSelector(model)
+	return &cp
 }
 
 // appendBranch writes a branch into this process: a new run state, the kept

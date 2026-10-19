@@ -367,6 +367,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, err
 	}
 	extra := a.extraTools(ctx, req, parent)
+	resolved := a.resolveProfile(ctx, req, parent)
 	req.Metadata = inheritBatch(req.Metadata, parentRun)
 	meta := a.annotate(ctx, &req, parentRun, req.Metadata)
 	if req.IdempotencyKey != "" {
@@ -389,6 +390,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		Depth:         depth,
 		Files:         files,
 		ExtraTools:    extra,
+		Resolved:      resolved,
 	})
 	if err != nil {
 		return nil, err
@@ -674,9 +676,9 @@ func (a *Agent) Get(ctx context.Context, id string) (*Run, error) {
 }
 
 // RunBudget returns the effective budget of a run: its own budget, merged
-// with the budget of its profile and of the configuration, and capped by
-// the budget of its parent. It authorizes the caller as Get does. A zero
-// field has no limit.
+// with the budget of its profile and of the configuration as the kernel
+// resolved them when it queued the run, and capped by the budget of its
+// parent. It authorizes the caller as Get does. A zero field has no limit.
 func (a *Agent) RunBudget(ctx context.Context, id string) (Budget, error) {
 	rs, err := a.k.lookup(id)
 	if err != nil {

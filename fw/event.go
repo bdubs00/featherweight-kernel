@@ -134,6 +134,15 @@ type RunQueuedData struct {
 	// beyond the tool list of its named profile, so every surface can tell
 	// the person.
 	ExtraTools []string `json:"extraTools,omitempty"`
+	// Resolved is the effective profile of the run, resolved once when the
+	// kernel queued it: the named profile with the inline profile on top,
+	// and the model selector, the effort, the time zone, and the budget
+	// defaults of the configuration filled in. It never holds Access. The
+	// run keeps it for its life, so a change to the profile or to the
+	// configuration reaches new runs only. The policy of the named profile
+	// still applies on top as a tightening. A ledger of an older kernel has
+	// none, and such a run reads the named profile at each step.
+	Resolved *AgentProfile `json:"resolved,omitempty"`
 }
 
 // RunStartedData is the payload of fw.run.started.

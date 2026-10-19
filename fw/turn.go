@@ -386,7 +386,7 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	if o := a.k.override(rs.id); o != nil && o.zone != nil && *o.zone != "" {
 		zone = *o.zone
 	}
-	_, err := a.emit(ctx, rs, EvRunStarted, RunStartedData{Model: a.cfg.ModelSelector(prof.Model), Tools: names, Brief: a.brief(ctx, rs, tools), TimeZone: zone})
+	_, err := a.emit(ctx, rs, EvRunStarted, RunStartedData{Model: a.selectorOf(c.queued, prof), Tools: names, Brief: a.brief(ctx, rs, tools), TimeZone: zone})
 	if err == nil {
 	}
 	return err
@@ -428,8 +428,8 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		}
 		return a.finish(ctx, rs, OutcomeFailed, "", "budget exceeded: "+limit)
 	}
-	selector := a.cfg.ModelSelector(prof.Model)
-	model, err := a.ModelFor(ctx, prof.Model)
+	selector := a.selectorOf(c.queued, prof)
+	model, err := a.openModel(ctx, selector)
 	if err != nil {
 		return a.fail(ctx, rs, "model: "+err.Error())
 	}
@@ -621,9 +621,18 @@ func (a *Agent) fail(ctx context.Context, rs *runState, msg string) error {
 	return a.finish(ctx, rs, OutcomeFailed, "", msg)
 }
 
-// profileOf returns the effective profile of a run: the named profile of
-// the configuration with the inline profile of the request on top.
+// profileOf returns the effective profile of a run: the profile that the
+// kernel resolved when it queued the run (resolveProfile), for the life of
+// the run. Only the policy of the named profile now applies on top, as a
+// tightening (tighten). A run from the ledger of an older kernel has no
+// resolved profile, so the named profile now with the inline profile of
+// the request on top stands in for it.
 func (a *Agent) profileOf(q RunQueuedData) AgentProfile {
+	if q.Resolved != nil {
+		prof := *q.Resolved
+		prof.Policy = tighten(prof.Policy, a.profileNamed(q.Agent).Policy)
+		return prof
+	}
 	prof := a.profileNamed(q.Agent)
 	if q.Profile != nil {
 		prof = prof.Overlay(*q.Profile)
@@ -646,19 +655,11 @@ func (a *Agent) lineage(rs *runState) []*runState {
 	return out
 }
 
-// budgetOf returns the effective budget of a run: the request budget, then
-// the profile budget, then the configuration budget, capped by the budget
-// of the parent so that a child never outgrows its parent.
+// budgetOf returns the effective budget of a run: its own budget
+// (ownBudget), capped by the budget of the parent so that a child never
+// outgrows its parent.
 func (a *Agent) budgetOf(rs *runState) Budget {
-	q := rs.queuedData()
-	var b Budget
-	if q.Budget != nil {
-		b = *q.Budget
-	}
-	if prof := a.profileOf(q); prof.Budget != nil {
-		b = b.Merge(*prof.Budget)
-	}
-	b = b.Merge(a.cfg.Budget)
+	b := a.ownBudget(rs)
 	if rs.parent != "" {
 		if p, err := a.k.lookup(rs.parent); err == nil && rs.depth < 64 {
 			b = b.Cap(a.budgetOf(p))
