@@ -25,6 +25,16 @@ const minSecretLen = 8
 // its scheme and host and loses its user information: always for http and
 // https, which carry a token there, and for another scheme when the user
 // information holds a password, so that ssh://git@host keeps its user.
+//
+// A shape with a group named token replaces a match only when that group
+// looks like a token (tokenLike), or when its group named header matched.
+// The bearer shape needs it: the word Bearer is common in configuration,
+// code, and prose, as in "type: Bearer" of a Prometheus block or "bearer
+// authentication", and the word after it is then a key or a word, not a
+// token. After "Authorization:", the word is a credential whatever its
+// letters. The bearer shape also takes the token on the same line only,
+// after spaces or tabs, as an Authorization header holds it, so a key on
+// the next line never matches.
 var secretShapes = []struct{ pattern, repl string }{
 	{`-----BEGIN[A-Z0-9 ]*PRIVATE KEY-----[^"]*?-----END[A-Z0-9 ]*PRIVATE KEY-----`, Redacted},
 	{`\bsk-ant-[A-Za-z0-9_-]{20,}`, Redacted},
@@ -38,7 +48,7 @@ var secretShapes = []struct{ pattern, repl string }{
 	{`\bhf_[A-Za-z0-9]{30,}`, Redacted},
 	{`\bnpm_[A-Za-z0-9]{36}`, Redacted},
 	{`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`, Redacted},
-	{`(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]{16,}=*`, "${1}" + Redacted},
+	{`(?i)\b((?P<header>authorization:[ \t]*)?bearer[ \t]+)(?P<token>[A-Za-z0-9._~+/-]{16,}=*)`, "${1}" + Redacted},
 	{`(?i)\b(https?://)[^/?#\s"'@]+@`, "${1}" + Redacted + "@"},
 	{`(?i)\b([a-z][a-z0-9+.-]*://)[^/?#\s"':@]+:[^/?#\s"'@]*@`, "${1}" + Redacted + "@"},
 }
@@ -125,36 +135,67 @@ func (r *redactor) text(s string) string {
 	}
 	r.mu.RUnlock()
 	for i, re := range shapes {
-		s = re.ReplaceAllString(s, secretShapes[i].repl)
+		repl := secretShapes[i].repl
+		g := re.SubexpIndex("token")
+		if g < 0 {
+			s = re.ReplaceAllString(s, repl)
+			continue
+		}
+		h := re.SubexpIndex("header")
+		s = re.ReplaceAllStringFunc(s, func(m string) string {
+			at := re.FindStringSubmatchIndex(m)
+			if at == nil {
+				return m
+			}
+			if (h < 0 || at[2*h] < 0) && !tokenLike(m[at[2*g]:at[2*g+1]]) {
+				return m
+			}
+			return string(re.ExpandString(nil, repl, m, at))
+		})
 	}
 	return s
+}
+
+// tokenLike reports whether s has the alphabet of a token and not of a
+// word or a key: a digit, or a capital and a small letter. A key such as
+// credentials_file or a word such as authentication has neither.
+func tokenLike(s string) bool {
+	var digit, upper, lower bool
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+			digit = true
+		case c >= 'A' && c <= 'Z':
+			upper = true
+		case c >= 'a' && c <= 'z':
+			lower = true
+		}
+	}
+	return digit || upper && lower
 }
 
 // holds reports whether raw JSON can hold a secret. It is the fast path:
 // most events hold none, and the kernel appends them unchanged. An escape
 // in a JSON string can hide a secret from a look at the raw bytes, such
 // as "\t" between the word Bearer and a token, or "\u0041" for the
-// letter A of a key. The check therefore also reads raw with every escape
-// resolved, so it finds every secret that the full pass over the strings
-// finds.
+// letter A of a key. The check therefore reads raw with every escape
+// resolved, in which the text of each string appears as the string holds
+// it, so it finds every secret that the full pass over the strings finds.
+// Raw without an escape is that text already. Either way, the check reads
+// the data once.
 func (r *redactor) holds(raw []byte) bool {
-	views := [][]byte{raw}
+	view := raw
 	if bytes.IndexByte(raw, '\\') >= 0 {
-		views = append(views, unescapeJSON(raw))
+		view = unescapeJSON(raw)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, view := range views {
-		for _, v := range r.values {
-			if bytes.Contains(view, []byte(v)) || bytes.Contains(view, jsonText(v)) {
-				return true
-			}
-		}
-		if anyShape.Match(view) {
+	for _, v := range r.values {
+		if bytes.Contains(view, []byte(v)) || bytes.Contains(view, jsonText(v)) {
 			return true
 		}
 	}
-	return false
+	return anyShape.Match(view)
 }
 
 // unescapeJSON returns raw JSON with every escape resolved: the one-letter
@@ -224,7 +265,9 @@ func jsonText(v string) []byte {
 
 // data returns event data with every secret replaced in its strings. It
 // leaves an opaque block alone, because a provider signs it, and it leaves
-// the bytes of an image or a document alone.
+// the bytes of an image or a document alone. Data in which no string
+// changes stays the same bytes, so the input of a tool call and its result
+// keep their exact form.
 func (r *redactor) data(raw json.RawMessage) json.RawMessage {
 	if r == nil || len(raw) == 0 || !r.holds(raw) {
 		return raw
@@ -235,20 +278,31 @@ func (r *redactor) data(raw json.RawMessage) json.RawMessage {
 	if err := dec.Decode(&v); err != nil {
 		return raw
 	}
-	out, err := json.Marshal(r.walk(v))
+	changed := false
+	v = r.walk(v, &changed)
+	if !changed {
+		return raw
+	}
+	out, err := json.Marshal(v)
 	if err != nil {
 		return raw
 	}
 	return out
 }
 
-func (r *redactor) walk(v any) any {
+// walk replaces the secrets in the strings of v and sets changed when it
+// replaced one.
+func (r *redactor) walk(v any, changed *bool) any {
 	switch t := v.(type) {
 	case string:
-		return r.text(t)
+		out := r.text(t)
+		if out != t {
+			*changed = true
+		}
+		return out
 	case []any:
 		for i := range t {
-			t[i] = r.walk(t[i])
+			t[i] = r.walk(t[i], changed)
 		}
 	case map[string]any:
 		typ := t["type"]
@@ -259,7 +313,7 @@ func (r *redactor) walk(v any) any {
 			if k == "data" && (typ == BlockImage || typ == BlockDocument) {
 				continue
 			}
-			t[k] = r.walk(x)
+			t[k] = r.walk(x, changed)
 		}
 	}
 	return v

@@ -97,9 +97,9 @@ Before the kernel appends an event, it replaces each secret in the data with `[r
 
 - a value that `fw` resolved through `Secrets`, such as a model API key or `FW_API_TOKEN`
 - the value of a variable with a secret name, such as `OPENAI_API_KEY`, `GITHUB_TOKEN`, or `DB_PASSWORD`
-- text with the shape of a secret: a PEM private key, a provider or GitHub token, an AWS access key, a JWT, a bearer token, or the user information of a URL
+- text with the shape of a secret: a PEM private key, a provider or GitHub token, an AWS access key, a JWT, a bearer token, or the user information of a URL. A bearer token follows the word `Bearer` on the same line, after spaces or tabs, and has a digit or capital and small letters, unless `Authorization:` comes before `Bearer`. A key or a word after `Bearer`, such as `credentials_file` on the next line of a Prometheus block, stays.
 
-The model builds its history from the stored events, so the model does not see the secret either. A JSON escape in a string, such as a tab between `Bearer` and a token, does not hide a secret: the kernel reads each string as it decodes. The raw provider blocks stay unchanged, because the provider signs them. The bytes of an image or a document also stay unchanged. A value of fewer than eight characters is not replaced. `a.Redact` applies the same rules to the text of a log line.
+The model builds its history from the stored events, so the model does not see the secret either. A JSON escape in a string, such as a tab between `Bearer` and a token, does not hide a secret: the kernel reads each string as it decodes. An event in which no string holds a secret keeps its bytes, so the input of a tool call and its result reach the tool and the model as they were. The raw provider blocks stay unchanged, because the provider signs them. The bytes of an image or a document also stay unchanged. A value of fewer than eight characters is not replaced. `a.Redact` applies the same rules to the text of a log line.
 
 ### 4.3 Storage
 
