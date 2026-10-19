@@ -186,6 +186,10 @@ type createBody struct {
 	// in another process does, so the child acts as its person.
 	Principal     string `json:"principal"`
 	PrincipalKind string `json:"principalKind"`
+	// ID is the id of the run. Only a trusted caller sets it; a parent in
+	// another process does, because it records the id of its child before
+	// the child has the run.
+	ID string `json:"id"`
 }
 
 // fileBody is one attachment of a run or a message (section 7.10). Data is
@@ -415,6 +419,12 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 		problem(w, r, http.StatusBadRequest, "the field input is required and must not be empty")
 		return
 	}
+	if body.ID != "" {
+		if p := fw.PrincipalFrom(r.Context()); p == nil || (p.Kind != fw.KindToken && p.Kind != fw.KindWorkload) {
+			problem(w, r, http.StatusForbidden, "only the static token or a workload can name the id of a run")
+			return
+		}
+	}
 	if len(body.Instructions) > maxInstructionBytes {
 		problem(w, r, http.StatusBadRequest, fmt.Sprintf("the field instructions is longer than %d bytes", maxInstructionBytes))
 		return
@@ -445,6 +455,7 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := fw.RunRequest{
+		ID:            body.ID,
 		Agent:         body.Agent,
 		Input:         body.Input,
 		Instructions:  body.Instructions,

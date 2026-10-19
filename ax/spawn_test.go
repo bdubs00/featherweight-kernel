@@ -99,6 +99,9 @@ func (f *fakeAX) DeleteTask(_ context.Context, req *v1alpha1.DeleteTaskRequest) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := key(req.GetAtespace(), req.GetName())
+	if _, ok := f.tasks[k]; !ok {
+		return nil, status.Error(codes.NotFound, k)
+	}
 	delete(f.tasks, k)
 	f.deleted = append(f.deleted, k)
 	return &v1alpha1.DeleteTaskResponse{}, nil
@@ -115,13 +118,16 @@ func (f *fakeAX) created() []*v1alpha1.Task {
 }
 
 // fakeRouter plays the atenet router and the native API of one child: it
-// checks the actor header and the token, starts one run, lets it finish
-// after two reads, and records the decisions and the cancel.
+// checks the actor header and the token, starts one run under the id of
+// the body, 01CHILD without one, lets it finish after two reads, and
+// records the decisions and the cancel.
 type fakeRouter struct {
 	*httptest.Server
 	token string
 
 	mu         sync.Mutex
+	runID      string
+	ignoreID   bool // start the run as 01CHILD whatever the body names, as a child of an older version
 	actors     []string
 	body       map[string]any
 	keys       []string
@@ -149,7 +155,7 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		principal, _ := f.body["principal"].(string)
-		out := map[string]any{"id": "01CHILD", "agent": "default", "state": state, "principal": principal, "usage": map[string]any{}}
+		out := map[string]any{"id": f.runID, "agent": "default", "state": state, "principal": principal, "usage": map[string]any{}}
 		if state == "completed" {
 			out["output"] = "child done"
 		}
@@ -170,6 +176,10 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.body = body
+		f.runID, _ = body["id"].(string)
+		if f.runID == "" || f.ignoreID {
+			f.runID = "01CHILD"
+		}
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(run("running"))
@@ -195,7 +205,10 @@ func newFakeRouter(t *testing.T) *fakeRouter {
 		if !guard(w, r) {
 			return
 		}
-		if r.PathValue("id") != "01CHILD" {
+		f.mu.Lock()
+		have := f.runID
+		f.mu.Unlock()
+		if r.PathValue("id") != have || have == "" {
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"detail":"no run has that id"}`))
@@ -455,7 +468,7 @@ func TestNewSpawnerNeedsTheRouter(t *testing.T) {
 		t.Fatalf("Spawn outside ax = %v", err)
 	}
 	for _, name := range []string{"migrator", strings.Repeat("a", 80)} {
-		child, err := childName(name)
+		child, err := childName(name, "")
 		if err != nil || len(child) > maxTaskName || !strings.HasPrefix(child, name[:min(len(name), 20)]) {
 			t.Fatalf("childName(%d) = %q, %v", len(name), child, err)
 		}

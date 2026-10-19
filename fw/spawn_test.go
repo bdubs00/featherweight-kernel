@@ -78,6 +78,14 @@ func (s *otherSpawner) Branch(ctx context.Context, _ string, events []Event, req
 	return s.other.ForkEvents(ctx, events, req)
 }
 
+// Plan names the other agent as the process of every child.
+func (s *otherSpawner) Plan(*Run, RunRequest) (string, error) { return "other", nil }
+
+// Find looks for a child in the other agent, as after a restart.
+func (s *otherSpawner) Find(ctx context.Context, _, id string) (*Run, error) {
+	return s.other.Get(ctx, id)
+}
+
 func (s *otherSpawner) Get(ctx context.Context, _, id string) (*Run, error) {
 	return s.other.Get(ctx, id)
 }

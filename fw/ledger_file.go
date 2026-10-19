@@ -3,10 +3,11 @@ package fw
 // This file is the "file" ledger driver (docs/ARCHITECTURE.md section 4.3).
 // Each run has a directory <root>/<run>/ with ledger.jsonl, one JSON event
 // per line. The driver only appends. It calls fsync after every approval
-// event, every terminal event, and every request to run a tool that is
-// not idempotent. An event whose tool intent has no readable
-// classification counts as not idempotent. Such a success also stands on
-// the entries behind the file: the first open of a run owes an fsync of
+// event, every terminal event, every record of a child in another process,
+// and every request to run a tool that is not idempotent. An event whose
+// tool intent has no readable classification counts as not idempotent.
+// Such a success also stands on the entries behind the file: the first
+// open of a run owes an fsync of
 // its directory and of the root, and the first new entry of the index
 // owes an fsync of the root. A failed fsync keeps the debt until a retry
 // pays it, and a debt survives a path that already exists. The file
@@ -105,9 +106,12 @@ func keepsDone(done bool, typ string) bool {
 // reads the ledger must not lose the record that the tool was asked
 // for. An fw.tool.requested event without a readable classification,
 // as from an older version or a direct caller, counts as not
-// idempotent, so no event can bypass the durable write.
+// idempotent, so no event can bypass the durable write. A record of a
+// child in another process needs it too: the kernel records a child
+// before the spawner creates its process, and a restart must know every
+// process that the spawner created.
 func needsIntentSync(typ string, data json.RawMessage) bool {
-	if typ == EvApprovalRequested || typ == EvApprovalDecided || IsTerminal(typ) {
+	if typ == EvApprovalRequested || typ == EvApprovalDecided || typ == EvRunChild || IsTerminal(typ) {
 		return true
 	}
 	if typ != EvToolRequested {

@@ -8,7 +8,9 @@ package ax
 // run through the atenet router with the static token of the fleet and the
 // person of the parent, and follows the run through the native API of the
 // child. The child Task gets FW_PARENT_RUN, FW_PARENT_MEMBER, and the depth
-// that spawn.maxDepth leaves it in FW_SPAWN_MAX_DEPTH.
+// that spawn.maxDepth leaves it in FW_SPAWN_MAX_DEPTH. The name of a child
+// Task ends with the id of its run, so the kernel records the name before
+// the Task exists, and a restart of this process finds the Task again.
 
 import (
 	"bytes"
@@ -28,7 +30,9 @@ import (
 	"github.com/bdubs00/featherweight-kernel/fw"
 	v1alpha1 "github.com/google/ax/pkg/apis/v1alpha1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 func init() {
@@ -88,6 +92,7 @@ type Spawner struct {
 
 var _ fw.Spawner = (*Spawner)(nil)
 var _ fw.Forker = (*Spawner)(nil)
+var _ fw.Planner = (*Spawner)(nil)
 
 // NewSpawner returns the spawner of the configuration. It needs ax.router,
 // because the native API of a child Task is reached through the router.
@@ -146,7 +151,8 @@ func (s *Spawner) Close() error {
 	return err
 }
 
-// Spawn implements fw.Spawner.
+// Spawn implements fw.Spawner. The child Task has the name that Plan
+// gives req, and the child takes its run under req.ID.
 func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) (*fw.Run, string, error) {
 	task, _ := Stashed()
 	if task == nil {
@@ -156,7 +162,7 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 	if atespace == "" || name == "" {
 		return nil, "", errors.New("ax: the Task of this process has no atespace or no name")
 	}
-	child, err := childName(name)
+	child, err := childName(name, req.ID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -183,7 +189,67 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 		s.deleteTask(client, atespace, child)
 		return nil, "", err
 	}
+	if req.ID != "" && run.ID != req.ID {
+		s.deleteTask(client, atespace, child)
+		return nil, "", fmt.Errorf("ax: the child %s took the run as %s, not %s", actor, run.ID, req.ID)
+	}
 	return run, "ax:" + actor, nil
+}
+
+// Plan implements fw.Planner: it returns the member name of the child Task
+// that Spawn creates for req, from the name of this Task and req.ID, and
+// creates nothing.
+func (s *Spawner) Plan(_ *fw.Run, req fw.RunRequest) (string, error) {
+	task, _ := Stashed()
+	if task == nil {
+		return "", errors.New("ax: this process is not an ax Task, so it cannot start a child Task")
+	}
+	atespace, name := Identity(task)
+	if atespace == "" || name == "" {
+		return "", errors.New("ax: the Task of this process has no atespace or no name")
+	}
+	if _, ok := fw.IDTime(req.ID); !ok {
+		return "", fmt.Errorf("ax: the child run needs an id from fw.NewID to name its Task, not %q", req.ID)
+	}
+	child, err := childName(name, req.ID)
+	if err != nil {
+		return "", err
+	}
+	return "ax:" + atespace + "/" + child, nil
+}
+
+// Find implements fw.Planner: after a restart of this process, it looks for
+// the child run id in the child Task at member. A Task that does not exist,
+// or that ax deletes, holds no run. A Task that does not run, because this
+// process went away before it resumed the Task, runs again for the look,
+// as Spawn would have made it run, so a Task without the run answers that
+// it does not have it.
+func (s *Spawner) Find(ctx context.Context, member, id string) (*fw.Run, error) {
+	actor, err := actorOf(member)
+	if err != nil {
+		return nil, err
+	}
+	atespace, child, _ := strings.Cut(actor, "/")
+	client, err := s.ax()
+	if err != nil {
+		return nil, err
+	}
+	t, err := client.GetTask(ctx, &v1alpha1.GetTaskRequest{Atespace: atespace, Name: child})
+	if status.Code(err) == codes.NotFound {
+		return nil, fmt.Errorf("%w: the child Task %s does not exist", fw.ErrRunNotFound, actor)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ax: read the child Task %s: %w", actor, err)
+	}
+	if t.GetStatus().GetPhase() == v1alpha1.PhaseTerminating {
+		return nil, fmt.Errorf("%w: the child Task %s is being deleted", fw.ErrRunNotFound, actor)
+	}
+	if t.GetStatus().GetPhase() != phaseRunning {
+		if err := s.awaitRunning(ctx, client, atespace, child); err != nil {
+			return nil, err
+		}
+	}
+	return s.Get(ctx, member, id)
 }
 
 // Place implements fw.Forker: it creates a child Task for a branch, as
@@ -199,7 +265,7 @@ func (s *Spawner) Place(ctx context.Context, parent *fw.Run) (string, error) {
 	if atespace == "" || name == "" {
 		return "", errors.New("ax: the Task of this process has no atespace or no name")
 	}
-	child, err := childName(name)
+	child, err := childName(name, "")
 	if err != nil {
 		return "", err
 	}
@@ -259,8 +325,9 @@ func (s *Spawner) Branch(ctx context.Context, member string, events []fw.Event, 
 	return run, nil
 }
 
-// Abandon implements fw.Forker: it deletes the child Task of a branch that
-// never reached it, after a restart of this process.
+// Abandon implements fw.Forker and fw.Planner: it deletes the child Task of
+// a branch or a child run that never reached it, after a restart of this
+// process. A Task that does not exist is gone already.
 func (s *Spawner) Abandon(ctx context.Context, member string) error {
 	actor, err := actorOf(member)
 	if err != nil {
@@ -271,10 +338,11 @@ func (s *Spawner) Abandon(ctx context.Context, member string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := client.DeleteTask(ctx, &v1alpha1.DeleteTaskRequest{Atespace: atespace, Name: child}); err != nil {
+	_, err = client.DeleteTask(ctx, &v1alpha1.DeleteTaskRequest{Atespace: atespace, Name: child})
+	if err != nil && status.Code(err) != codes.NotFound {
 		return fmt.Errorf("ax: delete the child Task %s: %w", actor, err)
 	}
-	s.log.Info("child Task of a lost branch deleted", "atespace", atespace, "task", child)
+	s.log.Info("child Task of a lost child deleted", "atespace", atespace, "task", child)
 	return nil
 }
 
@@ -307,13 +375,19 @@ func egressOf(e *EgressSpec) *v1alpha1.EgressSpec {
 }
 
 // childName makes the name of a child Task from the name of its parent and
-// a random suffix, within the length of a DNS label.
-func childName(parent string) (string, error) {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("ax: random name: %w", err)
+// the id of the child run, within the length of a DNS label. The id is a
+// ULID, which has only digits and letters, so the name is the same for
+// the same id and differs for another id. Without such an id, as for a
+// branch, the suffix is random.
+func childName(parent, id string) (string, error) {
+	suffix := strings.ToLower(id)
+	if _, ok := fw.IDTime(id); !ok {
+		b := make([]byte, 4)
+		if _, err := rand.Read(b); err != nil {
+			return "", fmt.Errorf("ax: random name: %w", err)
+		}
+		suffix = fmt.Sprintf("%x", b)
 	}
-	suffix := fmt.Sprintf("%x", b)
 	parent = strings.ToLower(parent)
 	if n := maxTaskName - len(suffix) - 1; len(parent) > n {
 		parent = strings.TrimRight(parent[:n], "-")
@@ -443,6 +517,7 @@ func (s *Spawner) deleteTask(client v1alpha1.AXClient, atespace, name string) {
 // runBody is the body of POST /v1/runs of the child, in the shape that the
 // native API takes.
 type runBody struct {
+	ID            string            `json:"id,omitempty"`
 	Agent         string            `json:"agent,omitempty"`
 	Input         string            `json:"input"`
 	Instructions  string            `json:"instructions,omitempty"`
@@ -513,7 +588,7 @@ func budgetOf(b *fw.Budget) *budgetBody {
 }
 
 func bodyOf(req fw.RunRequest) runBody {
-	body := runBody{Agent: req.Agent, Input: req.Input, Instructions: req.Instructions, Budget: budgetOf(req.Budget),
+	body := runBody{ID: req.ID, Agent: req.Agent, Input: req.Input, Instructions: req.Instructions, Budget: budgetOf(req.Budget),
 		Metadata: req.Metadata, Principal: req.Principal, PrincipalKind: req.PrincipalKind}
 	if p := req.Profile; p != nil {
 		body.Profile = &profileBody{System: p.System, Instructions: p.Instructions, Skills: p.Skills, Tools: p.Tools,
@@ -530,8 +605,13 @@ func (s *Spawner) startRun(ctx context.Context, actor string, parent *fw.Run, re
 	if err != nil {
 		return nil, fmt.Errorf("ax: encode the child run: %w", err)
 	}
-	return s.startOn(ctx, actor, "/v1/runs", body, "spawn:"+parent.ID+":"+actor)
+	return s.startOn(ctx, actor, "/v1/runs", body, startKey(parent.ID, actor))
 }
+
+// startKey is the idempotency key of the start of a child run. The name of
+// the child Task in actor comes from the id of the child run, so the key
+// is the same for every start of one child and differs for another child.
+func startKey(parent, actor string) string { return "spawn:" + parent + ":" + actor }
 
 // startOn posts a run or a branch to the child and returns the run that the
 // child answers. The child boots after its Task runs, so the request is

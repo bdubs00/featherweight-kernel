@@ -126,12 +126,10 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 		return nil, err
 	}
 	req.ID = NewID()
-	qe, err := NewEvent(req.ID, EvRunQueued, q)
+	placeholder, err := a.placeholder(req.ID, q, a.now())
 	if err != nil {
 		return nil, err
 	}
-	qe.Time = a.now().UTC()
-	placeholder := ProjectRun([]Event{qe}, a.prices)
 	// The start outlives the request of the caller, and Cancel ends it.
 	bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder}
@@ -149,10 +147,11 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	return cloneRun(placeholder), nil
 }
 
-// Starting counts the branches of this process whose start in another
-// process is still open. The status of the process is not idle while one
+// Starting counts the branches and the children of this process whose
+// start in another process is still open, with the children that it looks
+// for after a restart. The status of the process is not idle while one
 // is, so a controller does not put the process to sleep before its child
-// has the branch.
+// has its run.
 func (a *Agent) Starting() int {
 	k := a.k
 	k.mu.Lock()
@@ -203,9 +202,10 @@ func (a *Agent) startBranch(ctx context.Context, forker Forker, ref childRef, q 
 	k.mu.Unlock()
 }
 
-// recordBranchEnd records a branch that never reached its process as a run
-// of this process with the outcome and the reason, under the id of the
-// branch, and stops counting it as a child in another process.
+// recordBranchEnd records a branch or a child of spawn_task that never
+// reached its process as a run of this process with the outcome and the
+// reason, under the id of the branch or the child, and stops counting it as
+// a child in another process.
 func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, reason string) {
 	k := a.k
 	brs := k.newRunState(id, q.Agent, "")
@@ -238,9 +238,7 @@ func (a *Agent) recordLostBranch(src *runState, d RunChildData) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			if err := forker.Abandon(ctx, d.Member); err != nil {
-				a.log.Warn("abandon the process of a lost branch", "branch", d.Child, "member", d.Member, "error", err)
-			}
+			a.abandon(ctx, forker, d.Child, d.Member)
 		}()
 	}
 }
