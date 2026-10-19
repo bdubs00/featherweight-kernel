@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,22 +161,29 @@ func TestRegistered(t *testing.T) {
 
 // A collector that a linked package registers appears in the scrape; an
 // agent without one serves none of its series.
+// extraCollector registers the collector of TestRegisteredCollector once
+// in the process, because the list of collectors is global, as the init of
+// a driver package fills it, and a test can run more than once (-count).
+var extraCollector sync.Once
+
 func TestRegisteredCollector(t *testing.T) {
-	a := newAgent(t, fw.DefaultConfig(), metrics.New())
-	h, err := a.Handler()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, body := scrape(t, h, "/metrics"); strings.Contains(body, "fw_extra_") {
-		t.Error("an agent without a registered collector reports its series")
-	}
-	metrics.RegisterCollector(func(*fw.Agent) prometheus.Collector {
-		g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "fw_extra_up", Help: "A gauge of a linked package."})
-		g.Set(1)
-		return g
+	extraCollector.Do(func() {
+		a := newAgent(t, fw.DefaultConfig(), metrics.New())
+		h, err := a.Handler()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, body := scrape(t, h, "/metrics"); strings.Contains(body, "fw_extra_") {
+			t.Error("an agent without a registered collector reports its series")
+		}
+		metrics.RegisterCollector(func(*fw.Agent) prometheus.Collector {
+			g := prometheus.NewGauge(prometheus.GaugeOpts{Name: "fw_extra_up", Help: "A gauge of a linked package."})
+			g.Set(1)
+			return g
+		})
 	})
 	b := newAgent(t, fw.DefaultConfig(), metrics.New())
-	h, err = b.Handler()
+	h, err := b.Handler()
 	if err != nil {
 		t.Fatal(err)
 	}
