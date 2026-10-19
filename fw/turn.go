@@ -82,6 +82,8 @@ type cursor struct {
 	brief      string    // the brief of fw.run.started
 	compactSeq uint64    // the latest fw.context.compacted
 	toolCalls  int       // fw.tool.requested events in the run
+	keptTurns  int       // the turns that a branch kept from its source (RunQueuedData.Kept)
+	keptCalls  int       // the tool calls that a branch kept from its source
 	prints     []uint64  // fingerprint of each tool_use block of every response, in order
 	priorN     int       // prints before the latest response
 	warned     bool      // the kernel warned about a loop after the latest response
@@ -132,6 +134,9 @@ func analyze(events []Event) *cursor {
 			}
 		case EvTurnStarted:
 			c.turns++
+			if e.Seq <= c.queued.Kept {
+				c.keptTurns++
+			}
 			c.turnOpen = true
 			c.turnSeq = e.Seq
 		case EvTurnFinished:
@@ -173,6 +178,9 @@ func analyze(events []Event) *cursor {
 		case EvToolRequested, EvToolResponded:
 			if e.Type == EvToolRequested {
 				c.toolCalls++
+				if e.Seq <= c.queued.Kept {
+					c.keptCalls++
+				}
 			}
 			if i < lastResp || c.calls == nil {
 				continue
@@ -681,20 +689,24 @@ func (a *Agent) overBudget(rs *runState, c *cursor) (string, float64, bool) {
 	rs.mu.Lock()
 	u := rs.run.Usage
 	rs.mu.Unlock()
-	next := c.turns
+	// A branch is charged for its own work only: the usage leaves out the
+	// events that it kept from its source, and so do the turns and the
+	// tool calls here.
+	turns, calls := c.turns-c.keptTurns, c.toolCalls-c.keptCalls
+	next := turns
 	if !c.turnOpen {
 		next++
 	}
 	tokens := u.InputTokens + u.OutputTokens
 	switch {
 	case b.MaxTurns > 0 && next > b.MaxTurns:
-		return "maxTurns", float64(c.turns), true
+		return "maxTurns", float64(turns), true
 	case b.MaxTokens > 0 && tokens >= b.MaxTokens:
 		return "maxTokens", float64(tokens), true
 	case b.MaxCostUSD > 0 && u.CostUSD >= b.MaxCostUSD:
 		return "maxCostUSD", u.CostUSD, true
-	case b.MaxToolCalls > 0 && c.toolCalls >= b.MaxToolCalls:
-		return "maxToolCalls", float64(c.toolCalls), true
+	case b.MaxToolCalls > 0 && calls >= b.MaxToolCalls:
+		return "maxToolCalls", float64(calls), true
 	}
 	if worked, over := a.pastDeadline(rs); over {
 		return "deadline", worked.Seconds(), true
@@ -931,7 +943,7 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 	policy := a.policyFor(rs, prof)
 	room := -1 // tool calls left in the run, or -1 for no limit
 	if b.MaxToolCalls > 0 {
-		room = max(b.MaxToolCalls-c.toolCalls, 0)
+		room = max(b.MaxToolCalls-(c.toolCalls-c.keptCalls), 0)
 	}
 	var plan []plannedCall
 	for i, u := range uses {

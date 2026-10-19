@@ -208,6 +208,7 @@ func (a *Agent) startBranch(ctx context.Context, forker Forker, ref childRef, q 
 // a child in another process.
 func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, reason string) {
 	k := a.k
+	q.Kept = 0 // the record holds no event of the source
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
 	k.mu.Lock()
@@ -340,6 +341,12 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 		}
 		q.Profile = &prof
 		q.Resolved = a.withModel(q.Resolved, req.Model)
+	}
+	q.Kept = 0 // the events of the branch that are copies; see RunQueuedData.Kept
+	for _, e := range evs {
+		if e.Seq <= req.Seq && e.Type != EvRunChild {
+			q.Kept++
+		}
 	}
 	kept := make([]Event, 0, len(evs))
 	for _, e := range evs {
