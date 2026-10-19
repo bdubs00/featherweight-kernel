@@ -171,15 +171,17 @@ func textDigest(s string) string {
 // textOf returns the text of a run with a resolved profile. A run that this
 // process queued keeps the text that it was queued with in memory, so a
 // change of the profile does not reach it. A branch in this process takes
-// the text of its source when the digests agree. Otherwise, such as after
-// a restart, the kernel composes the text from the named profile now and
-// the inline profile of fw.run.queued and keeps it from then on. When its
-// digests differ from those that the run expects, the configuration
-// changed: the run goes on with the text now, and the kernel records the
-// change on the run as fw.run.annotated with MetaDriftSystem or
-// MetaDriftInstructions, the digest that the run expected, and the digest
-// of the text now. An earlier record of a change sets the digest that the
-// run expects, so each change is recorded once.
+// the text of the nearest run up its chain of sources (MetaForkOf) that
+// holds a text with the same digests, so a branch of a branch that made no
+// model call yet keeps the text of the first source too. Otherwise, such
+// as after a restart, the kernel composes the text from the named profile
+// now and the inline profile of fw.run.queued and keeps it from then on.
+// When its digests differ from those that the run expects, the
+// configuration changed: the run goes on with the text now, and the kernel
+// records the change on the run as fw.run.annotated with MetaDriftSystem
+// or MetaDriftInstructions, the digest that the run expected, and the
+// digest of the text now. An earlier record of a change sets the digest
+// that the run expects, so each change is recorded once.
 func (a *Agent) textOf(ctx context.Context, rs *runState, q RunQueuedData) (*runText, error) {
 	rs.mu.Lock()
 	t := rs.text
@@ -205,13 +207,20 @@ func (a *Agent) textOf(ctx context.Context, rs *runState, q RunQueuedData) (*run
 		}
 		return changed
 	}
-	if src, err := a.k.lookup(q.Metadata[MetaForkOf]); err == nil && src != rs {
+	seen := map[*runState]bool{rs: true}
+	for id := q.Metadata[MetaForkOf]; id != "" && t == nil; {
+		src, err := a.k.lookup(id)
+		if err != nil || seen[src] {
+			break
+		}
+		seen[src] = true
 		src.mu.Lock()
 		st := src.text
 		src.mu.Unlock()
 		if st != nil && len(agree(st)) == 0 {
 			t = st
 		}
+		id = src.queuedData().Metadata[MetaForkOf]
 	}
 	if t == nil {
 		t = composeText(a.profileNamed(q.Agent), q.Profile)

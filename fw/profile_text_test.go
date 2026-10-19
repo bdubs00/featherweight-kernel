@@ -298,3 +298,52 @@ func TestDenyAddedWhileApprovalWaitsWins(t *testing.T) {
 	mustState(t, r, err, StateCompleted)
 	deniedByPolicy(t, l, r.ID, "d1")
 }
+
+// A branch of a branch keeps the text of the first source in this process,
+// although the branch between them made no model call: a branch without a
+// message of a finished run, and a branch that waits for an approval.
+func TestBranchOfBranchKeepsTheText(t *testing.T) {
+	ctx := testCtx(t)
+	rec := &pinRecorder{}
+	l := NewMemLedger()
+	a := pinAgent(t, pinConfig(t, "pintest/base"), l, rec)
+	setProfiles(t, a, map[string]AgentProfile{"worker": {System: "Old."}})
+	rec.script(endTurn("one"), callTools(use("d1", "delta", `{}`)))
+	s, err := a.Run(ctx, "first", AsAgent("worker"))
+	mustState(t, s, err, StateCompleted)
+	w, err := a.Run(ctx, "change something", AsAgent("worker"))
+	mustState(t, w, err, StateInputRequired)
+	setProfiles(t, a, map[string]AgentProfile{"worker": {System: "New."}})
+
+	finished, err := a.Fork(ctx, s.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := a.Fork(ctx, w.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.Get(ctx, waiting.ID); err != nil || got.State != StateInputRequired {
+		t.Fatalf("branch of the waiting run = %+v, %v", got, err)
+	}
+	for i, mid := range []string{finished.ID, waiting.ID} {
+		rec.script(endTurn("two"))
+		b, err := a.Fork(ctx, mid, ForkRequest{Input: "go on"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := a.Wait(ctx, b.ID)
+		if err == nil && got.State == StateInputRequired {
+			// The branch of the waiting run copied its approval.
+			if err := a.Decide(ctx, b.ID, ApprovalDecision{ApprovalID: got.Pending.ID, Decision: "allow"}); err != nil {
+				t.Fatal(err)
+			}
+			got, err = a.Wait(ctx, b.ID)
+		}
+		mustState(t, got, err, StateCompleted)
+		rec.expectAt(t, 2+i, "base", "Old.", "alpha,beta,gamma,delta")
+		if n := driftNotes(t, l, b.ID); len(n) != 0 {
+			t.Fatalf("branch %d records a change: %v", i, n)
+		}
+	}
+}
