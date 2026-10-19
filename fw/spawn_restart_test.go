@@ -282,12 +282,17 @@ func (l *cutLedger) Append(ctx context.Context, e Event) (uint64, error) {
 }
 
 // spawnTool starts a child of its run as spawn_task does, keyed by its
-// tool call, and waits for the child to end.
+// tool call, with the metadata of its input, and waits for the child to
+// end.
 func spawnTool() Tool {
 	spec := ToolSpec{Name: "spawn", Description: "start a child", InputSchema: json.RawMessage(`{"type":"object"}`)}
-	return NewTool(spec, func(ctx context.Context, _ json.RawMessage) (ToolResult, error) {
+	return NewTool(spec, func(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
+		var in struct {
+			Metadata map[string]string `json:"metadata"`
+		}
+		_ = json.Unmarshal(raw, &in)
 		a, info := AgentFrom(ctx), RunInfoFrom(ctx)
-		child, err := a.SpawnChild(ctx, info.RunID, NewRunRequest("child work", WithIdempotencyKey("spawn:"+info.RunID+":"+info.CallID)))
+		child, err := a.SpawnChild(ctx, info.RunID, NewRunRequest("child work", WithIdempotencyKey("spawn:"+info.RunID+":"+info.CallID), WithMetadata(in.Metadata)))
 		if err != nil {
 			return ErrorResult("spawn: " + err.Error()), nil
 		}
@@ -346,12 +351,19 @@ func eventually(t *testing.T, what string, ok func() bool) {
 // run, and the ledger of the new process.
 func crashDuringSpawn(t *testing.T, sp *crashSpawner, at string, opts ...Option) (*Agent, string, Ledger) {
 	t.Helper()
+	return crashDuringSpawnOf(t, sp, at, `{}`, opts...)
+}
+
+// crashDuringSpawnOf is crashDuringSpawn for a spawn call with the input of
+// the tool.
+func crashDuringSpawnOf(t *testing.T, sp *crashSpawner, at, input string, opts ...Option) (*Agent, string, Ledger) {
+	t.Helper()
 	ctx := testCtx(t)
 	root := filepath.Join(t.TempDir(), "runs")
 	cut := &cutLedger{Ledger: openFileLedgerAt(t, root)}
 	dead := &deadSpawner{crashSpawner: sp}
 	reached, release := sp.stop(at)
-	a := newTestAgent(t, newScript(callTools(use("c1", "spawn", `{}`))).Model(), WithLedger(cut), WithSpawner(dead), WithTools(spawnTool()))
+	a := newTestAgent(t, newScript(callTools(use("c1", "spawn", input))).Model(), WithLedger(cut), WithSpawner(dead), WithTools(spawnTool()))
 	parent, err := a.Start(ctx, "parent work")
 	if err != nil {
 		t.Fatal(err)

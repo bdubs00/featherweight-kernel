@@ -498,3 +498,36 @@ func TestRecordsOfARestartReachTheEgress(t *testing.T) {
 		t.Fatal("the record of the lost branch never reached the egress")
 	}
 }
+
+// forkingSpawner is a crash spawner that can also run a branch, as the ax
+// driver can, so a restart that takes a child for a lost branch abandons
+// its process.
+type forkingSpawner struct{ *crashSpawner }
+
+func (forkingSpawner) Place(context.Context, *Run) (string, error) { return "", errGone }
+func (forkingSpawner) Branch(context.Context, string, []Event, ForkRequest) (*Run, error) {
+	return nil, errGone
+}
+
+// A child whose request names the metadata MetaForkOf, which a request can
+// set, is still a child of spawn_task after a restart: the parent finds it
+// and follows it, and does not take it for a lost branch whose process it
+// abandons.
+func TestRestartTellsAChildFromABranch(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	b, parent, l := crashDuringSpawnOf(t, sp, beforeEnd, `{"metadata":{"fw.forkOf":"01SOMEBRANCHSOURCE00000000"}}`, WithSpawner(forkingSpawner{sp}))
+	ids, members := recordedChildren(t, l, parent)
+	child, member := ids[0], members[ids[0]]
+	eventually(t, "the child is found in its process", func() bool {
+		r, err := b.Get(ctx, child)
+		return err == nil && r.State == StateRunning && r.Member == member
+	})
+	if _, _, abandoned := sp.counts(); len(abandoned) != 0 {
+		t.Fatalf("the restart abandoned %v", abandoned)
+	}
+	if err := b.Cancel(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+}

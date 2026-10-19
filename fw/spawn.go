@@ -170,18 +170,45 @@ type RunChildData struct {
 	Agent string `json:"agent,omitempty"`
 	Input string `json:"input,omitempty"`
 	Key   string `json:"key,omitempty"`
+
+	// Kind tells the first record of a child of spawn_task, "spawn", from
+	// the record of a placed branch, "branch". The kernel sets it, so the
+	// metadata of a request, which can name MetaForkOf, cannot make a child
+	// look like a branch. A record of an older kernel has no kind.
+	Kind string `json:"kind,omitempty"`
 }
 
+// The kinds of the first record of a child in another process.
+const (
+	childSpawn  = "spawn"
+	childBranch = "branch"
+)
+
 // placed reports whether the event records a branch that its process has
-// not taken yet. An event of an older kernel has no facts, so it counts as
-// started.
-func (d RunChildData) placed() bool { return !d.Started && d.Metadata[MetaForkOf] != "" }
+// not taken yet. An event of an older kernel has no kind; it counts as a
+// placed branch when its facts carry MetaForkOf, and as started without
+// facts.
+func (d RunChildData) placed() bool {
+	if d.Started {
+		return false
+	}
+	if d.Kind != "" {
+		return d.Kind == childBranch
+	}
+	return d.Metadata[MetaForkOf] != ""
+}
 
 // spawning reports whether the event records a child of spawn_task whose
 // start is open: the record that the kernel appends before the spawner
 // creates the process of the child.
 func (d RunChildData) spawning() bool {
-	return !d.Started && d.Metadata[MetaForkOf] == "" && d.Metadata[MetaParent] != ""
+	if d.Started {
+		return false
+	}
+	if d.Kind != "" {
+		return d.Kind == childSpawn
+	}
+	return d.Metadata[MetaForkOf] == "" && d.Metadata[MetaParent] != ""
 }
 
 // queued returns the queued data of a child of spawn_task as the parent
@@ -382,7 +409,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		}
 	}
 	intent := RunChildData{Child: req.ID, Member: member, Principal: req.Principal, PrincipalKind: req.PrincipalKind,
-		Metadata: req.Metadata, Agent: req.Agent, Input: req.Input, Key: key}
+		Metadata: req.Metadata, Agent: req.Agent, Input: req.Input, Key: key, Kind: childSpawn}
 	cq := intent.queued(parent, depth)
 	placeholder, err := a.placeholder(req.ID, cq, a.now())
 	if err != nil {

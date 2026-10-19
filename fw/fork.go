@@ -138,7 +138,7 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder}
 	ref := childRef{parent: src, member: member, depth: depth, start: start}
 	a.decorateChild(placeholder, ref)
-	placed := RunChildData{Child: req.ID, Member: member, Principal: q.Principal, PrincipalKind: q.PrincipalKind, Metadata: q.Metadata}
+	placed := RunChildData{Child: req.ID, Member: member, Principal: q.Principal, PrincipalKind: q.PrincipalKind, Metadata: q.Metadata, Kind: childBranch}
 	if _, err := a.emit(nil, rs, EvRunChild, placed); err != nil {
 		a.log.Warn("record a remote branch", "run", src, "branch", req.ID, "member", member, "error", err)
 	}
