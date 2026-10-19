@@ -371,6 +371,11 @@ type ChildReportedData struct {
 	TreeUsage RunUsage `json:"treeUsage"`
 	Open      int      `json:"open,omitempty"`
 	Working   int      `json:"working,omitempty"`
+	// Lost is true when the parent no longer reaches the child: its
+	// process does not know it, or it did not answer for ten minutes. The
+	// child then counts in the tree of its parent with its last usage
+	// alone, and no process reads it again in the background.
+	Lost bool `json:"lost,omitempty"`
 }
 
 // ErrorData is the payload of fw.error.

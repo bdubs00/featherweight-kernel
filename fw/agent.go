@@ -50,8 +50,9 @@ type Agent struct {
 	// children in other processes and of their records, see tree.go.
 	followEvery time.Duration
 	recordEvery time.Duration
-	node        string    // the name of this process, see Config.Node
-	started     time.Time // when New built this agent, see Started
+	giveUp      time.Duration // how long a child that does not answer still counts as reachable
+	node        string        // the name of this process, see Config.Node
+	started     time.Time     // when New built this agent, see Started
 
 	tokMu        sync.RWMutex
 	personTokens PersonTokens // the tokens of people from a linked package, see connect.go
@@ -155,7 +156,10 @@ func New(opts ...Option) (*Agent, error) {
 		models:     map[string]Model{},
 		noResume:   o.noResume,
 	}
-	a.followEvery, a.recordEvery = defaultFollowEvery, defaultRecordEvery
+	a.followEvery, a.recordEvery, a.giveUp = defaultFollowEvery, defaultRecordEvery, followGiveUp
+	if o.giveUp > 0 {
+		a.giveUp = o.giveUp
+	}
 	if o.followEvery > 0 {
 		a.followEvery = o.followEvery
 	}

@@ -156,9 +156,9 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 	// in the background (followOnce).
 	for id, ref := range k.remote {
 		if d, ok := reports[id]; ok {
-			k.reports[id] = &childReport{tree: d.TreeUsage, state: d.State, open: d.Open, work: d.Working, rec: d}
+			k.reports[id] = &childReport{tree: d.TreeUsage, state: d.State, open: d.Open, work: d.Working, lost: d.Lost, rec: d, giveUp: k.giveUp}
 		} else if ref.known && !ref.branch {
-			k.reports[id] = &childReport{state: StateRunning}
+			k.reports[id] = &childReport{state: StateRunning, giveUp: k.giveUp}
 		}
 	}
 	unfinished = kept

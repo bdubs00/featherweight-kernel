@@ -43,6 +43,7 @@ type options struct {
 	// test of this package sets them.
 	followEvery time.Duration
 	recordEvery time.Duration
+	giveUp      time.Duration
 }
 
 // WithServices adds services to the registered ones (see Service).

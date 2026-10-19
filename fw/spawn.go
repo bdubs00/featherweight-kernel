@@ -935,6 +935,13 @@ func concreteToolNames(specs []ToolSpec, chain [][]string) []string {
 	return out
 }
 
+// unreachable is the error of a child in another process that this process
+// has no spawner to reach, as after spawn.driver left the configuration.
+func (a *Agent) unreachable(id string, ref childRef) error {
+	a.warnNoSpawner()
+	return fmt.Errorf("%w: run %s runs in %s, and this process has no spawner to reach it; set spawn.driver", ErrRunNotFound, id, ref.member)
+}
+
 // remoteChild returns where a remote child lives.
 func (a *Agent) remoteChild(id string) (childRef, bool) {
 	a.k.mu.Lock()
@@ -969,6 +976,9 @@ func (a *Agent) decorateChild(r *Run, ref childRef) {
 func (a *Agent) getRemote(ctx context.Context, id string, ref childRef) (*Run, error) {
 	r, ok := ref.starting()
 	if !ok {
+		if a.spawner == nil {
+			return nil, a.unreachable(id, ref)
+		}
 		var err error
 		if r, err = a.spawner.Get(ctx, ref.member, id); err != nil {
 			return nil, err

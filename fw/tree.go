@@ -43,20 +43,59 @@ type childReport struct {
 	rec      ChildReportedData // the latest fw.child.reported of the child
 	recAt    time.Time         // when the kernel appended it
 	failedAt time.Time         // the first read that failed since the latest read that worked
-	lost     bool              // the process at the member does not know the child
+	// lost is true once this process no longer reaches the child: its
+	// process does not know it, or it did not answer a read or a cancel for
+	// followGiveUp. A lost child is never read or canceled again, and it
+	// counts in its tree with its last usage alone.
+	lost   bool
+	giveUp time.Duration // followGiveUp, or what a test sets
 
 	// The cancel of the child by a stop or a cancel of a run above it:
 	// canceled is true once a cancel reached the child, and a cancel that
 	// failed is tried again from nextCancel on, with a wait that doubles
-	// with each failure.
-	canceled   bool
-	cancelWait time.Duration
-	nextCancel time.Time
+	// with each failure. cancelFailedAt is the first cancel that failed
+	// since the latest that worked.
+	canceled       bool
+	cancelWait     time.Duration
+	nextCancel     time.Time
+	cancelFailedAt time.Time
 }
 
 // ended reports whether the child and every run under it finished, or
 // whether its process lost it, so no read can tell more.
-func (r *childReport) ended() bool { return r.lost || (r.state.Terminal() && r.open == 0) }
+func (r *childReport) ended() bool { return !r.reachable() || (r.state.Terminal() && r.open == 0) }
+
+// reachable reports whether this process still reaches the child: it is
+// not lost, and it answered within followGiveUp of its first read that
+// failed.
+func (r *childReport) reachable() bool {
+	return !r.lost && (r.failedAt.IsZero() || time.Since(r.failedAt) < r.grace())
+}
+
+// grace is how long the child counts as reachable after its first read or
+// cancel that failed.
+func (r *childReport) grace() time.Duration {
+	if r.giveUp > 0 {
+		return r.giveUp
+	}
+	return followGiveUp
+}
+
+// giveUpLocked marks a child lost when its reads or its cancels have failed
+// for followGiveUp, and reports whether it did so now. The caller holds
+// k.mu.
+func (r *childReport) giveUpLocked(now time.Time) bool {
+	if r.lost {
+		return false
+	}
+	for _, at := range []time.Time{r.failedAt, r.cancelFailedAt} {
+		if !at.IsZero() && now.Sub(at) >= r.grace() {
+			r.lost = true
+			return true
+		}
+	}
+	return false
+}
 
 // works reports whether a child in the state st, with work runs under it
 // that work, works: queued or running, itself or a run under it. A child
@@ -67,45 +106,53 @@ func works(st RunState, work int) bool { return st == StateQueued || st == State
 // child is read in the background (followOnce). A child that has not
 // answered for followGiveUp no longer counts, so a child that went away
 // cannot keep its parent awake for ever.
-func (r *childReport) working() bool {
-	if r.lost || (!r.failedAt.IsZero() && time.Since(r.failedAt) >= followGiveUp) {
-		return false
-	}
-	return works(r.state, r.work)
-}
+func (r *childReport) working() bool { return r.reachable() && works(r.state, r.work) }
 
 // reportLocked returns the report of a child, and makes it when there is
 // none. The caller holds k.mu.
 func (k *kernel) reportLocked(id string) *childReport {
 	rep := k.reports[id]
 	if rep == nil {
-		rep = &childReport{}
+		rep = &childReport{giveUp: k.giveUp}
 		k.reports[id] = rep
 	}
 	return rep
 }
 
 // recordLocked returns the fw.child.reported event that the latest read
-// calls for: once when the tree of the child ended, once each time the
-// child stops or starts to work, and at most once every interval while its
-// usage grows. A restart of the parent reads the latest one, so it reads
-// again only a child that worked when the parent knew it last. Before any
+// calls for: once when the tree of the child ended, once when this process
+// lost the child, once each time the child stops or starts to work, and at
+// most once every interval while its usage grows. A restart of the parent
+// reads the latest one, so it reads again only a child that worked when
+// the parent knew it last, and never a child that it lost. Before any
 // event, the child counts as working, as its start said. The caller holds
 // k.mu.
 func (r *childReport) recordLocked(id, member string, now time.Time, every time.Duration) (ChildReportedData, bool) {
 	changed := r.tree != r.rec.TreeUsage || r.open != r.rec.Open || r.work != r.rec.Working
-	recEnded := r.rec.State.Terminal() && r.rec.Open == 0
-	recWorks := r.rec.State == "" || works(r.rec.State, r.rec.Working)
+	recEnded := r.rec.Lost || (r.rec.State.Terminal() && r.rec.Open == 0)
+	recWorks := !r.rec.Lost && (r.rec.State == "" || works(r.rec.State, r.rec.Working))
 	switch {
+	case r.lost != r.rec.Lost:
 	case r.ended() && (changed || !recEnded):
-	case works(r.state, r.work) != recWorks:
+	case r.working() != recWorks:
 	case changed && now.Sub(r.recAt) >= every:
 	default:
 		return ChildReportedData{}, false
 	}
-	r.rec = ChildReportedData{Child: id, Member: member, State: r.state, TreeUsage: r.tree, Open: r.open, Working: r.work}
+	r.rec = ChildReportedData{Child: id, Member: member, State: r.state, TreeUsage: r.tree, Open: r.open, Working: r.work, Lost: r.lost}
 	r.recAt = now
 	return r.rec, true
+}
+
+// record appends a fw.child.reported event to the parent of a child.
+func (a *Agent) record(parent string, d ChildReportedData) {
+	p, err := a.k.lookup(parent)
+	if err != nil {
+		return
+	}
+	if _, err := a.emit(nil, p, EvChildReported, d); err != nil {
+		a.log.Warn("record what a child in another process reported", "run", parent, "child", d.Child, "error", err)
+	}
 }
 
 // setRemoteLocked records where a remote child lives, and indexes it by
@@ -199,18 +246,22 @@ func (k *kernel) lineageLocked(rs *runState) []*runState {
 }
 
 // remoteBelow is a child in another process as a walk of the tree sees it.
+// A child that this process does not reach (gone) counts with its last
+// usage alone, neither open nor working.
 type remoteBelow struct {
 	tree  RunUsage
 	state RunState
 	open  int
 	work  int
+	gone  bool
 }
 
 // below returns the children of a run: those in this process, and those in
 // other processes with what they last reported. A branch is a run of its
 // own and no child in this sense. A child that an older kernel recorded,
 // and that no read or record told about since, counts as finished: nothing
-// reads it, so nothing that it spends can show here.
+// reads it, so nothing that it spends can show here. A child that this
+// process lost counts as gone.
 func (k *kernel) below(id string) ([]*runState, []remoteBelow) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -226,13 +277,13 @@ func (k *kernel) below(id string) ([]*runState, []remoteBelow) {
 			rb.state = StateRunning
 		}
 		if rep := k.reports[cid]; rep != nil {
-			rb.tree, rb.open, rb.work = rep.tree, rep.open, rep.work
+			rb.tree, rb.open, rb.work, rb.gone = rep.tree, rep.open, rep.work, !rep.reachable()
 			if rep.state != "" {
 				rb.state = rep.state
 			}
 		}
 		if _, open := ref.starting(); open {
-			rb.state = StateQueued
+			rb.state, rb.gone = StateQueued, false
 		}
 		remote = append(remote, rb)
 	}
@@ -287,7 +338,13 @@ func (a *Agent) treeWalk(rs *runState, depth int, memo map[*runState]RunUsage) t
 			t.count(c.state(), 0)
 		}
 		for _, r := range remote {
-			t.usage, t.open = t.usage.plus(r.tree), t.open+r.open
+			t.usage = t.usage.plus(r.tree)
+			// Spend is spend, but a child that this process cannot reach,
+			// lost or without a spawner, neither works nor stays open here.
+			if r.gone || a.spawner == nil {
+				continue
+			}
+			t.open += r.open
 			t.count(r.state, r.work)
 		}
 	}
@@ -608,7 +665,8 @@ func (a *Agent) reserveLocked(parent *runState, left, depth int) int {
 // stops it again and cancels what is still open, such as a child whose
 // start ended after the stop or a child that a look found after a restart.
 // A cancel of a child that fails is tried again, with a wait that doubles
-// up to a minute, until it reaches the child or the process shuts down.
+// up to a minute, until it reaches the child, the child counts as lost, or
+// the process shuts down.
 func (a *Agent) stopTree(o overrun) {
 	k := a.k
 	reason := "canceled: " + o.why()
@@ -622,13 +680,12 @@ func (a *Agent) stopTree(o overrun) {
 	if first {
 		a.log.Warn("run tree used up a limit; canceling the open runs under it", "run", o.owner.id, "limit", o.limit, "value", o.value, "max", o.max)
 	}
-	if a.cancelBelow(o.owner, reason) {
-		a.retryStop(o.owner, reason)
-	}
+	a.cancelBelow(o.owner, reason)
 }
 
-// retryStop stops the tree under owner again until no cancel under it
-// fails, while the process runs. One loop runs for each tree.
+// retryStop cancels the children in other processes under owner again
+// until no cancel under it fails, while the process runs. One loop runs
+// for each run.
 func (a *Agent) retryStop(owner *runState, reason string) {
 	k := a.k
 	k.mu.Lock()
@@ -651,7 +708,7 @@ func (a *Agent) retryStop(owner *runState, reason string) {
 			case <-k.drainCh:
 				return
 			}
-			if !a.cancelBelow(owner, reason) {
+			if !a.cancelRemote(a.cancelLocalBelow(owner, reason)) {
 				return
 			}
 			wait = min(2*wait, cancelRetryMax)
@@ -659,21 +716,40 @@ func (a *Agent) retryStop(owner *runState, reason string) {
 	})
 }
 
+// remoteKid is a child in another process under a run that a cancel walks.
+type remoteKid struct {
+	id  string
+	ref childRef
+}
+
 // cancelBelow cancels every open run under rs with the reason: each run of
-// this process at any depth, also below a run that finished, and each
-// child in another process of each of them, whose process cancels the runs
-// under it in turn. A branch is a run of its own and stays. A child whose
-// start is open has its start ended, and the start cancels the child if it
-// took its run all the same (SpawnChild); a child that a look after a
-// restart looks for is canceled when the look finds it (adoptChild). It
-// reports whether a cancel of a child in another process failed, so the
-// caller can try again.
-func (a *Agent) cancelBelow(rs *runState, reason string) bool {
-	k := a.k
-	type remoteKid struct {
-		id  string
-		ref childRef
+// this process at any depth, also below a run that finished, at once, and
+// each child in another process of each of them, whose process cancels the
+// runs under it in turn, in the background. Neither the driver of a run nor
+// the caller of Cancel waits for another process. A branch is a run of its
+// own and stays. A child whose start is open has its start ended, and the
+// start cancels the child if it took its run all the same (SpawnChild); a
+// child that a look after a restart looks for is canceled when the look
+// finds it (adoptChild). A cancel of a child in another process that fails
+// is tried again (retryStop).
+func (a *Agent) cancelBelow(rs *runState, reason string) {
+	remote := a.cancelLocalBelow(rs, reason)
+	if len(remote) == 0 {
+		return
 	}
+	a.goTracked(func() {
+		if a.cancelRemote(remote) {
+			a.retryStop(rs, reason)
+		}
+	})
+}
+
+// cancelLocalBelow cancels the open runs under rs in this process, and
+// returns the children in other processes under rs and under each run of
+// this process below it. Without a spawner, it returns none: this process
+// cannot reach them, and it says so once (warnNoSpawner).
+func (a *Agent) cancelLocalBelow(rs *runState, reason string) []remoteKid {
+	k := a.k
 	var remote []remoteKid
 	var walk func(r *runState, depth int)
 	walk = func(r *runState, depth int) {
@@ -692,9 +768,24 @@ func (a *Agent) cancelBelow(rs *runState, reason string) bool {
 		}
 	}
 	walk(rs, 0)
-	if len(remote) == 0 {
+	if len(remote) > 0 && a.spawner == nil {
+		a.warnNoSpawner()
+		return nil
+	}
+	return remote
+}
+
+// cancelRemote cancels the children in other processes that a walk found,
+// up to followReads at a time, each within followTimeout and at most until
+// the shutdown begins. A child that is canceled, whose tree ended, or that
+// counts as lost is not canceled again. A child whose cancels failed for
+// followGiveUp counts as lost from then on, and the parent records so. It
+// reports whether a cancel failed and waits to be tried again.
+func (a *Agent) cancelRemote(remote []remoteKid) bool {
+	if len(remote) == 0 || a.spawner == nil {
 		return false
 	}
+	k := a.k
 	now := time.Now()
 	var due []remoteKid
 	pending := false
@@ -716,6 +807,9 @@ func (a *Agent) cancelBelow(rs *runState, reason string) bool {
 		}
 	}
 	k.mu.Unlock()
+	var mu sync.Mutex
+	var lost []ChildReportedData
+	var parents []string
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, followReads)
 	for _, c := range due {
@@ -725,24 +819,60 @@ func (a *Agent) cancelBelow(rs *runState, reason string) bool {
 			defer wg.Done()
 			defer func() { <-slots }()
 			ctx, cancel := context.WithTimeout(context.Background(), followTimeout)
+			defer cancel()
+			go func() {
+				select {
+				case <-k.drainCh:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
 			err := a.spawner.Cancel(ctx, c.ref.member, c.id)
-			cancel()
 			k.mu.Lock()
 			defer k.mu.Unlock()
 			rep := k.reportLocked(c.id)
 			// A child that its process does not know cannot spend more.
 			if err == nil || errors.Is(err, ErrRunNotFound) {
-				rep.canceled, rep.cancelWait = true, 0
+				rep.canceled, rep.cancelWait, rep.cancelFailedAt = true, 0, time.Time{}
+				return
+			}
+			at := time.Now()
+			if rep.cancelFailedAt.IsZero() {
+				rep.cancelFailedAt = at
+			}
+			if rep.giveUpLocked(at) {
+				a.log.Warn("a child in another process did not take a cancel for a while and counts as lost", "run", c.ref.parent, "child", c.id, "member", c.ref.member, "error", err)
+				if d, ok := rep.recordLocked(c.id, c.ref.member, at, a.recordEvery); ok {
+					mu.Lock()
+					lost, parents = append(lost, d), append(parents, c.ref.parent)
+					mu.Unlock()
+				}
 				return
 			}
 			rep.cancelWait = min(max(2*rep.cancelWait, cancelRetryFirst), cancelRetryMax)
-			rep.nextCancel = time.Now().Add(rep.cancelWait)
+			rep.nextCancel = at.Add(rep.cancelWait)
+			mu.Lock()
 			pending = true
+			mu.Unlock()
 			a.log.Warn("cancel a child in another process under a canceled or spent run", "run", c.ref.parent, "child", c.id, "member", c.ref.member, "retryIn", rep.cancelWait, "error", err)
 		}(c)
 	}
 	wg.Wait()
+	for i, d := range lost {
+		a.record(parents[i], d)
+	}
 	return pending
+}
+
+// warnNoSpawner says once that this process holds children in other
+// processes and has no spawner to reach them.
+func (a *Agent) warnNoSpawner() {
+	a.k.noSpawner.Do(func() {
+		a.k.mu.Lock()
+		n := len(a.k.remote)
+		a.k.mu.Unlock()
+		a.log.Warn("this process has no spawner, so it cannot read, follow, or cancel its children in other processes; set spawn.driver to reach them", "children", n)
+	})
 }
 
 // observe takes a read of a child in another process: from now on the
@@ -772,9 +902,11 @@ func (a *Agent) observe(id string, ref childRef, r *Run) {
 	rep.tree = rep.tree.atLeast(tree)
 	rep.state, rep.open, rep.work, rep.seen = r.State, r.TreeOpen, r.TreeWorking, now
 	rep.failedAt, rep.lost = time.Time{}, false
-	if !rep.ended() {
+	if !r.State.Terminal() {
 		// A child that works again after a cancel, for example after a
-		// follow-up in its process, is canceled again by a stop.
+		// follow-up in its process, is canceled again by a stop. A child
+		// that finished and whose tree winds down is not: its own process
+		// cancels the runs under it.
 		rep.canceled = false
 	}
 	d, record := rep.recordLocked(id, ref.member, now, a.recordEvery)
@@ -862,6 +994,8 @@ func (a *Agent) followOnce(ctx context.Context) {
 		ref childRef
 	}
 	var list []due
+	var lost []ChildReportedData
+	var parents []string
 	now := time.Now()
 	k.mu.Lock()
 	for id, ref := range k.remote {
@@ -872,12 +1006,26 @@ func (a *Agent) followOnce(ctx context.Context) {
 			continue
 		}
 		rep := k.reports[id]
-		if rep == nil || rep.ended() || !rep.working() || now.Sub(rep.seen) < a.followEvery {
+		if rep == nil {
+			continue
+		}
+		// A child that did not answer for followGiveUp counts as lost from
+		// now on, and the parent records so.
+		if rep.giveUpLocked(now) {
+			if d, ok := rep.recordLocked(id, ref.member, now, a.recordEvery); ok {
+				lost, parents = append(lost, d), append(parents, ref.parent)
+			}
+		}
+		if rep.ended() || !rep.working() || now.Sub(rep.seen) < a.followEvery {
 			continue
 		}
 		list = append(list, due{id, ref})
 	}
 	k.mu.Unlock()
+	for i, d := range lost {
+		a.log.Warn("a child in another process did not answer for a while and counts as lost", "run", parents[i], "child", d.Child, "member", d.Member)
+		a.record(parents[i], d)
+	}
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, followReads)
 	for _, d := range list {
@@ -893,17 +1041,25 @@ func (a *Agent) followOnce(ctx context.Context) {
 			r, err := a.spawner.Get(rctx, d.ref.member, d.id)
 			cancel()
 			if err != nil {
-				// A child that its process does not know is not read again.
-				// Its tree keeps what it last reported.
+				// A child that its process does not know is lost: it is not
+				// read again, it counts in its tree with what it last
+				// reported, and the parent records so.
 				k.mu.Lock()
 				rep := k.reportLocked(d.id)
 				rep.seen = time.Now()
+				var rec ChildReportedData
+				recorded := false
 				if errors.Is(err, ErrRunNotFound) {
 					rep.lost = true
+					rec, recorded = rep.recordLocked(d.id, d.ref.member, rep.seen, a.recordEvery)
 				} else if rep.failedAt.IsZero() {
 					rep.failedAt = rep.seen
 				}
 				k.mu.Unlock()
+				if recorded {
+					a.log.Warn("a child in another process is lost: its process does not know it", "run", d.ref.parent, "child", d.id, "member", d.ref.member)
+					a.record(d.ref.parent, rec)
+				}
 				a.log.Debug("read a child in another process", "run", d.ref.parent, "child", d.id, "member", d.ref.member, "error", err)
 				return
 			}
@@ -921,6 +1077,10 @@ func (a *Agent) followOnce(ctx context.Context) {
 // budgets of their ancestors (section 5.2), so a controller does not put
 // the process to sleep while its children spend.
 func (a *Agent) Following() int {
+	if a.spawner == nil {
+		// Nothing reads a child that this process cannot reach.
+		return 0
+	}
 	k := a.k
 	k.mu.Lock()
 	defer k.mu.Unlock()

@@ -76,6 +76,8 @@ type kernel struct {
 	reports   map[string]*childReport    // what each child in another process last reported, see tree.go
 	spent     map[string]string          // the runs whose tree used up a limit, with the reason of the cancels under them
 	retrying  map[string]bool            // the runs whose stop tries a failed cancel again
+	noSpawner sync.Once                  // the warning that this process cannot reach its children in other processes
+	giveUp    time.Duration              // how long a child that does not answer still counts as reachable (followGiveUp)
 
 	sem      chan struct{} // one slot per active run, Config.MaxRuns slots
 	childSem chan struct{} // one slot per working child run, Config.Spawn.MaxRunning slots; nil for no limit
@@ -195,11 +197,15 @@ func (a *Agent) startKernel(ctx context.Context) error {
 	if n := a.cfg.Spawn.MaxRunning; n > 0 {
 		k.childSem = make(chan struct{}, n)
 	}
+	k.giveUp = a.giveUp
 	a.k = k
 	unfinished, rec, err := a.rebuild(ctx)
 	if err != nil {
 		cancel()
 		return err
+	}
+	if a.spawner == nil && len(k.remote) > 0 {
+		a.warnNoSpawner()
 	}
 	a.startFollow()
 	a.startEgress()
@@ -652,6 +658,9 @@ func (a *Agent) waitFor(ctx context.Context, id string, done func(*Run) bool) (*
 					return r, ctx.Err()
 				}
 			}
+			if a.spawner == nil {
+				return nil, a.unreachable(id, ref)
+			}
 			// Each read of the child counts its tree toward the parent.
 			r, err := a.spawner.WaitFor(ctx, ref.member, id, func(r *Run) bool {
 				a.decorateChild(r, ref)
@@ -701,6 +710,10 @@ func (a *Agent) Children(ctx context.Context, id string) ([]*Run, error) {
 	for cid, ref := range a.remoteChildren(id) {
 		r, ok := ref.starting()
 		if !ok {
+			if a.spawner == nil {
+				a.warnNoSpawner()
+				continue
+			}
 			var err error
 			if r, err = a.spawner.Get(ctx, ref.member, cid); err != nil {
 				a.log.Warn("read a remote child", "run", cid, "member", ref.member, "error", err)
