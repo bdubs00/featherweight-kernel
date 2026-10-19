@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"math/rand"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRedactorValuesFromEnvironment(t *testing.T) {
@@ -129,7 +132,7 @@ func TestRedactorDataSeesThroughEscapes(t *testing.T) {
 	r := newRedactor([]string{"VAULT_TOKEN=vault\"quoted\\value"})
 	for _, s := range []string{
 		"Authorization: Bearer\tabcdefghijklmnopqrstuvwxyz0123.",
-		"Authorization: Bearer\nabcdefghijklmnopqrstuvwxyz0123",
+		"Authorization: Bearer \t  abcdefghijklmnopqrstuvwxyz0123",
 		"key\tAKIAIOSFODNN7EXAMPLE\tend",
 		"https://bot\t@host.example/x and https://bot@host.example/y",
 		"the value vault\"quoted\\value of the variable",
@@ -159,5 +162,125 @@ func TestRedactorDataSeesThroughEscapes(t *testing.T) {
 	}
 	if !bytes.Equal(unescapeJSON([]byte(`a\"b\\c\/d\teé😀\q`)), []byte("a\"b\\c/d\teé\U0001F600q")) {
 		t.Errorf("unescapeJSON = %q", unescapeJSON([]byte(`a\"b\\c\/d\teé😀\q`)))
+	}
+}
+
+// The bearer shape replaces a token after the word Bearer and leaves a key,
+// a variable, or a word after it alone: in YAML and Prometheus, nginx,
+// curl, Go code, and prose. Data in which nothing changes keeps its bytes.
+func TestRedactorKeepsWordsAfterBearer(t *testing.T) {
+	r := newRedactor(nil)
+	for _, s := range []string{
+		"authorization:\n  type: Bearer\n  credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token\n",
+		"components:\n  securitySchemes:\n    api:\n      type: http\n      scheme: bearer\n      bearerFormat: JWT\n      description_of_scheme: tokens\n",
+		"location / {\n    proxy_set_header Authorization \"Bearer $access_token\";\n}\n",
+		"curl -H \"Authorization: Bearer $TOKEN\" https://api.example.com/v1/items",
+		"curl -H 'Authorization: Bearer ${API_TOKEN}' https://api.example.com",
+		"req.Header.Set(\"Authorization\", \"Bearer \"+token)\nreturn fmt.Sprintf(\"Bearer %s\", tok)\n",
+		"// Bearer\n// authorizationHeaderValue returns the header.\nfunc authorizationHeaderValue() string { return \"\" }\n",
+		"Our API accepts bearer authentication/authorization headers.",
+		"The handler checks the Bearer authentication_middleware first.",
+	} {
+		if got := r.text(s); got != s {
+			t.Errorf("text(%q)\n got %q", s, got)
+		}
+		raw := json.RawMessage(`{"z":1,"content":` + string(jsonQuote(s)) + `}`)
+		if got := r.data(raw); string(got) != string(raw) {
+			t.Errorf("data(%s)\n got %s", raw, got)
+		}
+	}
+	for _, c := range []struct{ in, want string }{
+		{"Authorization: Bearer abcdefghijklmnop.qrstuv", "Authorization: Bearer [redacted]"},
+		{"Authorization: Bearer\tabcdefghijklmnopqrstuvwxyz0123", "Authorization: Bearer\t[redacted]"},
+		{"Bearer    AbCdEfGhIjKlMnOpQrStUv", "Bearer    [redacted]"},
+		{"curl -H 'Authorization: Bearer 0123456789abcdefghij' https://x", "curl -H 'Authorization: Bearer [redacted]' https://x"},
+		{"token=Bearer 9f8e7d6c5b4a39281706", "token=Bearer [redacted]"},
+	} {
+		if got := r.text(c.in); got != c.want {
+			t.Errorf("text(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+func jsonQuote(s string) []byte {
+	b, _ := json.Marshal(s)
+	return b
+}
+
+// A tool that writes a Prometheus block with "type: Bearer" gets the block
+// as the model wrote it, and a tool that reads it gives the model the
+// block as the tool returned it.
+func TestToolInputWithBearerAtLineEndStays(t *testing.T) {
+	ctx := testCtx(t)
+	conf := "authorization:\n  type: Bearer\n  credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token\n"
+	in, _ := json.Marshal(map[string]string{"path": "prometheus.yml", "content": conf})
+	s := newScript(callTools(use("c1", "write", string(in)), use("c2", "read", `{}`)), endTurn("done"))
+	var written atomic.Value
+	write := NewTool(ToolSpec{Name: "write", ReadOnly: true}, func(_ context.Context, raw json.RawMessage) (ToolResult, error) {
+		var v struct{ Content string }
+		_ = json.Unmarshal(raw, &v)
+		written.Store(v.Content)
+		return TextResult("ok"), nil
+	})
+	read := NewTool(ToolSpec{Name: "read", ReadOnly: true}, func(context.Context, json.RawMessage) (ToolResult, error) {
+		return TextResult(conf), nil
+	})
+	a := newTestAgent(t, s.Model(), WithTools(write, read))
+	r, err := a.Run(ctx, "write the prometheus config")
+	mustState(t, r, err, StateCompleted)
+	if got, _ := written.Load().(string); got != conf {
+		t.Errorf("the tool wrote %q, want %q", got, conf)
+	}
+	if got := TextOf(lastToolResults(t, s.requests()[1])[1].Content); got != conf {
+		t.Errorf("the model read %q, want %q", got, conf)
+	}
+}
+
+// Whenever the pass over the strings of an event changes one, the quick
+// check of its raw JSON is true, also with escapes, control characters,
+// and invalid UTF-8 around the shapes.
+func TestRedactorQuickCheckIsSuperset(t *testing.T) {
+	r := newRedactor([]string{"GITHUB_TOKEN=s3cr3t<v@lue>&\"x\\y"})
+	pieces := []string{"Bearer", "bearer", "Authorization:", " ", "\t", "\n", "\r", "\b", "\x00", "\x1f", " ",
+		"<", ">", "&", "\"", "\\", "/", "@", ":", "https://", "user", "AKIA", "ABCDEFGHIJKLMNOP", "0123456789abcdef",
+		"ghp_", "abcdefghijklmnopqrstuvwxyz0123", "credentials_file", "sk-ant-", "eyJ", ".", "😀", "\xff",
+		"s3cr3t<v@lue>&\"x\\y", "-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----", "xoxb-", "=", "_", "-"}
+	rng := rand.New(rand.NewSource(1))
+	for i := 0; i < 12000; i++ {
+		var b strings.Builder
+		for range 1 + rng.Intn(12) {
+			b.WriteString(pieces[rng.Intn(len(pieces))])
+		}
+		raw, _ := json.Marshal(map[string]any{"a": b.String()})
+		var back map[string]string
+		_ = json.Unmarshal(raw, &back)
+		if s := back["a"]; r.text(s) != s && !r.holds(raw) {
+			t.Fatalf("the quick check misses %q", s)
+		}
+	}
+}
+
+// The quick check reads an event with many escapes once: it takes about
+// the time of one scan, not two.
+func TestRedactorHoldsReadsOnce(t *testing.T) {
+	r := newRedactor(nil)
+	big := strings.Repeat("line of code with a \"quote\" and a tab\there\n", 3000)
+	raw, _ := json.Marshal(ToolRespondedData{CallID: "c1", Content: []Block{Text(big)}})
+	view := unescapeJSON(raw)
+	best := func(f func()) time.Duration {
+		var d time.Duration
+		for i := range 3 {
+			start := time.Now()
+			f()
+			if e := time.Since(start); i == 0 || e < d {
+				d = e
+			}
+		}
+		return d
+	}
+	scan := best(func() { anyShape.Match(view) })
+	check := best(func() { r.holds(raw) })
+	if check > scan*3/2 {
+		t.Fatalf("the quick check takes %v; one scan takes %v", check, scan)
 	}
 }

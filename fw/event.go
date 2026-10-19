@@ -236,7 +236,8 @@ type TurnData struct {
 	Turn int `json:"turn"`
 }
 
-// ModelRequestedData is the payload of fw.model.requested.
+// ModelRequestedData is the payload of fw.model.requested. Effort is
+// EffortDefault for a call that leaves the effort to the provider.
 type ModelRequestedData struct {
 	Provider             string `json:"provider"`
 	Model                string `json:"model"`

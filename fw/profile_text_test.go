@@ -510,3 +510,49 @@ func TestKernelMetadataDoesNotCountAgainstTheBound(t *testing.T) {
 		t.Fatalf("a usage annotation of the branch fails: %v", err)
 	}
 }
+
+// A branch must fit the bounds of the metadata with its source: the
+// metadata of the source, its annotations, and the metadata of the request
+// together, so a later annotation of the branch, such as a title, never
+// fails. The check holds for a branch in this process and for one that
+// another process sends.
+func TestBranchMetadataFitsTheBound(t *testing.T) {
+	ctx := testCtx(t)
+	rec := &pinRecorder{}
+	a := pinAgent(t, pinConfig(t, "pintest/base"), NewMemLedger(), rec)
+	entries := func(prefix string, n int) map[string]string {
+		m := map[string]string{}
+		for i := range n {
+			m[fmt.Sprintf("%s%02d", prefix, i)] = "v"
+		}
+		return m
+	}
+	rec.script(endTurn("one"), endTurn("two"))
+	src, err := a.Run(ctx, "hello", WithMetadata(entries("src", 40)))
+	mustState(t, src, err, StateCompleted)
+	if b, err := a.Fork(ctx, src.ID, ForkRequest{Metadata: entries("fork", 40)}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("a branch with 80 entries = %+v, %v; want a refusal", b, err)
+	}
+	b, err := a.Fork(ctx, src.ID, ForkRequest{Metadata: entries("fork", 20)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Annotate(ctx, b.ID, RunAnnotatedData{Metadata: map[string]string{MetaTitle: "A title"}}); err != nil {
+		t.Fatalf("a title of the branch fails: %v", err)
+	}
+	// The annotations of the source count too.
+	if err := a.Annotate(ctx, src.ID, RunAnnotatedData{Metadata: entries("note", 20)}); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := a.Fork(ctx, src.ID, ForkRequest{Metadata: entries("fork", 10)}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("a branch with 70 entries = %+v, %v; want a refusal", b, err)
+	}
+	// A source in another process, through the Go API, which checks no
+	// bound, sends a branch that does not fit.
+	big, err := a.Run(ctx, "hello", WithMetadata(entries("big", 80)))
+	mustState(t, big, err, StateCompleted)
+	other := pinAgent(t, pinConfig(t, "pintest/base"), NewMemLedger(), &pinRecorder{})
+	if b, err := other.ForkEvents(ctx, ledgerEvents(t, a.Ledger(), big.ID), ForkRequest{}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("a branch from another process with 80 entries = %+v, %v; want a refusal", b, err)
+	}
+}

@@ -510,7 +510,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	_, err = a.emitLocked(ctx, rs, EvModelRequested, ModelRequestedData{
 		Provider:             provider,
 		Model:                name,
-		Effort:               effort,
+		Effort:               requestedEffort(effort),
 		EstimatedInputTokens: tokens,
 	})
 	rs.emitMu.Unlock()
