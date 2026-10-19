@@ -34,6 +34,10 @@ type Usage struct {
 	OutputTokens int     `json:"outputTokens"`
 	Tokens       int     `json:"tokens"`
 	CostUSD      float64 `json:"costUSD"`
+	// UnpricedTokens counts the tokens whose model has no price
+	// (fw.RunUsage.UnpricedTokens). CostUSD leaves them out, so the cost is
+	// partial when it is above zero.
+	UnpricedTokens int `json:"unpricedTokens,omitempty"`
 }
 
 // Add counts one run.
@@ -50,12 +54,18 @@ func (u *Usage) Add(r *fw.Run) {
 	u.OutputTokens += r.Usage.OutputTokens
 	u.Tokens += r.Usage.InputTokens + r.Usage.OutputTokens
 	u.CostUSD += r.Usage.CostUSD
+	u.UnpricedTokens += r.Usage.UnpricedTokens
 }
 
 // String is the usage on one line.
 func (u Usage) String() string {
 	s := fmt.Sprintf("%d runs, %d turns, %d tokens", u.Runs, u.Turns, u.Tokens)
-	if u.CostUSD > 0 {
+	switch {
+	case u.UnpricedTokens > 0 && u.CostUSD > 0:
+		s += fmt.Sprintf(", at least $%.4f (%d tokens have no price)", u.CostUSD, u.UnpricedTokens)
+	case u.UnpricedTokens > 0:
+		s += fmt.Sprintf(", cost unknown (%d tokens have no price)", u.UnpricedTokens)
+	case u.CostUSD > 0:
 		s += fmt.Sprintf(", $%.4f", u.CostUSD)
 	}
 	if u.Active > 0 {
