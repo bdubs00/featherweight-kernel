@@ -210,6 +210,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 	a.startFollow()
 	a.startEgress()
 	a.recover(rec)
+	a.resendCancels()
 	if !a.noResume {
 		a.resume(unfinished)
 	}

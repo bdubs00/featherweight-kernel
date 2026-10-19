@@ -774,7 +774,8 @@ func (a *Agent) cancelLocalBelow(rs *runState, reason string) []remoteKid {
 // up to followReads at a time, each within followTimeout and at most until
 // the shutdown begins. A child that is canceled, whose tree ended, or that
 // counts as lost is not canceled again. After a cancel, the kernel reads
-// the child once, so the parent records that the child ended. A child that refuses a
+// the child once, so the parent records that the child ended and a restart
+// does not send the cancel again (resendCancels). A child that refuses a
 // cancel is read too: a child that answers stays reachable and counted, and
 // its cancel is tried again with a wait that doubles up to a minute; only
 // reads that fail count toward its grace (followGiveUp), and a child that
@@ -881,6 +882,83 @@ func (a *Agent) cancelOneRemote(c remoteKid) bool {
 		a.log.Warn("cancel a child in another process under a canceled or spent run", "run", c.ref.parent, "child", c.id, "member", c.ref.member, "retryIn", wait, "error", err)
 	}
 	return retry
+}
+
+// resendCancels sends again, when the process starts, the cancels of the
+// children in other processes under each run that the ledger records as
+// canceled, for each child that the latest record of its parent shows
+// open. A cancel that the shutdown cut, or that a crash or a kill lost,
+// therefore reaches the child on the next start: the cancel of the parent
+// is in its ledger already, so nothing else needs to be recorded. A child
+// that the cancel reached is recorded as ended when it is read after the
+// cancel, so the next start sends nothing. A child that an older kernel
+// recorded is left alone.
+func (a *Agent) resendCancels() {
+	if a.spawner == nil {
+		return
+	}
+	k := a.k
+	type pass struct {
+		rs     *runState
+		reason string
+		remote []remoteKid
+	}
+	var passes []pass
+	for _, rs := range k.all() {
+		r := rs.snapshot()
+		if r.State != StateCanceled {
+			continue
+		}
+		var remote []remoteKid
+		k.mu.Lock()
+		for _, c := range a.remoteUnderLocked(rs) {
+			if rep := k.reports[c.id]; c.ref.known && rep != nil && !rep.ended() {
+				remote = append(remote, c)
+			}
+		}
+		k.mu.Unlock()
+		if len(remote) > 0 {
+			reason := r.Error
+			if reason == "" {
+				reason = "canceled"
+			}
+			passes = append(passes, pass{rs, reason, remote})
+		}
+	}
+	if len(passes) == 0 {
+		return
+	}
+	a.log.Info("sending again the cancels of children in other processes under canceled runs", "runs", len(passes))
+	a.goTracked(func() {
+		for _, p := range passes {
+			if a.cancelRemote(p.remote) {
+				a.retryStop(p.rs, p.reason)
+			}
+		}
+	})
+}
+
+// remoteUnderLocked returns the children in other processes under rs and
+// under each run of this process below it, at any depth, also below a run
+// that finished, without the branches. The caller holds k.mu.
+func (a *Agent) remoteUnderLocked(rs *runState) []remoteKid {
+	k := a.k
+	var out []remoteKid
+	var walk func(r *runState, depth int)
+	walk = func(r *runState, depth int) {
+		for id := range k.remoteOf[r.id] {
+			if ref := k.remote[id]; !ref.branch {
+				out = append(out, remoteKid{id, ref})
+			}
+		}
+		if depth < maxTreeDepth {
+			for _, c := range k.children[r.id] {
+				walk(c, depth+1)
+			}
+		}
+	}
+	walk(rs, 0)
+	return out
 }
 
 // warnNoSpawner says once that this process holds children in other
