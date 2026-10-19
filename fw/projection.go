@@ -244,7 +244,7 @@ func ProjectRun(events []Event, prices ...Prices) *Run {
 // already folded, which a bus can deliver late, gives the run its
 // identity and changes nothing else: the state, the usage, and the time
 // of the latest change stay, and the metadata and the title of later
-// annotations win.
+// annotations win. A run that no event gave a state yet becomes queued.
 func (r *Run) Apply(e Event, prices Prices) {
 	if r.ID == "" {
 		r.ID = e.Subject
@@ -282,6 +282,9 @@ func (r *Run) Apply(e Event, prices Prices) {
 			}
 			if r.Title == "" {
 				r.Title = title
+			}
+			if r.State == "" {
+				r.State = StateQueued
 			}
 			return
 		}

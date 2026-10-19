@@ -37,3 +37,19 @@ func TestLateQueuedKeepsState(t *testing.T) {
 		t.Fatalf("in order = %+v", in)
 	}
 }
+
+// TestLateQueuedSetsAMissingState applies a title annotation and then the
+// fw.run.queued before it, out of order. No event set a state, so the late
+// queued event sets queued.
+func TestLateQueuedSetsAMissingState(t *testing.T) {
+	log := evs("R",
+		MustEvent("R", EvRunQueued, RunQueuedData{Agent: "a", Input: "item"}),
+		MustEvent("R", EvRunAnnotated, RunAnnotatedData{Metadata: map[string]string{MetaTitle: "T"}}),
+	)
+	var r Run
+	r.Apply(log[1], nil)
+	r.Apply(log[0], nil)
+	if r.State != StateQueued || r.Title != "T" || r.Agent != "a" || r.Seq != 2 {
+		t.Fatalf("run = %+v", r)
+	}
+}
