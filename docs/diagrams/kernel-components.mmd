@@ -1,0 +1,87 @@
+---
+title: Featherweight kernel — component map
+config:
+  layout: elk
+  htmlLabels: false
+  fontFamily: Arial, sans-serif
+  theme: base
+  themeVariables:
+    fontFamily: Arial, sans-serif
+    fontSize: 15px
+    primaryTextColor: '#172b4d'
+    lineColor: '#60758a'
+    clusterBkg: '#f8fafc'
+    clusterBorder: '#cbd5e1'
+  flowchart:
+    wrappingWidth: 300
+    curve: basis
+    nodeSpacing: 25
+    rankSpacing: 65
+---
+flowchart TB
+  accTitle: Featherweight kernel component map
+  accDescr: Entry points call the Agent API. One driver per run executes a ledger-driven model and tool loop. Serialized appends persist events, update run state, and notify observers. Public driver packages implement the core interfaces.
+
+  subgraph ENTRY["ENTRY POINTS"]
+    direction TB
+    HTTP["Native HTTP + A2A<br/>surface/native · surface/a2a<br/>Authn: token / OIDC / SPIFFE"]
+    CLI["CLI or embedded Go<br/>cli/ · fw.New · Agent methods"]
+    INTAKE["Queue intake<br/>fw/busio.go<br/>Bus: mem / NATS / Redis"]
+    BUILD["Composition<br/>cmd/fw → cli → fw.New<br/>config/ + profiles + environment<br/>init registration + Go options"]
+  end
+
+  subgraph CORE["fw/ — RUNTIME + PUBLIC CONTRACTS"]
+    direction TB
+    API["Agent run API + Authz<br/>Start · Send · Decide · Cancel<br/>Fork · Get · List · Events"]
+    LOOP["One active driver per run<br/>maxRuns admission for root runs<br/>Ledger-driven turn loop<br/>budget · clock · compaction"]
+    GATE["Tool-call planning<br/>allowlists · loop guard · Policy<br/>Allow / Deny / Ask"]
+    APPEND["Serialized append path<br/>runState.emitMu<br/>redact → append → apply → notify"]
+    STATE["Rebuildable run state<br/>Run.Apply / ProjectRun<br/>historyBuilder / ProjectHistory"]
+  end
+
+  subgraph PLUGS["EXECUTION DRIVERS"]
+    direction TB
+    MODEL["Model interface<br/>model/anthropic · model/gemini<br/>model/openai → compatible APIs"]
+    TOOLS["Tool / ToolSource + limits<br/>tools/builtin → shell, files, memory, skills<br/>tools/mcp → MCP servers<br/>tools/a2a → peer agents"]
+    POLICY["Optional external decision point<br/>MCP tool or bus request/reply<br/>fw/external.go · tools/mcp/decision.go"]
+    SPAWN["Child runs / branches<br/>local Agent or Spawner / Forker<br/>ax/spawn.go → child ax Task"]
+    TOKENS["Optional PersonTokens service<br/>tokens/ → external token broker<br/>Connected resumes paused calls"]
+  end
+
+  subgraph RECORD["STORAGE + EVENT CONSUMERS"]
+    direction TB
+    LEDGER[("Ledger interface<br/>file: runs/ID/ledger.jsonl<br/>mem: in-process ledger")]
+    READERS["Ledger.Read / Watch<br/>native SSE · A2A task updates<br/>CLI events · replay · fork"]
+    OBS["Post-append observers<br/>bus egress · Prometheus metrics<br/>OTLP event logs + traces"]
+    DISK[("Files outside the ledger<br/>workspace + attachments<br/>FW_HOME/memory + skills")]
+  end
+
+  HTTP --> API
+  CLI --> API
+  INTAKE --> API
+  BUILD -. constructs .-> API
+  API --> LOOP
+  API --> APPEND
+  LOOP <-->|request / response| MODEL
+  LOOP --> GATE
+  GATE -.->|"policy.external"| POLICY
+  GATE -->|allowed calls| TOOLS
+  TOOLS -. spawn_task / await_task .-> SPAWN
+  TOOLS -. user credentials .-> TOKENS
+  TOOLS -->|file and memory operations| DISK
+  LOOP -->|model, tool and lifecycle events| APPEND
+  APPEND -->|1. store event| LEDGER
+  APPEND -->|2. apply event| STATE
+  APPEND -->|3. notify| OBS
+  LEDGER -->|read / watch| READERS
+  LEDGER -. restart .-> STATE
+  STATE -->|history and next action| LOOP
+
+  classDef entry fill:#eaf2ff,stroke:#6587bd,color:#172b4d
+  classDef core fill:#e4f3f1,stroke:#338579,color:#153f39
+  classDef driver fill:#f0edff,stroke:#8872bc,color:#38265d
+  classDef record fill:#fff4df,stroke:#bd9348,color:#594014
+  class HTTP,CLI,INTAKE,BUILD entry
+  class API,LOOP,GATE,APPEND,STATE core
+  class MODEL,TOOLS,POLICY,SPAWN,TOKENS driver
+  class LEDGER,READERS,OBS,DISK record

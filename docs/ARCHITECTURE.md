@@ -1,5 +1,7 @@
 # Featherweight Kernel architecture
 
+For a source-backed visual tour of the current implementation, see the [kernel architecture map](KERNEL_MAP.md): components, run execution, and ax deployment.
+
 ## 1. Summary
 
 Featherweight Kernel is one static Go binary, named `fw`, that runs an agent loop in production. It is the agent runtime for one google/ax Task. It runs as the main process inside a Task, as a plain container, or as a library inside your own Go program. It exposes one agent through three surfaces on one port: a native HTTP API, an A2A server, and a Prometheus endpoint. It accepts work from HTTP, from A2A, from a message queue, or from the command line. Every component is a Go interface with one default implementation, so you replace a component without a fork.

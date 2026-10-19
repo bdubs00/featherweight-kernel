@@ -1,0 +1,67 @@
+---
+title: Featherweight kernel — ax deployment
+config:
+  layout: elk
+  htmlLabels: false
+  fontFamily: Arial, sans-serif
+  theme: base
+  themeVariables:
+    fontFamily: Arial, sans-serif
+    fontSize: 15px
+    primaryTextColor: '#172b4d'
+    lineColor: '#60758a'
+    clusterBkg: '#f8fafc'
+    clusterBorder: '#cbd5e1'
+  flowchart:
+    wrappingWidth: 300
+    curve: basis
+    nodeSpacing: 30
+    rankSpacing: 65
+---
+flowchart TB
+  accTitle: Kernel deployment inside an ax Task
+  accDescr: The atenet router reaches the fw listener in an ax Task. The runner prepares workspaces and rebuilds the Agent from files on the restored workspace. Metadata has its own loopback listener. Optional child Tasks are created through the ax API and called through the router.
+
+  CALLER["HTTP / A2A caller"]
+  ROUTER["External: atenet router<br/>ate-target-actor: atespace/task<br/>Routes to or wakes the target Task"]
+  AX["External: ax control plane<br/>Task API over gRPC"]
+
+  subgraph TASK["ONE ax TASK / SANDBOX"]
+    direction TB
+    BOOT["fw as PID 1 / ax-task-runner<br/>cli/serve.go + ax/<br/>Read manifests → prepare bindings → load config"]
+    PORT["Shared listener :80<br/>Native /v1 · A2A · /metrics<br/>/healthz · /readyz<br/>Optional ax/guest gRPC for spec.debug"]
+    META["Metadata loopback listener<br/>surface/axmeta<br/>127.0.0.1:8099 · AX_METADATA_URL"]
+    AGENT["fw.Agent<br/>Rebuild / resume → bootstrap goals → ready<br/>Run loop + model / tool drivers"]
+    CHILDPROC["Optional spec.command child<br/>ax.Supervise + process reaping"]
+    SPAWNER["Optional ax.Spawner / Forker<br/>Create / resume child Task<br/>Start and follow its run or branch"]
+    VOLUME[("Restored /workspace<br/>.fw/runs + index.jsonl<br/>.fw/memory + initialization markers<br/>Workspace files + attachments")]
+  end
+
+  REMOTE["External: child ax Task<br/>Own fw process, ledger, workspace<br/>Same native run API"]
+  SERVICES["External: configured dependencies<br/>Model APIs · MCP servers · A2A peers<br/>NATS / Redis · token broker · OTLP collector"]
+
+  CALLER --> ROUTER
+  ROUTER --> PORT
+  BOOT -->|listen during setup| PORT
+  BOOT --> META
+  BOOT -->|construct| AGENT
+  PORT -->|agent routes after ready| AGENT
+  BOOT -. supervise .-> CHILDPROC
+  CHILDPROC -->|read manifests| META
+  BOOT -->|prepare; honor saved markers| VOLUME
+  AGENT <-->|ledger and file operations| VOLUME
+  AGENT --> SERVICES
+  AGENT -.->|"spawn.driver: ax"| SPAWNER
+  SPAWNER -->|create / resume over gRPC| AX
+  AX -->|provision| REMOTE
+  SPAWNER -->|native HTTP via router| ROUTER
+  ROUTER --> REMOTE
+
+  classDef external fill:#edf2f7,stroke:#8292a5,color:#26364a
+  classDef core fill:#e4f3f1,stroke:#338579,color:#153f39
+  classDef entry fill:#eaf2ff,stroke:#6587bd,color:#172b4d
+  classDef record fill:#fff4df,stroke:#bd9348,color:#594014
+  class CALLER,ROUTER,AX,REMOTE,SERVICES external
+  class BOOT,AGENT,SPAWNER,CHILDPROC core
+  class PORT,META entry
+  class VOLUME record

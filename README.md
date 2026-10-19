@@ -6,7 +6,7 @@ One static Go binary, `fw`, that makes one google/ax Task a durable agent. It ru
 
 The workbench for people lives in its own repository, featherweight-workbench. It adds the page, the browser sign-in, the MCP server, the fleet view, and the agent builder on top of this kernel.
 
-The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The configuration schema, with every key and its default, is [examples/fw.yaml](examples/fw.yaml). An example ax deployment is [examples/ax/reviewer.yaml](examples/ax/reviewer.yaml), and an example skill is [examples/skills/release-notes](examples/skills/release-notes).
+The design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The [kernel architecture map](docs/KERNEL_MAP.md) diagrams the implemented components, run execution, and ax deployment, with links to the source. The configuration schema, with every key and its default, is [examples/fw.yaml](examples/fw.yaml). An example ax deployment is [examples/ax/reviewer.yaml](examples/ax/reviewer.yaml), and an example skill is [examples/skills/release-notes](examples/skills/release-notes).
 
 ## Build
 

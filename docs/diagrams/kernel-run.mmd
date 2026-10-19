@@ -1,0 +1,73 @@
+---
+title: Featherweight kernel — one run
+config:
+  fontFamily: Arial, sans-serif
+  theme: base
+  themeVariables:
+    fontFamily: Arial, sans-serif
+    fontSize: 15px
+    primaryTextColor: '#172b4d'
+    lineColor: '#60758a'
+  sequence:
+    useMaxWidth: false
+    mirrorActors: false
+    actorMargin: 35
+    messageMargin: 25
+---
+sequenceDiagram
+  accTitle: Kernel run execution and recovery
+  accDescr: The Agent records a request, launches a per-run driver, streams model responses, applies policy, records tool intent before executing a tool, and projects every appended event. Approvals and restart recovery use the same ledger-driven loop.
+  participant C as Caller / surface
+  participant A as Agent API
+  participant R as Run driver
+  participant L as Append path + ledger
+  participant P as Policy
+  participant M as Model
+  participant T as Tools
+
+  C->>A: Start(input, profile, budget, principal)
+  A->>A: Authorize, validate, deduplicate
+  A->>L: fw.run.queued
+  Note over A,L: Every event: emitMu → redact → Ledger.Append<br/>→ Run.Apply + wake status waiters → notify observers
+  A->>R: Launch one driver, acquire root-run slot
+  A-->>C: Run ID + current status
+  R->>L: fw.run.started (brief, tools, model, zone)
+
+  loop Until finished, waiting, canceled, or draining
+    R->>R: Analyze events, build history<br/>Check budget and working time<br/>Compact context when needed
+    R->>L: fw.turn.started + fw.model.requested
+    R->>M: Stream(system, history, tool specs)
+    M-->>R: Full response + usage + stop reason
+    R->>L: fw.model.responded
+    alt Response requests tools
+      R->>R: Check allowlist, loop guard, call limits
+      R->>P: Decide(tool, input, resolved input)
+      P-->>R: Allow / Deny / Ask
+      opt Ask requires a recorded decision
+        R->>L: fw.approval.requested
+        Note over C,R: Run is input-required, policy approval releases the driver
+        C->>A: Decide(approval ID, decision)
+        A->>L: fw.approval.decided
+        A->>R: Relaunch if idle
+      end
+      alt Call is allowed
+        R->>L: fw.tool.requested (idempotent flag)
+        Note over R,L: File ledger fsyncs non-idempotent intent before the call
+        L-->>R: Append succeeded
+        R->>T: Call through input/output/timeout limits
+        Note over R,T: Consecutive parallel-safe calls run together<br/>Questions, progress, and connection waits also emit events
+        T-->>R: Bounded result
+        R->>L: fw.tool.responded (batch results in request order)
+      else Call is denied
+        R->>L: fw.tool.responded (error result, no tool execution)
+      end
+      R->>L: fw.turn.finished
+    else Final answer with no unseen follow-up
+      R->>L: fw.turn.finished + fw.run.finished
+    end
+  end
+
+  C->>A: Get / Wait / Events
+  A-->>C: Projected run status or ledger event stream
+
+  Note over A,T: Restart: rebuild status, idempotency keys, and child references from the ledger.<br/>Resume unfinished runs through the same driver. Pending approvals wait.<br/>Retry an unanswered model request or an idempotent tool.<br/>Other interrupted tools need approval, except supported continuations / connection waits.
