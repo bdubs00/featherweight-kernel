@@ -100,6 +100,9 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	if err != nil {
 		return nil, err
 	}
+	if err := branchMetadataFits(kept); err != nil {
+		return nil, err
+	}
 	if !req.Spawn {
 		return a.appendBranch(q, kept, req)
 	}
@@ -289,6 +292,9 @@ func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest)
 	if _, ok := a.profiles()[q.Agent]; !ok && q.Agent != "default" {
 		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, q.Agent)
 	}
+	if err := branchMetadataFits(events); err != nil {
+		return nil, err
+	}
 	if req.Origin != "" {
 		q.Origin = req.Origin
 	}
@@ -393,6 +399,17 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 		kept[queued] = ne
 	}
 	return kept, q, nil
+}
+
+// branchMetadataFits checks that the metadata of a branch fits the bounds
+// of CheckMetadata: the metadata of its source, with the annotations that
+// the branch keeps, and the metadata of the request together. A branch
+// past the bounds would fail every later annotation, such as a title.
+func branchMetadataFits(kept []Event) error {
+	if err := checkMetadataBounds(ProjectRun(kept).Metadata); err != nil {
+		return fmt.Errorf("fw: the metadata of the branch: %w", err)
+	}
+	return nil
 }
 
 // withModel returns a copy of the resolved profile of a branch with the
