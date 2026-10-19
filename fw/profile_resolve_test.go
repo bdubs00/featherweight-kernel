@@ -290,3 +290,25 @@ func TestEffortOrAndTheSummaryCall(t *testing.T) {
 		t.Errorf("summary request = %+v, want the empty effort of the turn", r)
 	}
 }
+
+// fw.model.requested names the effort of a call that leaves the effort to
+// the provider as "default", the effort that the model then sends, and
+// names any other effort as it is.
+func TestModelRequestedNamesTheDefaultEffort(t *testing.T) {
+	ctx := testCtx(t)
+	rec := &pinRecorder{}
+	cfg := pinConfig(t, "pintest/base")
+	cfg.Effort = ""
+	a := pinAgent(t, cfg, NewMemLedger(), rec)
+	setProfiles(t, a, map[string]AgentProfile{"low": {Effort: "low"}})
+	rec.script(endTurn("one"), endTurn("two"))
+	for agent, want := range map[string]string{"default": "default", "low": "low"} {
+		r, err := a.Run(ctx, "work", AsAgent(agent))
+		mustState(t, r, err, StateCompleted)
+		var d ModelRequestedData
+		firstOf(t, ledgerEvents(t, a.Ledger(), r.ID), EvModelRequested, &d)
+		if d.Effort != want {
+			t.Errorf("effort of %s in fw.model.requested = %q, want %q", agent, d.Effort, want)
+		}
+	}
+}

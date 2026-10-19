@@ -72,7 +72,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2) |
 | `fw.message.received` | role, content, origin (`http`, `a2a`, `mcp`, `bus`, `cli`, `kernel`), note kind |
 | `fw.turn.started` | turn number |
-| `fw.model.requested` | provider, model, effort, estimated input tokens |
+| `fw.model.requested` | provider, model, effort (`default` when the provider chooses it, section 6.1), estimated input tokens |
 | `fw.model.responded` | content blocks, raw provider blocks, stop reason, usage, latency |
 | `fw.tool.requested` | tool, call id, input, idempotent classification at invocation |
 | `fw.tool.responded` | call id, output, `is_error`, latency |
@@ -279,7 +279,7 @@ type Model interface {
 }
 ```
 
-`Request` carries the system prompt, the messages, the tool specifications, the effort level, and the output token limit. An adapter fills an empty effort with the `effort` of the configuration that opened it, unless `EffortSet` is true: then the empty effort is the effort of the call: the Anthropic adapter sends its default, `high`, and the Gemini and OpenAI adapters send no effort, so the model uses its own default. The kernel sets `EffortSet` for a run with a resolved profile (section 12.5). Messages use a small provider-neutral block set: text, image, document, tool use, tool result, and opaque. The opaque block carries provider data such as thinking blocks without interpretation.
+`Request` carries the system prompt, the messages, the tool specifications, the effort level, and the output token limit. An adapter fills an empty effort with the `effort` of the configuration that opened it, unless `EffortSet` is true: then the empty effort is the effort of the call: the Anthropic adapter sends its default, `high`, and the Gemini and OpenAI adapters send no effort, so the model uses its own default. The kernel sets `EffortSet` for a run with a resolved profile (section 12.5). `fw.model.requested` records the effort `default` for a call without an effort, because the model then sends the default of its provider. Messages use a small provider-neutral block set: text, image, document, tool use, tool result, and opaque. The opaque block carries provider data such as thinking blocks without interpretation.
 
 ### 6.2 Adapters
 

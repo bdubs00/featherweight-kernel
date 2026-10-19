@@ -98,6 +98,22 @@ type Request struct {
 	Metadata  map[string]string `json:"metadata,omitempty"` // run id, agent, for provider-side logging
 }
 
+// EffortDefault is the effort that fw.model.requested records for a call
+// that leaves the effort to the provider: the model sends the default of
+// its provider, such as high for Anthropic, or no effort at all.
+const EffortDefault = "default"
+
+// requestedEffort returns the effort that fw.model.requested records for
+// the effort of a call. An empty effort reaches the model as the default
+// of its provider: the effort of the configuration is empty too, or the
+// call sets it (EffortSet).
+func requestedEffort(effort string) string {
+	if effort == "" {
+		return EffortDefault
+	}
+	return effort
+}
+
 // EffortOr returns the effort that a model sends for the request: Effort,
 // else def, the effort that the model was opened with. With EffortSet, an
 // empty Effort stays empty, and the model uses the default of its provider.
