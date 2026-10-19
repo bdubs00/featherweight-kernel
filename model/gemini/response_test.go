@@ -296,3 +296,22 @@ func TestProviderConfig(t *testing.T) {
 		t.Errorf("missing custom key: err = %v, want the custom secret name", err)
 	}
 }
+
+// A request that sets an empty effort sends no thinking level, the default
+// of the model, and not the effort that the adapter was opened with.
+func TestStreamKeepsAnEmptyEffortOfTheRequest(t *testing.T) {
+	srv, _, body := fakeServer(t, http.StatusOK, streamChunks)
+	m := testModel(t, srv) // opened with the effort low
+	req := &fw.Request{Messages: []fw.Message{fw.UserText("hi")}, EffortSet: true}
+	if _, err := m.Stream(context.Background(), req, func(fw.Delta) {}); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(*body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	gc, _ := sent["generationConfig"].(map[string]any)
+	if tc, _ := gc["thinkingConfig"].(map[string]any); tc["thinkingLevel"] != nil {
+		t.Errorf("generationConfig = %v, want no thinking level", gc)
+	}
+}

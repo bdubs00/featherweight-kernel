@@ -191,9 +191,7 @@ func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) 
 		return nil, errors.New("gemini: nil request")
 	}
 	r := *req
-	if r.Effort == "" {
-		r.Effort = m.effort
-	}
+	r.Effort = r.EffortOr(m.effort)
 	contents, config, names, err := BuildRequest(&r, m.model)
 	if err != nil {
 		return nil, err

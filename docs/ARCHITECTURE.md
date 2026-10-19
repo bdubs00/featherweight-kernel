@@ -98,7 +98,7 @@ Before the kernel appends an event, it replaces each secret in the data with `[r
 - the value of a variable with a secret name, such as `OPENAI_API_KEY`, `GITHUB_TOKEN`, or `DB_PASSWORD`
 - text with the shape of a secret: a PEM private key, a provider or GitHub token, an AWS access key, a JWT, a bearer token, or the user information of a URL
 
-The model builds its history from the stored events, so the model does not see the secret either. The raw provider blocks stay unchanged, because the provider signs them. The bytes of an image or a document also stay unchanged. A value of fewer than eight characters is not replaced. `a.Redact` applies the same rules to the text of a log line.
+The model builds its history from the stored events, so the model does not see the secret either. A JSON escape in a string, such as a tab between `Bearer` and a token, does not hide a secret: the kernel reads each string as it decodes. The raw provider blocks stay unchanged, because the provider signs them. The bytes of an image or a document also stay unchanged. A value of fewer than eight characters is not replaced. `a.Redact` applies the same rules to the text of a log line.
 
 ### 4.3 Storage
 
@@ -144,7 +144,7 @@ A recorded result matches the tool name and its JSON input. Object key order and
 
 ### 4.7 Branches
 
-A run is defined by its ledger and its workspace, so a run can branch. `Agent.Fork` and `POST /v1/runs/{id}/fork` make a new run whose ledger begins with a copy of the events of the source up to one sequence number, `seq`; without one, every event. The copied events get the id of the branch, new event ids, and the time of the copy; the `fw.run.queued` event of the branch names the person who branched as its principal and carries the metadata `fw.forkOf`, the id of the source, and `fw.forkSeq`, the sequence number kept. The branch has no parent, and the children of the source stay with the source. The source does not change.
+A run is defined by its ledger and its workspace, so a run can branch. `Agent.Fork` and `POST /v1/runs/{id}/fork` make a new run whose ledger begins with a copy of the events of the source up to one sequence number, `seq`; without one, every event. The copied events get the id of the branch, new event ids, and the time of the copy; the `fw.run.queued` event of the branch names the person who branched as its principal and carries the metadata `fw.forkOf`, the id of the source, and `fw.forkSeq`, the sequence number kept. The branch starts from `fw.run.queued` as the ledger of the source stores it, with every secret replaced, so its model reads what the model of the source read, and a branch in another process holds no secret that only the source knows. The branch has no parent, and the children of the source stay with the source. The source does not change.
 
 A branch counts its own work only. Its `fw.run.queued` holds `kept`, the number of events at the start of its ledger that are copies, which leaves out the `fw.run.child` events of the source. The copies add nothing to the usage of the branch, and their totals set nothing (section 8.2), because the source holds that usage. The budget of the branch counts its own turns, tool calls, tokens, and cost in the same way, so a branch of a run near a limit gets the whole budget for its own work. The turn numbers in the ledger of the branch go on from the source. Only a fork sets `kept`: the metadata `fw.forkOf` and `fw.forkSeq`, which a request can set and a replay copies, change no count. A branch that an older kernel made has no `kept` and counts the copies as its own.
 
@@ -264,7 +264,7 @@ type Model interface {
 }
 ```
 
-`Request` carries the system prompt, the messages, the tool specifications, the effort level, and the output token limit. Messages use a small provider-neutral block set: text, image, document, tool use, tool result, and opaque. The opaque block carries provider data such as thinking blocks without interpretation.
+`Request` carries the system prompt, the messages, the tool specifications, the effort level, and the output token limit. An adapter fills an empty effort with the `effort` of the configuration that opened it, unless `EffortSet` is true: then the empty effort is the effort of the call: the Anthropic adapter sends its default, `high`, and the Gemini and OpenAI adapters send no effort, so the model uses its own default. The kernel sets `EffortSet` for a run with a resolved profile (section 12.5). Messages use a small provider-neutral block set: text, image, document, tool use, tool result, and opaque. The opaque block carries provider data such as thinking blocks without interpretation.
 
 ### 6.2 Adapters
 
@@ -759,7 +759,7 @@ The kernel makes no title call. A title that a model writes comes from the workb
 
 #### Annotations
 
-`Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entry `idempotencyKey` cannot change, and the metadata after the merge must fit the bounds of `fw.CheckMetadata`.
+`Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entries `idempotencyKey`, `fw.drift.system`, and `fw.drift.instructions` (section 12.5) are the kernel's and cannot change. A request cannot set them either, on any surface. The metadata after the merge must fit the bounds of `fw.CheckMetadata`. The entries that the kernel sets, also `fw.forkOf` and `fw.forkSeq` of a branch (section 4.7), do not count, so an entry of the kernel never makes a later annotation fail.
 
 The kernel annotates a run itself when the text of its profile changed across a restart, with the keys `fw.drift.system` and `fw.drift.instructions` (section 12.5).
 
@@ -1183,7 +1183,7 @@ The kernel resolves the profile of a run once, when it queues the run, and recor
 | Field | In the resolved profile |
 |---|---|
 | model | the selector, through `models` and the `model` of the configuration, so a change of either does not reach the run |
-| effort | the overlay, else the `effort` of the configuration; a run without one keeps none |
+| effort | the overlay, else the `effort` of the configuration; a run queued without one asks for the default of the provider, also after the configuration names an effort (section 6.1) |
 | skills, tools | the allowlists of the overlay |
 | time zone | the overlay, else the zone of the parent, else `time.zone`; `fw.run.started` records the zone that wins (section 5.8) |
 | budget | the budget of the overlay, with each zero field taken from `budget:` in `fw.yaml`; the budget of the request stays in its own field and wins over it |
@@ -1193,7 +1193,7 @@ The kernel resolves the profile of a run once, when it queues the run, and recor
 
 The resolved profile holds no configured text, because a system prompt or an instruction can hold a value that a variable expanded (section 12.1). The event goes to the ledger, the bus egress, the OTLP export, the events of the native API, and a branch in another process. It goes to anyone who can view the run, also to a person who cannot view the agent of a child run. The text of the inline profile stays in the `profile` field of the event, as it always was, and reaches the model as the event stores it.
 
-The process that queues a run keeps the text of the run in memory: the system prompt of the inline profile, else that of the named profile, else `fw.DefaultSystemPrompt`, and the instructions of the named profile, then those of the inline profile. A change through `Agent.SetProfiles` therefore does not reach the text of a run. The model reads the text of the named profile as the configuration holds it, and the kernel replaces no secret in it, because that text never passes through an event. A branch in the same process takes the text of its source.
+The process that queues a run keeps the text of the run in memory: the system prompt of the inline profile, else that of the named profile, else `fw.DefaultSystemPrompt`, and the instructions of the named profile, then those of the inline profile. A change through `Agent.SetProfiles` therefore does not reach the text of a run. The model reads the text of the named profile as the configuration holds it, and the kernel replaces no secret in it, because that text never passes through an event. A branch in the same process takes the text of its source, or of the nearest run up its chain of sources that holds the text, so a branch of a branch that made no model call yet keeps it too.
 
 Each digest is `sha256:` and the hex SHA-256 of the text as the model reads it: the system prompt without the spaces at its start and end, and the instructions, each without the spaces at its start and end, the empty ones left out, joined by a blank line. The text of the inline profile counts as the event stores it. After a restart, or in a branch in another process, no process holds the text in memory, so the kernel takes the text of the profile at the first model call and compares its digests with the digests of the run. When they are the same, the run goes on. When one differs, the configuration changed since the run was queued: the run goes on with the text now, and the kernel records the change on the run as `fw.run.annotated` with the metadata key `fw.drift.system` or `fw.drift.instructions` and the value `<old digest> -> <new digest>`. The kernel logs a warning with the same facts. The metadata of the run object then shows the change, the annotation passes the egress filter of the fleet, and a later restart compares with the new digest, so each change is recorded once. The change does not fail the run. An annotation keeps the title of a run (section 8.2).
 

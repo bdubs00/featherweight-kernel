@@ -182,9 +182,7 @@ func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) 
 		return nil, errors.New("anthropic: nil request")
 	}
 	r := *req
-	if r.Effort == "" {
-		r.Effort = m.effort
-	}
+	r.Effort = r.EffortOr(m.effort)
 	params, names, err := BuildParams(&r, m.model, m.threshold)
 	if err != nil {
 		return nil, err

@@ -637,9 +637,7 @@ func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) 
 		return nil, errors.New("openai: nil request")
 	}
 	r := *req
-	if r.Effort == "" {
-		r.Effort = m.effort
-	}
+	r.Effort = r.EffortOr(m.effort)
 	body, names, err := BuildBody(&r, m.model, m.bodyOptions(&r))
 	if err != nil {
 		return nil, err

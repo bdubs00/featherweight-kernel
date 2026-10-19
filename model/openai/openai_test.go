@@ -1212,3 +1212,23 @@ func TestMediaTypes(t *testing.T) {
 		}
 	}
 }
+
+// A request that sets an empty effort sends no reasoning_effort, and not
+// the effort that the adapter was opened with. A request that leaves the
+// effort to the adapter sends that effort.
+func TestReasoningKeepsAnEmptyEffortOfTheRequest(t *testing.T) {
+	f, srv := newFake(t, reply{body: streamBody})
+	m := testModelWith(t, settings{base: srv.URL, model: "o4-mini", reasoning: true, effort: "low"})
+	for _, set := range []bool{false, true} {
+		req := &fw.Request{Messages: []fw.Message{fw.UserText("q")}, EffortSet: set}
+		if _, err := m.Generate(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.bodies[0]["reasoning_effort"] != "low" {
+		t.Errorf("body = %v, want the effort of the adapter, low", f.bodies[0])
+	}
+	if _, ok := f.bodies[1]["reasoning_effort"]; ok {
+		t.Errorf("body = %v, want no reasoning_effort", f.bodies[1])
+	}
+}
