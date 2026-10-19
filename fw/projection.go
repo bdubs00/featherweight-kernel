@@ -234,18 +234,25 @@ func ProjectRun(events []Event, prices ...Prices) *Run {
 //
 // A branch (RunQueuedData.Kept) counts its own work only. The events that
 // it kept from its source add no usage and set no totals, because the
-// source holds that usage.
+// source holds that usage. A turn that is open at the end of the kept
+// events becomes a turn of the branch when the branch makes its model
+// call. A branch that ends with its kept events, such as a branch of a
+// finished run without a message, did no work: its last kept event gives
+// it a known usage of zero (UsageSeq), as totals would.
 //
 // A fw.run.queued with a lower sequence number than an event that Apply
 // already folded, which a bus can deliver late, gives the run its
 // identity and changes nothing else: the state, the usage, and the time
 // of the latest change stay, and the metadata and the title of later
-// annotations win.
+// annotations win. A run that no event gave a state yet becomes queued.
 func (r *Run) Apply(e Event, prices Prices) {
 	if r.ID == "" {
 		r.ID = e.Subject
 	}
 	late := e.Seq != 0 && e.Seq < r.Seq
+	if e.Seq != 0 && e.Seq == r.kept {
+		defer r.endKept(e.Seq)
+	}
 	if e.Seq > r.Seq {
 		r.Seq = e.Seq
 	}
@@ -276,13 +283,19 @@ func (r *Run) Apply(e Event, prices Prices) {
 			if r.Title == "" {
 				r.Title = title
 			}
+			if r.State == "" {
+				r.State = StateQueued
+			}
 			return
 		}
 		r.Metadata, r.Title = d.Metadata, title
 		r.State = StateQueued
 	case EvRunStarted, EvRunResumed, EvTurnStarted:
-		if e.Type == EvTurnStarted && !r.keptEvent(e) {
-			r.Usage.Turns++
+		if e.Type == EvTurnStarted {
+			r.keptTurn = r.keptEvent(e)
+			if !r.keptTurn {
+				r.Usage.Turns++
+			}
 		}
 		if r.State.Terminal() {
 			return
@@ -306,10 +319,19 @@ func (r *Run) Apply(e Event, prices Prices) {
 			Provider string `json:"provider"`
 			Model    string `json:"model"`
 		}
+		// The model call of a turn that the branch kept open makes the turn
+		// its own; a kept call leaves the turn to the source.
+		open := r.keptTurn
+		r.keptTurn = false
 		if r.keptEvent(e) || e.Decode(&d) != nil {
 			return
 		}
+		if open {
+			r.Usage.Turns++
+		}
 		r.addUsage(d.Usage, d.Provider, d.Model, prices)
+	case EvTurnFinished:
+		r.keptTurn = false
 	case EvRunAnnotated:
 		var d RunAnnotatedData
 		if e.Decode(&d) != nil {
@@ -412,6 +434,15 @@ func (r *Run) setTotals(t *RunUsage, e Event) {
 	}
 	r.Usage = *t
 	r.UsageSeq = e.Seq
+}
+
+// endKept follows the last event that a branch kept from its source. A
+// branch that is finished then did no work of its own, so its usage, zero,
+// is known as of that event.
+func (r *Run) endKept(seq uint64) {
+	if r.State.Terminal() && r.UsageSeq == 0 {
+		r.UsageSeq = seq
+	}
 }
 
 // keptEvent reports whether e is one of the events that a branch kept from

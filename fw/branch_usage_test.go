@@ -150,3 +150,87 @@ func TestForkMetadataCountsUsage(t *testing.T) {
 		t.Fatalf("replay of the branch = %+v %+v", rp.Metadata, rp.Usage)
 	}
 }
+
+// TestForkEventsCountsTheCopies sends a branch to ForkEvents, as another
+// process does, with a forged Kept and with none, as an older kernel sends
+// it. The process counts the copies itself: the branch counts its own model
+// calls, and maxTokens stops it.
+func TestForkEventsCountsTheCopies(t *testing.T) {
+	for _, forged := range []uint64{1 << 40, 0} {
+		ctx := testCtx(t)
+		s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)), callTools(use("c2", "echo", `{"text":"b"}`)),
+			callTools(use("c3", "echo", `{"text":"c"}`)), endTurn("done"))
+		a := newTestAgent(t, s.Model(), WithTools(echoTool(nil)))
+		q := MustEvent("X", EvRunQueued, RunQueuedData{Agent: "default", Input: "go", Principal: "p", Kept: forged, Budget: &Budget{MaxTokens: 20}})
+		q.Seq = 1
+		r, err := a.ForkEvents(ctx, []Event{q}, ForkRequest{ID: NewID(), Input: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err = a.WaitFor(ctx, r.ID, func(r *Run) bool { return r.State.Terminal() })
+		mustState(t, r, err, StateFailed)
+		evs := ledgerEvents(t, a.Ledger(), r.ID)
+		var kept RunQueuedData
+		firstOf(t, evs, EvRunQueued, &kept)
+		var d RunFinishedData
+		_ = evs[len(evs)-1].Decode(&d)
+		if kept.Kept != 1 || countType(evs, EvModelResponded) != 2 || countType(evs, EvBudgetExceeded) != 1 ||
+			r.Usage.InputTokens != 20 || d.Totals == nil || d.Totals.InputTokens != 20 {
+			t.Fatalf("forged %d: kept %d, %d calls, usage %+v, totals %+v, error %q", forged, kept.Kept, countType(evs, EvModelResponded), r.Usage, d.Totals, r.Error)
+		}
+	}
+}
+
+// TestBranchWithoutWorkIsFinal forks a finished run without a message. The
+// branch stays finished and appends no event of its own, so its last kept
+// event gives it a known usage of zero, for the kernel and for a consumer
+// of the lifecycle events.
+func TestBranchWithoutWorkIsFinal(t *testing.T) {
+	ctx := testCtx(t)
+	a := newTestAgent(t, newScript(endTurn("first")).Model())
+	src, err := a.Run(ctx, "hello")
+	mustState(t, src, err, StateCompleted)
+	b, err := a.Fork(ctx, src.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := ledgerEvents(t, a.Ledger(), b.ID)
+	var q RunQueuedData
+	firstOf(t, evs, EvRunQueued, &q)
+	got, err := a.Get(ctx, b.ID)
+	if err != nil || got.State != StateCompleted || got.UsageSeq != q.Kept || got.Usage != (RunUsage{}) || q.Kept != uint64(len(evs)) {
+		t.Fatalf("branch = %+v, %v; kept %d of %d events", got, err, q.Kept, len(evs))
+	}
+	if life := ProjectRun(lifecycleOnly(evs)); life.State != StateCompleted || life.UsageSeq != q.Kept || life.Usage != (RunUsage{}) {
+		t.Fatalf("lifecycle: state %s, usage %+v at %d", life.State, life.Usage, life.UsageSeq)
+	}
+}
+
+// TestBranchMidTurnCountsTheTurn forks a run at its fw.model.requested. The
+// branch keeps the open turn and makes its model call itself, so the turn
+// is its own: in its usage and in maxTurns, which then stops a second turn.
+func TestBranchMidTurnCountsTheTurn(t *testing.T) {
+	ctx := testCtx(t)
+	a := newTestAgent(t, newScript(endTurn("first"), callTools(use("c1", "echo", `{"text":"a"}`)), endTurn("never")).Model(), WithTools(echoTool(nil)))
+	src, err := a.Run(ctx, "hello", WithRunBudget(Budget{MaxTurns: 1}))
+	mustState(t, src, err, StateCompleted)
+	var at uint64
+	for _, e := range ledgerEvents(t, a.Ledger(), src.ID) {
+		if e.Type == EvModelRequested {
+			at = e.Seq
+		}
+	}
+	b, err := a.Fork(ctx, src.ID, ForkRequest{Seq: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err = a.WaitFor(ctx, b.ID, func(r *Run) bool { return r.State.Terminal() })
+	mustState(t, b, err, StateFailed)
+	evs := ledgerEvents(t, a.Ledger(), b.ID)
+	if b.Error != "budget exceeded: maxTurns" || b.Usage.Turns != 1 || countType(evs, EvModelResponded) != 1 || b.Usage.ToolCalls != 1 {
+		t.Fatalf("branch = %+v, events %v", b, eventTypes(evs))
+	}
+	if r := ProjectRun(evs); r.Usage != b.Usage {
+		t.Fatalf("ledger usage %+v, status %+v", r.Usage, b.Usage)
+	}
+}
