@@ -2,6 +2,7 @@ package fw
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -349,9 +350,10 @@ func TestCancelAtTheEndOfAStartReachesTheChild(t *testing.T) {
 // recorded now.
 func aheadClock() Clock { return ClockFunc(func() time.Time { return time.Now().Add(time.Hour) }) }
 
-// A look that cannot tell gives up past its bound: it abandons the process
-// of the child, which can never report to the parent, and records the
-// child as failed with the reason, so a person sees why.
+// A look that cannot tell gives up past its bounds, after several tries of
+// its own: it records the child as failed with the reason, so a person
+// sees why, and it keeps the process of the child, where the child can
+// still run.
 func TestLookGivesUpPastItsBound(t *testing.T) {
 	ctx := testCtx(t)
 	other := newTestAgent(t, newScript(endTurn("child done")).Model())
@@ -365,11 +367,17 @@ func TestLookGivesUpPastItsBound(t *testing.T) {
 		return err == nil && r.State == StateFailed
 	})
 	r, _ := b.Get(ctx, child)
-	if !strings.Contains(r.Error, "could not reach "+member) || !strings.Contains(r.Error, "401") {
+	if !strings.Contains(r.Error, "could not reach "+member) || !strings.Contains(r.Error, "401") || !strings.Contains(r.Error, "its process stays") {
 		t.Fatalf("the child after the look gave up = %+v", r)
 	}
-	if sp.alive(member) == nil {
-		t.Fatalf("the process %s of the child stays after the look gave up", member)
+	if sp.alive(member) != nil {
+		t.Fatalf("the look that gave up removed the process %s", member)
+	}
+	sp.mu.Lock()
+	finds := sp.finds
+	sp.mu.Unlock()
+	if finds < 5 {
+		t.Fatalf("the look gave up after %d tries, want at least 5", finds)
 	}
 	if b.Starting() != 0 {
 		t.Fatalf("Starting = %d after the look gave up", b.Starting())
@@ -608,4 +616,153 @@ func TestLookKeepsTheShareOfItsChild(t *testing.T) {
 		t.Fatalf("the shares of the two children are %v, more than the %d runs of the tree", shares, cfg.Spawn.MaxDescendants)
 	}
 	sp.setFindErr(nil)
+}
+
+// runningParent starts a parent run whose model waits until the run is
+// canceled, so the parent does not end while a test works on its child.
+func runningParent(t *testing.T, a *Agent) string {
+	t.Helper()
+	ctx := testCtx(t)
+	parent, err := a.Start(ctx, "parent work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the parent runs", func() bool {
+		r, err := a.Get(ctx, parent.ID)
+		return err == nil && r.State == StateRunning
+	})
+	t.Cleanup(func() { _ = a.Cancel(context.Background(), parent.ID) })
+	return parent.ID
+}
+
+// A start that failed for its caller after the child took its run, and
+// whose process did not go at once, does not leave the child running: the
+// look that takes over finds the child, cancels it, and removes its
+// process, because the caller learned that the child did not start and
+// nothing reads it. The parent still runs, so it is not the end of the
+// parent that cancels the child.
+func TestFailedStartWhoseChildRunsIsEnded(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	sp.abandonFails = 1
+	l := NewMemLedger()
+	a := newTestAgent(t, blockingModel(nil), WithLedger(l), WithSpawner(sp))
+	parent := runningParent(t, a)
+	id, done, release := startHeld(t, a, sp, parent, beforeEnd, false)
+	release()
+	if err := <-done; err == nil {
+		t.Fatal("SpawnChild of a failed start returned no error")
+	}
+	r, err := other.WaitFor(ctx, id, func(r *Run) bool { return r.State.Terminal() })
+	if err != nil || r.State != StateCanceled {
+		t.Fatalf("the child of the failed start = %+v, %v", r, err)
+	}
+	eventually(t, "the process of the child goes", func() bool { return sp.alive(taskOf(id)) != nil })
+	eventually(t, "the child is recorded as failed", func() bool {
+		r, err := a.Get(ctx, id)
+		return err == nil && r.State == StateFailed && strings.Contains(r.Error, "did not start")
+	})
+	if _, ok := a.remoteChild(id); ok {
+		t.Fatal("the parent still follows the child of the failed start")
+	}
+	if r, _ := a.Get(ctx, parent); r.State != StateRunning {
+		t.Fatalf("the parent = %s", r.State)
+	}
+}
+
+// The end of a start that failed for its caller is on the record, so the
+// look after a restart ends the child too, instead of following it.
+func TestFailedStartWhoseChildRunsIsEndedAfterARestart(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	sp.abandonFails = 1
+	sp.setFindErr(errors.New("the platform does not answer"))
+	l := NewMemLedger()
+	cut := &cutLedger{Ledger: l}
+	dead := &deadSpawner{crashSpawner: sp}
+	a := newTestAgent(t, blockingModel(nil), WithLedger(cut), WithSpawner(dead))
+	parent := runningParent(t, a)
+	id, done, release := startHeld(t, a, sp, parent, beforeEnd, false)
+	release()
+	if err := <-done; err == nil {
+		t.Fatal("SpawnChild of a failed start returned no error")
+	}
+	cut.cut.Store(true) // the parent process dies while it looks for the child
+	dead.cut.Store(true)
+
+	b := newTestAgent(t, blockingModel(nil), WithLedger(l), WithSpawner(sp))
+	sp.setFindErr(nil)
+	r, err := other.WaitFor(ctx, id, func(r *Run) bool { return r.State.Terminal() })
+	if err != nil || r.State != StateCanceled {
+		t.Fatalf("the child of the failed start after the restart = %+v, %v", r, err)
+	}
+	eventually(t, "the child is recorded as failed", func() bool {
+		r, err := b.Get(ctx, id)
+		return err == nil && r.State == StateFailed && strings.Contains(r.Error, "did not start")
+	})
+	eventually(t, "the process of the child goes", func() bool { return sp.alive(taskOf(id)) != nil })
+	_ = b.Cancel(ctx, parent)
+}
+
+// idAt returns an id of the shape of NewID for the time at.
+func idAt(at time.Time) string {
+	var b [16]byte
+	ms := uint64(at.UnixMilli())
+	for i := 0; i < 6; i++ {
+		b[i] = byte(ms >> (40 - 8*i))
+	}
+	_, _ = rand.Read(b[6:])
+	return encodeBase32(b)
+}
+
+// A look that begins long after the record of the child, as after a long
+// stop of the parent, tries a passing error of the platform again instead
+// of giving up at once: it finds the child once the platform answers, and
+// its process stays.
+func TestLateLookTriesAPassingErrorAgain(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	parent, child := NewID(), idAt(time.Now().Add(-time.Hour))
+	member := taskOf(child)
+	if _, err := other.Start(ctx, "child work", WithRequest(RunRequest{ID: child, Input: "child work"})); err != nil {
+		t.Fatal(err)
+	}
+	sp.mu.Lock()
+	sp.tasks[member] = true
+	sp.findErr, sp.findFails = errors.New("rpc error: code = Unavailable desc = connection refused"), 2
+	sp.mu.Unlock()
+	l := NewMemLedger()
+	seed(t, l, parent,
+		MustEvent(parent, EvRunQueued, RunQueuedData{Agent: "default", Input: "parent work"}),
+		MustEvent(parent, EvRunChild, RunChildData{Child: child, Member: member, Kind: childSpawn, Metadata: map[string]string{MetaParent: parent}, Input: "child work"}),
+		MustEvent(parent, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: "parent done"}))
+	b := newTestAgent(t, newScript().Model(), WithLedger(l), WithSpawner(sp))
+	eventually(t, "the look finds the child", func() bool {
+		ref, ok := b.remoteChild(child)
+		if !ok {
+			return false
+		}
+		_, open := ref.starting()
+		return !open
+	})
+	if sp.alive(member) != nil {
+		t.Fatalf("a passing error removed the process %s of a child that runs there", member)
+	}
+	started := false
+	for _, e := range ledgerEvents(t, l, parent) {
+		var d RunChildData
+		if e.Type == EvRunChild && e.Decode(&d) == nil && d.Child == child && d.Started {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatal("the parent did not record the child that the look found")
+	}
+	// The parent ended, so it cancels the child that the look found.
+	if r, err := other.WaitFor(ctx, child, func(r *Run) bool { return r.State.Terminal() }); err != nil || r.State != StateCanceled {
+		t.Fatalf("the found child of an ended parent = %+v, %v", r, err)
+	}
 }
