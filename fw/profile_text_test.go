@@ -10,6 +10,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -424,4 +426,87 @@ func TestRemoteBranchTakesTheStoredRequest(t *testing.T) {
 		t.Fatalf("records of a change, but nothing changed: %v", n)
 	}
 	eventsHold(t, lb, b.ID, "srcsecret-77a1b2c3")
+}
+
+// Only the kernel sets the keys of a change of the text: a start, a
+// branch, and an annotation that name one are refused, and the check of a
+// surface refuses them too. The keys that trusted paths set, such as
+// fw.batch and fw.parent, still pass.
+func TestRequestCannotSetKernelMetadata(t *testing.T) {
+	ctx := testCtx(t)
+	rec := &pinRecorder{}
+	a := pinAgent(t, pinConfig(t, "pintest/base"), NewMemLedger(), rec)
+	rec.script(endTurn("one"))
+	r, err := a.Run(ctx, "work", WithMetadata(map[string]string{MetaBatch: "job-1", MetaParent: "elsewhere"}))
+	mustState(t, r, err, StateCompleted)
+	if err := CheckMetadata(map[string]string{MetaBatch: "job-1", MetaParent: "elsewhere", MetaTitle: "A title"}); err != nil {
+		t.Fatalf("CheckMetadata refuses the keys of trusted paths: %v", err)
+	}
+	for _, key := range []string{"fw.drift.system", "fw.drift.instructions"} {
+		meta := map[string]string{key: "sha256:aaaa -> sha256:bbbb"}
+		if err := CheckMetadata(meta); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("CheckMetadata(%s) = %v", key, err)
+		}
+		if got, err := a.Start(ctx, "work", WithMetadata(meta)); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("a start with %s = %+v, %v", key, got, err)
+		}
+		if got, err := a.Fork(ctx, r.ID, ForkRequest{Input: "again", Metadata: meta}); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("a branch with %s = %+v, %v", key, got, err)
+		}
+		if err := a.Annotate(ctx, r.ID, RunAnnotatedData{Metadata: meta}); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("an annotation with %s = %v", key, err)
+		}
+	}
+}
+
+// The keys that the kernel sets do not count against the bound of the
+// metadata: a run with the most entries that a request can give it still
+// takes an annotation after the kernel recorded a change of its text, and
+// after it kept an idempotency key.
+func TestKernelMetadataDoesNotCountAgainstTheBound(t *testing.T) {
+	ctx := testCtx(t)
+	dir := filepath.Join(t.TempDir(), "runs")
+	rec := &pinRecorder{}
+	start := func(system string) *Agent {
+		cfg := pinConfig(t, "pintest/base")
+		cfg.Agents = map[string]AgentProfile{"worker": {System: system, Instructions: []string{system}}}
+		return pinAgent(t, cfg, pinLedger(t, dir), rec)
+	}
+	a := start("Old.")
+	meta := map[string]string{}
+	for i := range MaxMetadataEntries {
+		meta[fmt.Sprintf("k%02d", i)] = "v"
+	}
+	rec.script(endTurn("one"))
+	r, err := a.Run(ctx, "work", AsAgent("worker"), WithMetadata(meta), WithIdempotencyKey("key-1"))
+	mustState(t, r, err, StateCompleted)
+	closePin(a)
+
+	b := start("New.")
+	rec.script(endTurn("two"))
+	if err := b.Send(ctx, r.ID, UserText("more"), OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Wait(ctx, r.ID)
+	mustState(t, got, err, StateCompleted)
+	if n := len(driftNotes(t, b.Ledger(), r.ID)); n != 1 {
+		t.Fatalf("%d records of the change, want 1", n)
+	}
+	if err := b.Annotate(ctx, r.ID, RunAnnotatedData{Usage: &Usage{InputTokens: 1}}); err != nil {
+		t.Fatalf("a usage annotation fails: %v", err)
+	}
+	if err := b.Annotate(ctx, r.ID, RunAnnotatedData{Metadata: map[string]string{"k00": "w"}}); err != nil {
+		t.Fatalf("an annotation that replaces an entry fails: %v", err)
+	}
+	if err := b.Annotate(ctx, r.ID, RunAnnotatedData{Metadata: map[string]string{"one-more": "x"}}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("an annotation past the bound = %v, want a refusal", err)
+	}
+	// A branch carries fw.forkOf and fw.forkSeq on top of the entries.
+	br, err := b.Fork(ctx, r.ID, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Annotate(ctx, br.ID, RunAnnotatedData{Usage: &Usage{InputTokens: 1}}); err != nil {
+		t.Fatalf("a usage annotation of the branch fails: %v", err)
+	}
 }

@@ -88,15 +88,17 @@ func (a *Agent) Annotate(ctx context.Context, id string, d RunAnnotatedData) err
 	if len(d.Metadata) == 0 && d.Usage == nil {
 		return fmt.Errorf("%w: an annotation holds metadata or usage", ErrInvalidRequest)
 	}
-	if _, ok := d.Metadata[metaIdempotencyKey]; ok {
-		return fmt.Errorf("%w: the metadata entry %s cannot change", ErrInvalidRequest, metaIdempotencyKey)
+	for k := range d.Metadata {
+		if kernelMeta(k) {
+			return fmt.Errorf("%w: the metadata entry %s is the kernel's and cannot change", ErrInvalidRequest, k)
+		}
 	}
 	merged := maps.Clone(rs.snapshot().Metadata)
 	if merged == nil {
 		merged = map[string]string{}
 	}
 	maps.Copy(merged, d.Metadata)
-	if err := CheckMetadata(merged); err != nil {
+	if err := checkMetadataBounds(merged); err != nil {
 		return err
 	}
 	_, err = a.emit(nil, rs, EvRunAnnotated, d)

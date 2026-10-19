@@ -3,6 +3,7 @@ package fw
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -345,18 +346,55 @@ const (
 	MaxMetadataValueBytes = 4096
 )
 
+// kernelMetadata lists the metadata keys that only the kernel sets: the
+// idempotency key and the keys of a change of the text of a run
+// (MetaDriftSystem, MetaDriftInstructions). A request and an annotation
+// cannot set them. They do not count against MaxMetadataEntries, and
+// neither do the keys that the kernel sets on a branch, MetaForkOf and
+// MetaForkSeq.
+var kernelMetadata = []string{"idempotencyKey", MetaDriftSystem, MetaDriftInstructions}
+
+// kernelMeta reports whether only the kernel sets the metadata key k.
+func kernelMeta(k string) bool { return slices.Contains(kernelMetadata, k) }
+
+// boundless reports whether the metadata key k does not count against
+// MaxMetadataEntries, because the kernel sets it.
+func boundless(k string) bool { return kernelMeta(k) || k == MetaForkOf || k == MetaForkSeq }
+
 // CheckMetadata bounds the metadata of a request with ErrInvalidRequest.
-// The key idempotencyKey is the kernel's: it holds the idempotency key.
+// The keys that the kernel sets are reserved: idempotencyKey holds the
+// idempotency key, and MetaDriftSystem and MetaDriftInstructions record a
+// change of the text of a run.
 func CheckMetadata(m map[string]string) error {
-	if len(m) > MaxMetadataEntries {
-		return fmt.Errorf("%w: metadata has %d entries; the limit is %d", ErrInvalidRequest, len(m), MaxMetadataEntries)
+	for k := range m {
+		switch {
+		case k == "idempotencyKey":
+			return fmt.Errorf("%w: the metadata key idempotencyKey is reserved; use the idempotency key of the surface", ErrInvalidRequest)
+		case kernelMeta(k):
+			return fmt.Errorf("%w: the metadata key %s is reserved for the kernel", ErrInvalidRequest, k)
+		}
+	}
+	return checkMetadataBounds(m)
+}
+
+// checkMetadataBounds checks the bounds of metadata with ErrInvalidRequest.
+// A key that the kernel sets does not count against MaxMetadataEntries, so
+// the metadata of a run that the kernel annotated or branched takes as many
+// entries as before.
+func checkMetadataBounds(m map[string]string) error {
+	n := 0
+	for k := range m {
+		if !boundless(k) {
+			n++
+		}
+	}
+	if n > MaxMetadataEntries {
+		return fmt.Errorf("%w: metadata has %d entries; the limit is %d", ErrInvalidRequest, n, MaxMetadataEntries)
 	}
 	for k, v := range m {
 		switch {
 		case k == "":
 			return fmt.Errorf("%w: a metadata key must not be empty", ErrInvalidRequest)
-		case k == "idempotencyKey":
-			return fmt.Errorf("%w: the metadata key idempotencyKey is reserved; use the idempotency key of the surface", ErrInvalidRequest)
 		case len(k) > MaxMetadataKeyBytes:
 			return fmt.Errorf("%w: a metadata key is longer than %d bytes", ErrInvalidRequest, MaxMetadataKeyBytes)
 		case len(v) > MaxMetadataValueBytes:

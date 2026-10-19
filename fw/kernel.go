@@ -306,6 +306,13 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	if strings.TrimSpace(req.Input) == "" && len(req.Files) == 0 {
 		return nil, fmt.Errorf("%w: run input is empty", ErrInvalidRequest)
 	}
+	// Only the kernel records a change of the text of a run. The
+	// idempotency key of the metadata keeps its old handling below.
+	for k := range req.Metadata {
+		if kernelMeta(k) && k != metaIdempotencyKey {
+			return nil, fmt.Errorf("%w: the metadata key %s is reserved for the kernel", ErrInvalidRequest, k)
+		}
+	}
 	if req.Agent == "" {
 		req.Agent = "default"
 	}

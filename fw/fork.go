@@ -76,6 +76,9 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	if k.isDraining() {
 		return nil, ErrClosed
 	}
+	if err := CheckMetadata(req.Metadata); err != nil {
+		return nil, err
+	}
 	rs, err := k.lookup(src)
 	if err != nil {
 		return nil, err

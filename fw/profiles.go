@@ -173,9 +173,11 @@ func textDigest(s string) string {
 // change of the profile does not reach it. A branch in this process takes
 // the text of the nearest run up its chain of sources (MetaForkOf) that
 // holds a text with the same digests, so a branch of a branch that made no
-// model call yet keeps the text of the first source too. Otherwise, such
-// as after a restart, the kernel composes the text from the named profile
-// now and the inline profile of fw.run.queued and keeps it from then on.
+// model call yet keeps the text of the first source too. A request can name
+// any run in MetaForkOf, but the digests must agree, so a run only takes a
+// text that equals its own. Otherwise, such as after a restart, the kernel
+// composes the text from the named profile now and the inline profile of
+// fw.run.queued and keeps it from then on.
 // When its digests differ from those that the run expects, the
 // configuration changed: the run goes on with the text now, and the kernel
 // records the change on the run as fw.run.annotated with MetaDriftSystem
