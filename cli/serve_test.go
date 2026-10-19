@@ -89,6 +89,29 @@ func waitFor(t *testing.T, url string, want int) {
 // is called, and then returns its exit code and streams.
 func serveInBackground(t *testing.T, args ...string) func() (int, string, string) {
 	t.Helper()
+	stop, _ := serveWatched(t, args...)
+	return stop
+}
+
+// waitOutput polls the output of a command line until it holds want, or
+// the time runs out. A count of model calls says only that a call began,
+// not that its run recorded the answer and the command printed it.
+func waitOutput(t *testing.T, stdout func() string, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(stdout(), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the output never held %q:\n%s", want, stdout())
+}
+
+// serveWatched is serveInBackground that also returns a reader of the
+// output while the command line runs.
+func serveWatched(t *testing.T, args ...string) (func() (int, string, string), func() string) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	var stdout, stderr syncBuffer
 	done := make(chan int, 1)
@@ -103,7 +126,7 @@ func serveInBackground(t *testing.T, args ...string) func() (int, string, string
 			t.Fatal("serve did not stop")
 			return -1, "", ""
 		}
-	}
+	}, stdout.String
 }
 
 func TestServePlain(t *testing.T) {
@@ -173,7 +196,7 @@ func TestServeAXBoot(t *testing.T) {
 	home := filepath.Join(wsPath, ".fw")
 	addr := freeAddr(t)
 
-	stop := serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", home)
+	stop, stdout := serveWatched(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", home)
 	waitFor(t, "http://"+addr+"/readyz", 200)
 
 	// Step 3 prepared the workspace and wrote the marker under the home.
@@ -200,6 +223,7 @@ func TestServeAXBoot(t *testing.T) {
 	if task, _ := ax.Stashed(); task == nil || task.Metadata.Name != "tester" {
 		t.Errorf("stashed task %+v", task)
 	}
+	waitOutput(t, stdout, "command output\n")
 
 	code, out, errOut := stop()
 	if code != 0 {
@@ -214,8 +238,9 @@ func TestServeAXBoot(t *testing.T) {
 
 	// A second boot finds the marker, skips the goal, and follows the same
 	// command run instead of starting it again.
-	stop = serveInBackground(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", home)
+	stop, stdout = serveWatched(t, "serve", "--task-file", taskFile, "--workspace-file", wsFile, "--listen", addr, "--metadata-port", "0", "--home", home)
 	waitFor(t, "http://"+addr+"/readyz", 200)
+	waitOutput(t, stdout, "command output\n")
 	code, out, errOut = stop()
 	if code != 0 {
 		t.Fatalf("second boot: exit %d\n%s", code, errOut)
