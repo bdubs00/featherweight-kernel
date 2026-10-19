@@ -236,9 +236,11 @@ func ProjectRun(events []Event, prices ...Prices) *Run {
 // it kept from its source add no usage and set no totals, because the
 // source holds that usage. A turn that is open at the end of the kept
 // events becomes a turn of the branch when the branch makes its model
-// call. A branch that ends with its kept events, such as a branch of a
-// finished run without a message, did no work: its last kept event gives
-// it a known usage of zero (UsageSeq), as totals would.
+// call. A kept event after which the branch is finished, such as the
+// copied end of the run that a branch of a finished run without a message
+// keeps, gives the branch a known usage of zero (UsageSeq), as totals
+// would, because the branch did no work up to it. A consumer that receives
+// only some of the events, such as the lifecycle events, learns it there.
 //
 // A fw.run.queued with a lower sequence number than an event that Apply
 // already folded, which a bus can deliver late, gives the run its
@@ -250,7 +252,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 		r.ID = e.Subject
 	}
 	late := e.Seq != 0 && e.Seq < r.Seq
-	if e.Seq != 0 && e.Seq == r.kept {
+	if r.keptEvent(e) {
 		defer r.endKept(e.Seq)
 	}
 	if e.Seq > r.Seq {
@@ -436,9 +438,9 @@ func (r *Run) setTotals(t *RunUsage, e Event) {
 	r.UsageSeq = e.Seq
 }
 
-// endKept follows the last event that a branch kept from its source. A
-// branch that is finished then did no work of its own, so its usage, zero,
-// is known as of that event.
+// endKept follows an event that a branch kept from its source. A branch
+// that is finished then did no work of its own, so its usage, zero, is
+// known as of that event.
 func (r *Run) endKept(seq uint64) {
 	if r.State.Terminal() && r.UsageSeq == 0 {
 		r.UsageSeq = seq

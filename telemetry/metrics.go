@@ -129,6 +129,14 @@ type runMetrics struct {
 	uses      map[string]string    // tool by call id, from the latest response
 	known     map[string]bool      // tool names that the kernel resolved
 	approvals map[string]time.Time // request time by pending approval id
+	// kept is RunQueuedData.Kept of a branch: its events up to this
+	// sequence number are copies of its source, which counted their work.
+	// keptEnd is the outcome of a copied fw.run.finished that no copied
+	// event reopened, and keptTurn tells that a copied turn is open and the
+	// branch did not make its model call yet.
+	kept     uint64
+	keptEnd  string
+	keptTurn bool
 }
 
 // modelCall is the model call that a run waits for, with the provider and
@@ -480,6 +488,10 @@ func (m *Metrics) Observe(e fw.Event) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.runs[e.Subject]
+	if st != nil && e.Seq != 0 && e.Seq <= st.kept && e.Type != fw.EvRunQueued {
+		m.copied(e, st)
+		return
+	}
 	switch e.Type {
 	case fw.EvRunQueued:
 		if st == nil {
@@ -490,8 +502,10 @@ func (m *Metrics) Observe(e fw.Event) {
 		var d struct {
 			Origin   string            `json:"origin"`
 			Metadata map[string]string `json:"metadata"`
+			Kept     uint64            `json:"kept"`
 		}
 		_ = e.Decode(&d)
+		st.kept = d.Kept
 		origin := d.Origin
 		if !origins[origin] {
 			origin = otherLabel
@@ -539,6 +553,7 @@ func (m *Metrics) Observe(e fw.Event) {
 			}
 		}
 	case fw.EvTurnStarted:
+		st.keptTurn = false
 		if e.Seq == 0 || e.Seq > st.seq {
 			st.turns++
 		}
@@ -548,6 +563,12 @@ func (m *Metrics) Observe(e fw.Event) {
 			st.model = &modelCall{provider: d.Provider, model: d.Model}
 		}
 	case fw.EvModelResponded:
+		if st.keptTurn {
+			// The branch made the model call of a turn that it kept open,
+			// so the turn is its own.
+			st.turns++
+			st.keptTurn = false
+		}
 		m.responded(e, st)
 	case fw.EvContextCompacted:
 		var d struct {
@@ -709,20 +730,9 @@ func (m *Metrics) toolResponded(e fw.Event, st *runMetrics) {
 
 // finish counts a finished run and forgets it.
 func (m *Metrics) finish(e fw.Event, st *runMetrics) {
-	var d fw.RunFinishedData
-	_ = e.Decode(&d)
-	outcome := d.Outcome
-	switch outcome {
-	case fw.OutcomeCompleted, fw.OutcomeCanceled, fw.OutcomeFailed:
-	default:
-		outcome = fw.OutcomeFailed
-	}
-	agent, batch := agentOf(e.Source), ""
-	if st != nil {
-		agent, batch = st.agent, st.batch
-	}
-	m.runsTotal.WithLabelValues(agent, outcome, batch).Inc()
+	outcome := outcomeOf(e)
 	if st == nil {
+		m.runsTotal.WithLabelValues(agentOf(e.Source), outcome, "").Inc()
 		return
 	}
 	if st.model != nil {
@@ -732,8 +742,26 @@ func (m *Metrics) finish(e fw.Event, st *runMetrics) {
 		}
 		m.countModelEnd(st.model, mo)
 	}
+	m.endRun(e.Subject, st, outcome, eventTime(e))
+}
+
+// outcomeOf returns the outcome of a fw.run.finished as a label.
+func outcomeOf(e fw.Event) string {
+	var d fw.RunFinishedData
+	_ = e.Decode(&d)
+	switch d.Outcome {
+	case fw.OutcomeCompleted, fw.OutcomeCanceled, fw.OutcomeFailed:
+		return d.Outcome
+	}
+	return fw.OutcomeFailed
+}
+
+// endRun counts the end of a run at a time and forgets the run.
+func (m *Metrics) endRun(id string, st *runMetrics, outcome string, at time.Time) {
+	agent := st.agent
+	m.runsTotal.WithLabelValues(agent, outcome, st.batch).Inc()
 	if !st.since.IsZero() {
-		if dur := eventTime(e).Sub(st.since); dur >= 0 {
+		if dur := at.Sub(st.since); dur >= 0 {
 			m.runDuration.WithLabelValues(agent).Observe(dur.Seconds())
 		}
 	}
@@ -745,7 +773,96 @@ func (m *Metrics) finish(e fw.Event, st *runMetrics) {
 	for range st.approvals {
 		m.approvalsPending.WithLabelValues(agent).Dec()
 	}
-	delete(m.runs, e.Subject)
+	delete(m.runs, id)
+}
+
+// copied takes an event that a branch kept from its source. The source
+// counted its work, so the copy counts no turn, no model call, no token,
+// no tool call, and no end of a run, as the usage of the branch leaves it
+// out. It keeps what the own events of the branch need: the model request
+// that the branch sends again, the tool calls that it runs again, the
+// approval that it waits for, and whether the copies end the run. At the
+// last copy, a branch that the copies end is a run that ended at once,
+// and any other branch is open.
+func (m *Metrics) copied(e fw.Event, st *runMetrics) {
+	switch e.Type {
+	case fw.EvRunStarted:
+		var d fw.RunStartedData
+		if e.Decode(&d) == nil {
+			for _, t := range d.Tools {
+				st.known[t] = true
+			}
+		}
+	case fw.EvTurnStarted:
+		st.keptTurn = true
+	case fw.EvTurnFinished:
+		st.keptTurn = false
+	case fw.EvModelRequested:
+		var d fw.ModelRequestedData
+		if e.Decode(&d) == nil {
+			st.model = &modelCall{provider: d.Provider, model: d.Model}
+		}
+	case fw.EvModelResponded:
+		st.model, st.keptTurn = nil, false
+		var d struct {
+			Content []struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"content"`
+		}
+		clear(st.uses)
+		if e.Decode(&d) == nil {
+			for _, b := range d.Content {
+				if b.Type == fw.BlockToolUse {
+					st.uses[b.ID] = b.Name
+				}
+			}
+		}
+	case fw.EvToolRequested:
+		var d fw.ToolRequestedData
+		if e.Decode(&d) == nil {
+			st.calls[d.CallID] = labelOr(d.Tool)
+			st.known[d.Tool] = true
+		}
+	case fw.EvToolResponded:
+		var d fw.ToolRespondedData
+		if e.Decode(&d) == nil {
+			delete(st.calls, d.CallID)
+		}
+	case fw.EvApprovalRequested:
+		var d fw.ApprovalRequestedData
+		if e.Decode(&d) == nil {
+			if _, ok := st.approvals[d.ApprovalID]; !ok {
+				st.approvals[d.ApprovalID] = eventTime(e)
+				m.approvalsPending.WithLabelValues(st.agent).Inc()
+			}
+		}
+	case fw.EvApprovalDecided:
+		var d fw.ApprovalDecidedData
+		if e.Decode(&d) == nil {
+			if _, ok := st.approvals[d.ApprovalID]; ok {
+				delete(st.approvals, d.ApprovalID)
+				m.approvalsPending.WithLabelValues(st.agent).Dec()
+			}
+		}
+	case fw.EvRunFinished:
+		st.keptEnd = outcomeOf(e)
+		st.model = nil
+	case fw.EvMessageReceived, fw.EvRunResumed:
+		st.keptEnd = ""
+	}
+	if e.Seq != st.kept {
+		return
+	}
+	if st.keptEnd != "" {
+		m.endRun(e.Subject, st, st.keptEnd, eventTime(e))
+		return
+	}
+	if !st.active {
+		st.active = true
+		m.runsActive.WithLabelValues(st.agent).Inc()
+	}
 }
 
 // suspend takes a run out of fw_runs_active. Its pending approvals stay

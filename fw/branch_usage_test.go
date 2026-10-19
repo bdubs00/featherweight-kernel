@@ -234,3 +234,40 @@ func TestBranchMidTurnCountsTheTurn(t *testing.T) {
 		t.Fatalf("ledger usage %+v, status %+v", r.Usage, b.Usage)
 	}
 }
+
+// TestBranchEndsWithAnEventOffTheStream forks a finished run whose last
+// event is a fw.file.changed, which a follow-up with a file appends before
+// its message, and which the lifecycle events of a fleet leave out. The
+// branch did no work, and a consumer of the lifecycle events learns its
+// known usage of zero at the copied fw.run.finished.
+func TestBranchEndsWithAnEventOffTheStream(t *testing.T) {
+	ctx := testCtx(t)
+	l := NewMemLedger()
+	id := NewID()
+	totals := RunUsage{Usage: Usage{InputTokens: 10, OutputTokens: 5}, Turns: 1}
+	seed(t, l, id,
+		MustEvent(id, EvRunQueued, RunQueuedData{Agent: "default", Input: "hi", Origin: OriginCLI}),
+		MustEvent(id, EvRunStarted, RunStartedData{Model: "anthropic/claude-opus-5-5"}),
+		MustEvent(id, EvTurnStarted, TurnData{Turn: 1}),
+		MustEvent(id, EvModelRequested, ModelRequestedData{Provider: "anthropic", Model: "claude-opus-5-5"}),
+		MustEvent(id, EvModelResponded, ModelRespondedData{Content: []Block{Text("hello")}, StopReason: StopEndTurn, Usage: totals.Usage, Provider: "anthropic", Model: "claude-opus-5-5"}),
+		MustEvent(id, EvTurnFinished, TurnData{Turn: 1}),
+		MustEvent(id, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: "hello", Totals: &totals}),
+		MustEvent(id, EvFileChanged, FileChangedData{Op: "create", Path: "in/notes.txt", Size: 3}),
+	)
+	a := newTestAgent(t, newScript().Model(), WithLedger(l))
+	b, err := a.Fork(ctx, id, ForkRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := ledgerEvents(t, a.Ledger(), b.ID)
+	if last := evs[len(evs)-1]; last.Type != EvFileChanged || lifecycleTypes[last.Type] {
+		t.Fatalf("the last kept event is %s", last.Type)
+	}
+	got, err := a.Get(ctx, b.ID)
+	life := ProjectRun(lifecycleOnly(evs))
+	if err != nil || got.State != StateCompleted || got.UsageSeq == 0 || got.Usage != (RunUsage{}) ||
+		life.State != StateCompleted || life.UsageSeq != got.UsageSeq || life.Usage != (RunUsage{}) {
+		t.Fatalf("kernel: %s, usage %+v at %d, %v; lifecycle: %s, usage %+v at %d", got.State, got.Usage, got.UsageSeq, err, life.State, life.Usage, life.UsageSeq)
+	}
+}
