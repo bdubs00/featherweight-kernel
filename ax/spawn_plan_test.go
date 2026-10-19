@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http/httptest"
 	"regexp"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/bdubs00/featherweight-kernel/fw"
 	"github.com/bdubs00/featherweight-kernel/surface/native"
 	v1alpha1 "github.com/google/ax/pkg/apis/v1alpha1"
+	"google.golang.org/grpc"
 )
 
 // dnsLabel is the shape of a Task name.
@@ -259,5 +261,71 @@ func TestSpawnStartsTheRunUnderItsIDInTheChild(t *testing.T) {
 	got, err := s.Find(context.Background(), member, req.ID)
 	if err != nil || got.ID != req.ID {
 		t.Fatalf("Find in the child = %+v, %v", got, err)
+	}
+}
+
+// Find answers at once for a child Task that ax reports as failed: such a
+// Task holds no run that answers, so the kernel abandons it instead of
+// waiting for it to run.
+func TestFindOnAFailedTaskTells(t *testing.T) {
+	ax := newFakeAX(t)
+	s := newSpawnerUnderTest(t, ax, newFakeRouter(t))
+	parent := &fw.Run{ID: "01PARENT"}
+	req := fw.RunRequest{ID: fw.NewID(), Input: "x"}
+	member, err := s.Plan(parent, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, _ := Stashed()
+	atespace, name := Identity(task)
+	child, _ := childName(name, req.ID)
+	if _, err := ax.CreateTask(context.Background(), &v1alpha1.CreateTaskRequest{Task: s.childTask(task, atespace, child, parent, -1)}); err != nil {
+		t.Fatal(err)
+	}
+	ax.mu.Lock()
+	ax.tasks[key(atespace, child)].Status.Phase = "Failed"
+	ax.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := s.Find(ctx, member, req.ID); !errors.Is(err, fw.ErrRunNotFound) {
+		t.Fatalf("Find on a failed Task = %v", err)
+	}
+}
+
+// cutCreateAX creates the Task and answers only when the call ends, as an
+// ax server that is slow under load: the Task exists, and the caller sees
+// an error.
+type cutCreateAX struct{ *fakeAX }
+
+func (f cutCreateAX) CreateTask(ctx context.Context, req *v1alpha1.CreateTaskRequest) (*v1alpha1.Task, error) {
+	t, err := f.fakeAX.CreateTask(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	<-ctx.Done()
+	return t, ctx.Err()
+}
+
+// A create that ends on a cut call, as a Cancel of the child or a shutdown
+// gives, does not leave the Task that the server made.
+func TestSpawnDeletesTheTaskOfACutCreate(t *testing.T) {
+	f := &fakeAX{tasks: map[string]*v1alpha1.Task{}, reads: map[string]int{}, pendingReads: 1}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.addr = lis.Addr().String()
+	srv := grpc.NewServer()
+	v1alpha1.RegisterAXServer(srv, cutCreateAX{f})
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	s := newSpawnerUnderTest(t, f, newFakeRouter(t))
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if _, _, err := s.Spawn(ctx, &fw.Run{ID: "01PARENT"}, fw.RunRequest{ID: fw.NewID(), Input: "x"}); err == nil {
+		t.Fatal("Spawn succeeded")
+	}
+	if tasks := f.created(); len(tasks) != 0 {
+		t.Fatalf("the cut create left the Task %s", tasks[0].GetMetadata().GetName())
 	}
 }

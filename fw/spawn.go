@@ -9,6 +9,9 @@ package fw
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -25,15 +28,18 @@ import (
 // Run.Member carries from then on. The kernel fills req before the call:
 // ID is the id of the child, which the kernel chose and recorded in the
 // ledger of the parent before the call, so the other process must start the
-// child under it; Principal and PrincipalKind name the person of the
-// parent, so the child acts as that person; Budget is the budget of the
-// parent, capped, with Deadline the working time that the parent has left;
-// the metadata key MetaParent holds the id of the parent; and Origin is
-// OriginTool. The spawner adds MetaParentMember, the name of this process,
-// when it knows it. On an error, Spawn leaves no process behind. Get,
-// WaitFor, Decide, and Cancel reach a child at member, with the meaning of
-// the Agent methods of the same names. They return ErrRunNotFound for a
-// child that the process does not know.
+// child under it; IdempotencyKey is empty, because the kernel keeps the key
+// of the start and ID names the child; Principal and PrincipalKind name the
+// person of the parent, so the child acts as that person; Budget is the
+// budget of the parent, capped, with Deadline the working time that the
+// parent has left; the metadata key MetaParent holds the id of the parent;
+// and Origin is OriginTool. The spawner adds MetaParentMember, the name of
+// this process, when it knows it. On an error, Spawn leaves no process
+// behind; the kernel abandons the process that a Planner named as well,
+// because a call that ends early can leave one. Get, WaitFor, Decide, and
+// Cancel reach a child at member, with the meaning of the Agent methods of
+// the same names. They return ErrRunNotFound for a child that the process
+// does not know.
 type Spawner interface {
 	Spawn(ctx context.Context, parent *Run, req RunRequest) (*Run, string, error)
 	Get(ctx context.Context, member, id string) (*Run, error)
@@ -177,28 +183,87 @@ type RunChildData struct {
 	// start under it, which travel to it in MetaMaxDescendants. An event of
 	// an older kernel has none, and the child then counts as one run.
 	Reserved int `json:"reserved,omitempty"`
+	// Kind tells the first record of a child of spawn_task, "spawn", from
+	// the record of a placed branch, "branch". The kernel sets it, so the
+	// metadata of a request, which can name MetaForkOf, cannot make a child
+	// look like a branch. A record of an older kernel has no kind.
+	Kind string `json:"kind,omitempty"`
 }
 
+// The kinds of the first record of a child in another process.
+const (
+	childSpawn  = "spawn"
+	childBranch = "branch"
+)
+
 // placed reports whether the event records a branch that its process has
-// not taken yet. An event of an older kernel has no facts, so it counts as
-// started.
-func (d RunChildData) placed() bool { return !d.Started && d.Metadata[MetaForkOf] != "" }
+// not taken yet. An event of an older kernel has no kind; it counts as a
+// placed branch when its facts carry MetaForkOf, and as started without
+// facts.
+func (d RunChildData) placed() bool { return !d.Started && d.branch() }
+
+// branch reports whether the event records a branch, not a child of
+// spawn_task. An event of an older kernel has no kind; it counts as a
+// branch when its facts carry MetaForkOf.
+func (d RunChildData) branch() bool {
+	if d.Kind != "" {
+		return d.Kind == childBranch
+	}
+	return d.Metadata[MetaForkOf] != ""
+}
 
 // spawning reports whether the event records a child of spawn_task whose
 // start is open: the record that the kernel appends before the spawner
 // creates the process of the child.
 func (d RunChildData) spawning() bool {
-	return !d.Started && d.Metadata[MetaForkOf] == "" && d.Metadata[MetaParent] != ""
+	if d.Started {
+		return false
+	}
+	if d.Kind != "" {
+		return d.Kind == childSpawn
+	}
+	return d.Metadata[MetaForkOf] == "" && d.Metadata[MetaParent] != ""
 }
 
 // queued returns the queued data of a child of spawn_task as the parent
-// knows it before the other process has it, from the facts of the event.
-func (d RunChildData) queued() RunQueuedData {
+// knows it before the other process has it, from the facts of the event,
+// with the parent and the depth of the child.
+func (d RunChildData) queued(parent string, depth int) RunQueuedData {
 	agent := d.Agent
 	if agent == "" {
 		agent = "default"
 	}
-	return RunQueuedData{Agent: agent, Input: d.Input, Origin: OriginTool, Principal: d.Principal, PrincipalKind: d.PrincipalKind, Metadata: d.Metadata}
+	return RunQueuedData{Agent: agent, Input: d.Input, Origin: OriginTool, Principal: d.Principal, PrincipalKind: d.PrincipalKind,
+		Metadata: d.Metadata, Parent: parent, Depth: depth}
+}
+
+// spawnKey returns the idempotency key of the start of a child: the key of
+// the request and a digest of what the child is asked to do. A start that
+// reuses a key for another task, as a provider that repeats the id of a
+// tool call gives, therefore begins a new child. The digest leaves out
+// what the kernel fills in, which differs between two starts of one child.
+func spawnKey(req RunRequest) string {
+	if req.IdempotencyKey == "" {
+		return ""
+	}
+	meta := map[string]string{}
+	for k, v := range req.Metadata {
+		if k != MetaParent && k != MetaParentMember {
+			meta[k] = v
+		}
+	}
+	b, err := json.Marshal(struct {
+		Agent, Input, Instructions string
+		Profile                    *AgentProfile
+		Budget                     *Budget
+		Metadata                   map[string]string
+		Files                      []Block
+	}{req.Agent, req.Input, req.Instructions, req.Profile, req.Budget, meta, req.Files})
+	if err != nil {
+		return req.IdempotencyKey
+	}
+	sum := sha256.Sum256(b)
+	return req.IdempotencyKey + "#" + hex.EncodeToString(sum[:8])
 }
 
 // inheritBatch gives a child the batch of its parent when the request
@@ -293,6 +358,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	if a.cfg.Spawn.Disabled {
 		return nil, fmt.Errorf("%w: spawning is disabled", ErrSpawnLimit)
 	}
+	req.IdempotencyKey = spawnKey(req)
 	if a.spawner == nil {
 		req.Parent = parent
 		return a.start(ctx, req)
@@ -359,8 +425,10 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	}
 	req.Profile = prof
 	// The kernel names the child, and a planner names its process, before
-	// anything exists, so the record of the child comes first.
-	req.ID = NewID()
+	// anything exists, so the record of the child comes first. The key of
+	// the start stays here: a new start after a lost child must not reach
+	// the run of the lost child in a process that holds both.
+	req.ID, req.IdempotencyKey = NewID(), ""
 	member := ""
 	planner, _ := a.spawner.(Planner)
 	if planner != nil {
@@ -372,8 +440,8 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		}
 	}
 	intent := RunChildData{Child: req.ID, Member: member, Principal: req.Principal, PrincipalKind: req.PrincipalKind,
-		Metadata: req.Metadata, Agent: req.Agent, Input: req.Input, Key: key}
-	cq := intent.queued()
+		Metadata: req.Metadata, Agent: req.Agent, Input: req.Input, Key: key, Kind: childSpawn}
+	cq := intent.queued(parent, depth)
 	placeholder, err := a.placeholder(req.ID, cq, a.now())
 	if err != nil {
 		return nil, err
@@ -425,8 +493,8 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	}
 	child, got, err := a.spawner.Spawn(sctx, p.snapshot(), req)
 	if err == nil && (child == nil || child.ID != req.ID || got == "" || (member != "" && got != member)) {
-		if child != nil && got != "" {
-			a.dropChild(planner, got, child.ID)
+		if child != nil && got != "" && got != member {
+			_ = a.dropChild(planner, got, child.ID)
 		}
 		err = fmt.Errorf("fw: the spawner started another child than %s", req.ID)
 	}
@@ -440,24 +508,34 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 			outcome, reason = "canceled", "the start of the child in "+where+" was canceled"
 		}
 		a.log.Warn("child did not start in another process", "run", parent, "child", req.ID, "member", member, "outcome", outcome, "error", err)
-		a.recordBranchEnd(req.ID, parent, cq, outcome, reason)
-		k.mu.Lock()
-		close(start.done)
-		k.mu.Unlock()
+		// A cut start can leave the process that the planner named, for
+		// example a Task that the server created while the call ended.
+		var aerr error
+		if planner != nil {
+			aerr = a.abandonNow(planner, req.ID, member)
+		}
+		a.endStart(p, intent, start, outcome, reason, aerr)
 		return nil, err
 	}
 	ref.member = got
 	if err := a.recordStart(p, RunChildData{Child: req.ID, Member: got, Started: true}); err != nil {
 		// A parent that cannot record the start of its child cannot answer
 		// for the child later. The child ends here, so it does not run for
-		// nobody; the record of the start stays on disk, so a restart finds
+		// nobody; the record of the child stays on disk, so a restart finds
 		// whatever the end leaves.
-		a.dropChild(planner, got, req.ID)
-		a.recordBranchEnd(req.ID, parent, cq, "failed", "the parent did not record the start of the child in "+got+": "+err.Error())
-		k.mu.Lock()
-		close(start.done)
-		k.mu.Unlock()
+		aerr := a.dropChild(planner, got, req.ID)
+		intent.Member = got
+		a.endStart(p, intent, start, "failed", "the parent did not record the start of the child in "+got+": "+err.Error(), aerr)
 		return nil, fmt.Errorf("fw: record the start of the child %s in %s: %w", req.ID, got, err)
+	}
+	if sctx.Err() != nil {
+		// Cancel ended the start after the child took its run. The child is
+		// recorded, and the cancel goes on to it.
+		cctx, cancel := context.WithTimeout(k.ctx, time.Minute)
+		if err := a.spawner.Cancel(cctx, got, req.ID); err != nil {
+			a.log.Warn("cancel a child whose start was canceled", "run", parent, "child", req.ID, "member", got, "error", err)
+		}
+		cancel()
 	}
 	k.mu.Lock()
 	k.remote[req.ID] = ref
@@ -467,6 +545,25 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	a.decorateChild(child, ref)
 	a.observe(req.ID, ref, child)
 	return child, nil
+}
+
+// endStart ends a start that did not give a child: it records the child
+// here as a run with the outcome and the reason, once the planner abandoned
+// the process of the child. When the abandon failed (aerr), the process can
+// still exist, so the child stays a child of the parent and the look of a
+// restart takes over at once: it removes the process before it records the
+// end, however many tries that takes.
+func (a *Agent) endStart(p *runState, d RunChildData, start *branchStart, outcome, reason string, aerr error) {
+	k := a.k
+	if aerr != nil && d.Member != "" {
+		a.log.Warn("the process of a child that did not start stays for a look", "run", p.id, "child", d.Child, "member", d.Member, "error", aerr)
+		a.findChild(p, d, outcome, reason)
+	} else {
+		a.recordBranchEnd(d.Child, p.id, d.queued(p.id, p.depth+1), outcome, reason)
+	}
+	k.mu.Lock()
+	close(start.done)
+	k.mu.Unlock()
 }
 
 // startRecordAttempts is how many times the kernel appends the record of a
@@ -491,16 +588,34 @@ func (a *Agent) recordStart(rs *runState, d RunChildData) error {
 }
 
 // dropChild ends a child that this process cannot keep: it cancels the run
-// at member and abandons the process, when the spawner is a Planner.
-func (a *Agent) dropChild(planner Planner, member, id string) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+// at member and abandons the process, when the spawner is a Planner. It
+// returns the error of the abandon.
+func (a *Agent) dropChild(planner Planner, member, id string) error {
+	ctx, cancel := context.WithTimeout(a.k.ctx, time.Minute)
 	defer cancel()
 	if err := a.spawner.Cancel(ctx, member, id); err != nil {
 		a.log.Warn("cancel a child that this process cannot keep", "child", id, "member", member, "error", err)
 	}
-	if planner != nil {
-		a.abandon(ctx, planner, id, member)
+	if planner == nil {
+		return nil
 	}
+	return a.abandonNow(planner, id, member)
+}
+
+// abandonNow abandons the process at member of the child id, for at most a
+// minute and not past the life of the kernel, so no call to the spawner
+// outlives Close. It returns the error of the abandon.
+func (a *Agent) abandonNow(planner Planner, id, member string) error {
+	if member == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(a.k.ctx, time.Minute)
+	defer cancel()
+	err := planner.Abandon(ctx, member)
+	if err != nil {
+		a.log.Warn("abandon the process of a child", "child", id, "member", member, "error", err)
+	}
+	return err
 }
 
 // abandoner removes the process of a child that never got its run. Planner
@@ -578,18 +693,19 @@ func (a *Agent) spawnedBefore(ctx context.Context, parent, key string) (*Run, bo
 	}
 }
 
-// findChild looks, after a restart, for a child of spawn_task whose start
-// was open when this process went away. The Planner looks for the child at
-// its member in the background. A child that exists is recorded as
-// started. A child that does not is recorded here as failed, with the
-// reason, and its process is abandoned. While the planner cannot tell, the
-// child stays a child of the parent and the look goes on, so a child that
-// can exist is never removed. Until the look ends, the parent answers Get
-// for the child, and WaitFor, Cancel, Decide, and a start under the same
-// key wait for the end.
-func (a *Agent) findChild(parent *runState, d RunChildData) {
+// findChild looks for a child of spawn_task whose start was open when this
+// process went away, or whose start failed and left a process that did
+// not go. The Planner looks for the child at its member in the background
+// (see find). A child that exists is recorded as started. A child that no
+// process has is recorded here with the outcome and the reason why, with
+// the answer of the planner, once its process is abandoned. While the
+// planner cannot tell, the child stays a child of the parent and the look
+// goes on, up to lookLimit. Until the look ends, the parent answers Get for
+// the child, and WaitFor, Cancel, Decide, and a start under the same key
+// wait for the end.
+func (a *Agent) findChild(parent *runState, d RunChildData, outcome, why string) {
 	k := a.k
-	q := d.queued()
+	q := d.queued(parent.id, parent.depth+1)
 	planner, ok := a.spawner.(Planner)
 	switch {
 	case a.spawner != nil && d.Member == "":
@@ -618,40 +734,73 @@ func (a *Agent) findChild(parent *runState, d RunChildData) {
 	k.mu.Lock()
 	k.remote[d.Child] = ref
 	k.mu.Unlock()
-	go a.find(ctx, planner, ref, d.Child, q)
+	go a.find(ctx, planner, ref, d.Child, q, outcome, why)
 }
 
+// lookLimit bounds the look for a child, counted from the record of the
+// child, which the id of the child dates. Past it, a look that cannot tell
+// gives up, so a lasting error, such as a token that the router refuses,
+// does not keep the look going forever, and the bound holds over restarts.
+const lookLimit = 15 * time.Minute
+
 // find asks the planner for a child until it tells, or until this process
-// shuts down. Each look that cannot tell waits longer, up to a minute.
-func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id string, q RunQueuedData) {
+// shuts down. Each look that cannot tell waits longer, up to a minute. A
+// child that no process has is abandoned first and recorded as failed
+// after, so a restart between the two looks again and finds nothing to
+// remove; a failed abandon is tried again. Past lookLimit, the look gives
+// up: it abandons the process, because a child that the parent cannot
+// reach can never report to it, and records the child as failed with the
+// reason, so a person sees what happened. Every call to the spawner ends
+// before the look ends, so none outlives Close.
+func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id string, q RunQueuedData, outcome, why string) {
 	k := a.k
 	defer ref.start.cancel()
-	end := func() {
+	done := func() {
 		k.mu.Lock()
 		close(ref.start.done)
 		k.mu.Unlock()
 	}
+	at, ok := IDTime(id)
+	if !ok {
+		at = a.now()
+	}
+	deadline := at.Add(lookLimit)
 	wait := time.Second
 	for {
 		_, err := planner.Find(ctx, ref.member, id)
-		switch {
-		case ctx.Err() != nil:
+		if ctx.Err() != nil {
 			// This process shuts down. The record of the child stays as it
 			// is, and the next start looks again.
-			end()
+			done()
 			return
-		case err == nil:
-			a.adoptChild(ref, id)
-			end()
+		}
+		if err == nil {
+			a.adoptChild(ctx, ref, id)
+			done()
 			return
-		case errors.Is(err, ErrRunNotFound):
-			a.log.Warn("child lost in a restart", "run", ref.parent, "child", id, "member", ref.member)
-			a.recordBranchEnd(id, ref.parent, q, "failed", "this process restarted before the child run started in "+ref.member)
-			end()
-			actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-			a.abandon(actx, planner, id, ref.member)
-			cancel()
-			return
+		}
+		missing := errors.Is(err, ErrRunNotFound)
+		end, reason := outcome, why+": "+err.Error()
+		if !missing {
+			end, reason = "failed", "this process could not reach "+ref.member+" to look for the child: "+err.Error()
+		}
+		late := !a.now().Before(deadline)
+		if missing || late {
+			aerr := a.abandonNow(planner, id, ref.member)
+			if ctx.Err() != nil {
+				done()
+				return
+			}
+			if aerr == nil || late {
+				if aerr != nil {
+					reason += "; its process could not be removed: " + aerr.Error()
+				}
+				a.log.Warn("child lost in a restart", "run", ref.parent, "child", id, "member", ref.member, "reason", reason)
+				a.recordBranchEnd(id, ref.parent, q, end, reason)
+				done()
+				return
+			}
+			err = aerr
 		}
 		a.log.Warn("look for a child after a restart", "run", ref.parent, "child", id, "member", ref.member, "retryIn", wait, "error", err)
 		select {
@@ -663,9 +812,11 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 }
 
 // adoptChild records a child that the look after a restart found as
-// started, so the next restart does not look again. A parent that was
-// canceled cancels the child, as it cancels its other children.
-func (a *Agent) adoptChild(ref childRef, id string) {
+// started, so the next restart does not look again. A parent that ended
+// cancels the child: the call that started the child never returned, so
+// nothing reads the result of the child. The process of the child stays,
+// as for any child that ended, with the ledger of its run.
+func (a *Agent) adoptChild(ctx context.Context, ref childRef, id string) {
 	rs, err := a.k.lookup(ref.parent)
 	if err != nil {
 		return
@@ -674,11 +825,11 @@ func (a *Agent) adoptChild(ref childRef, id string) {
 		a.log.Error("record a child found after a restart", "run", ref.parent, "child", id, "member", ref.member, "error", err)
 	}
 	a.log.Info("child found after a restart", "run", ref.parent, "child", id, "member", ref.member)
-	if rs.snapshot().State == StateCanceled {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	if rs.snapshot().State.Terminal() {
+		cctx, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
-		if err := a.spawner.Cancel(ctx, ref.member, id); err != nil {
-			a.log.Warn("cancel a child of a canceled run", "run", ref.parent, "child", id, "member", ref.member, "error", err)
+		if err := a.spawner.Cancel(cctx, ref.member, id); err != nil {
+			a.log.Warn("cancel a child of a run that ended", "run", ref.parent, "child", id, "member", ref.member, "error", err)
 		}
 	}
 }

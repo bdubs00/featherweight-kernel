@@ -127,6 +127,36 @@ func (s *taskSpawner) Abandon(_ context.Context, member string) error {
 	return nil
 }
 
+// deadSpawner is the spawner of a process that can die: after the cut,
+// nothing that the process asks of the platform has an effect.
+type deadSpawner struct {
+	*taskSpawner
+	cut atomic.Bool
+}
+
+var errGone = errors.New("the process is gone")
+
+func (d *deadSpawner) Find(ctx context.Context, member, id string) (*fw.Run, error) {
+	if d.cut.Load() {
+		return nil, errGone
+	}
+	return d.taskSpawner.Find(ctx, member, id)
+}
+
+func (d *deadSpawner) Cancel(ctx context.Context, member, id string) error {
+	if d.cut.Load() {
+		return errGone
+	}
+	return d.taskSpawner.Cancel(ctx, member, id)
+}
+
+func (d *deadSpawner) Abandon(ctx context.Context, member string) error {
+	if d.cut.Load() {
+		return errGone
+	}
+	return d.taskSpawner.Abandon(ctx, member)
+}
+
 // cutLedger is the ledger of a process that can die: after the cut, no
 // event reaches the disk.
 type cutLedger struct {
@@ -195,9 +225,10 @@ func TestSpawnTaskRerunAfterARestartTakesTheSameChild(t *testing.T) {
 	sp := newTaskSpawner(other)
 	stopped, release := sp.stopAfterStart()
 	cut := &cutLedger{Ledger: openRunsAt(t, root)}
+	dead := &deadSpawner{taskSpawner: sp}
 	first := newScripted()
 	first.say("parent", callTools(use("c1", "spawn_task", `{"input":"the subtask"}`)))
-	a := newSpawnAgent(t, first.Model(), fw.WithLedger(cut), fw.WithSpawner(sp))
+	a := newSpawnAgent(t, first.Model(), fw.WithLedger(cut), fw.WithSpawner(dead))
 	parent, err := a.Start(ctx, "parent")
 	if err != nil {
 		t.Fatal(err)
@@ -208,6 +239,7 @@ func TestSpawnTaskRerunAfterARestartTakesTheSameChild(t *testing.T) {
 		t.Fatal("the child never started")
 	}
 	cut.cut.Store(true) // the parent process dies here
+	dead.cut.Store(true)
 	release()
 
 	second := newScripted()

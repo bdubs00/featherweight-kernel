@@ -424,6 +424,10 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 			problem(w, r, http.StatusForbidden, "only the static token or a workload can name the id of a run")
 			return
 		}
+		if _, ok := fw.IDTime(body.ID); !ok {
+			problem(w, r, http.StatusBadRequest, "the field id is not an id of a run")
+			return
+		}
 	}
 	if len(body.Instructions) > maxInstructionBytes {
 		problem(w, r, http.StatusBadRequest, fmt.Sprintf("the field instructions is longer than %d bytes", maxInstructionBytes))
@@ -981,7 +985,7 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, r, http.StatusNotFound, err.Error())
 	case errors.Is(err, fw.ErrInvalidRequest):
 		problem(w, r, http.StatusBadRequest, strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
-	case errors.Is(err, fw.ErrSpawnLimit):
+	case errors.Is(err, fw.ErrSpawnLimit), errors.Is(err, fw.ErrRunExists):
 		problem(w, r, http.StatusConflict, err.Error())
 	case errors.Is(err, fw.ErrNoPendingApproval):
 		problem(w, r, http.StatusConflict, err.Error())

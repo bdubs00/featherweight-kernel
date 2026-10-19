@@ -17,25 +17,27 @@ import (
 )
 
 // rebuild loads every run of the ledger into the cache. It returns the runs
-// whose state is not terminal, oldest first. The state, not the last event,
-// decides: metadata that arrives after fw.run.finished leaves a run
-// finished, and a follow-up message opens it again. The tree of each run
-// comes back with it: its children in this process from their
-// fw.run.queued, its children in other processes with their shares from
-// fw.run.child, and what those last reported from fw.child.reported, so
-// the usage and the size of the tree count again before the first read.
-func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
+// whose state is not terminal, oldest first, and what recover does once the
+// egress runs. The state, not the last event, decides: metadata that
+// arrives after fw.run.finished leaves a run finished, and a follow-up
+// message opens it again. The tree of each run comes back with it: its
+// children in this process from their fw.run.queued, its children in
+// other processes with their shares from fw.run.child, and what those last
+// reported from fw.child.reported, so the usage and the size of the tree
+// count again before the first read.
+func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 	k := a.k
 	var unfinished []*runState
-	var lost []lostBranch
+	var rec recovery
+	started := map[string]bool{} // the children in other processes that started there
 	reports := map[string]ChildReportedData{}
 	for id, err := range a.ledger.Runs(ctx) {
 		if err != nil {
-			return nil, fmt.Errorf("fw: list runs: %w", err)
+			return nil, rec, fmt.Errorf("fw: list runs: %w", err)
 		}
 		evs, err := readAll(ctx, a.ledger, id)
 		if err != nil {
-			return nil, err
+			return nil, rec, err
 		}
 		if len(evs) == 0 {
 			continue
@@ -88,10 +90,11 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		}
 		for _, d := range remote {
 			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1, key: d.Key,
-				reserved: d.Reserved, branch: d.Metadata[MetaForkOf] != ""}
+				reserved: d.Reserved, branch: d.branch()}
 			k.kids[id]++
+			started[d.Child] = d.Started
 			if d.placed() || d.spawning() {
-				lost = append(lost, lostBranch{src: rs, data: d})
+				rec.lost = append(rec.lost, lostBranch{src: rs, data: d})
 			}
 		}
 		if key := q.Metadata["idempotencyKey"]; key != "" {
@@ -102,14 +105,43 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 			unfinished = append(unfinished, rs)
 		}
 	}
-	// A branch that never reached its process is recorded here as failed
-	// (fork.go), after the source recorded it as a child. The record here
-	// wins, so the child is not asked about a run that it does not have.
+	// A branch or a child that never reached its process is recorded here
+	// as failed (fork.go, spawn.go), after the parent recorded it as a
+	// child. The record here stands in for it and wins, so the child is not
+	// asked about a run that it does not have. A child that started in its
+	// process has no such record: a run of this process under its id is not
+	// the child, so the child wins, and the run is set aside.
 	k.mu.Lock()
 	for id, ref := range k.remote {
-		if _, ok := k.runs[id]; ok {
-			delete(k.remote, id)
-			k.kids[ref.parent]--
+		rs, ok := k.runs[id]
+		if !ok {
+			continue
+		}
+		if rs.parent != "" {
+			k.kids[rs.parent]--
+		}
+		if started[id] {
+			delete(k.runs, id)
+			for key, v := range k.idem {
+				if v == id {
+					delete(k.idem, key)
+				}
+			}
+			a.log.Error("a run of this process has the id of a child in another process; the child wins", "run", id, "parent", ref.parent, "member", ref.member)
+			continue
+		}
+		rs.standIn = true
+		delete(k.remote, id)
+		k.kids[ref.parent]--
+	}
+	kept := unfinished[:0]
+	for _, rs := range unfinished {
+		switch {
+		case k.runs[rs.id] != rs:
+		case rs.standIn:
+			rec.cut = append(rec.cut, rs)
+		default:
+			kept = append(kept, rs)
 		}
 	}
 	for id, d := range reports {
@@ -117,14 +149,37 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 			k.reports[id] = &childReport{tree: d.TreeUsage, state: d.State, open: d.Open, rec: d}
 		}
 	}
+	unfinished = kept
 	k.mu.Unlock()
-	// A branch that was placed in another process but never started when
-	// this process went away is lost: no process has it, and nothing will
-	// send it. It is recorded here as failed, and its process is abandoned.
-	// A child of spawn_task whose start was open can exist, because its
-	// spawner was on its way to start it, so this process looks for it
-	// (spawn.go).
-	for _, l := range lost {
+	sort.SliceStable(unfinished, func(i, j int) bool {
+		return unfinished[i].run.CreatedAt.Before(unfinished[j].run.CreatedAt)
+	})
+	return unfinished, rec, nil
+}
+
+// recovery is what a rebuild leaves for the start of the kernel, which does
+// it once the egress runs, so the front of a fleet sees every record that
+// it appends.
+type recovery struct {
+	lost []lostBranch // branches and children whose start was open
+	cut  []*runState  // records of a child that a restart cut before their end
+}
+
+// recover ends the records that a restart cut, and handles every branch
+// and child whose start was open when this process went away. A branch
+// that was placed in another process but never started is lost: no process
+// has it, and nothing will send it. It is recorded here as failed, and its
+// process is abandoned. A child of spawn_task whose start was open can
+// exist, because its spawner was on its way to start it, so this process
+// looks for it (spawn.go).
+func (a *Agent) recover(rec recovery) {
+	k := a.k
+	for _, rs := range rec.cut {
+		if _, err := a.emit(nil, rs, EvRunFinished, RunFinishedData{Outcome: "failed", Error: "the record of a child that never ran lost its end in a restart"}); err != nil {
+			a.log.Error("end the record of a child", "run", rs.id, "error", err)
+		}
+	}
+	for _, l := range rec.lost {
 		k.mu.Lock()
 		_, pending := k.remote[l.data.Child]
 		k.mu.Unlock()
@@ -133,13 +188,9 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		case l.data.placed():
 			a.recordLostBranch(l.src, l.data)
 		default:
-			a.findChild(l.src, l.data)
+			a.findChild(l.src, l.data, "failed", "this process restarted before the child run started in "+l.data.Member)
 		}
 	}
-	sort.SliceStable(unfinished, func(i, j int) bool {
-		return unfinished[i].run.CreatedAt.Before(unfinished[j].run.CreatedAt)
-	})
-	return unfinished, nil
 }
 
 // lostBranch is a branch that its source placed in another process and

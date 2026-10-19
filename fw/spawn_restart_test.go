@@ -30,6 +30,11 @@ type crashSpawner struct {
 	spawns    int             // the calls of Spawn
 	abandoned []string        // the members that Abandon removed
 	findErr   error           // Find fails with it, as a platform that does not answer
+
+	abandons     int           // the calls of Abandon
+	abandonFails int           // that many calls of Abandon fail first
+	abandonGate  chan struct{} // when set, Abandon waits for it
+	abandonAt    chan struct{} // closed when an Abandon waits at the gate
 }
 
 // The boundaries of a start where a test stops Spawn.
@@ -109,12 +114,8 @@ func (s *crashSpawner) Spawn(ctx context.Context, _ *Run, req RunRequest) (*Run,
 	s.created = append(s.created, member)
 	s.mu.Unlock()
 	if s.pause(ctx, beforeRun) {
-		// A start that ends here leaves no process behind.
-		s.mu.Lock()
-		if ctx.Err() != nil {
-			delete(s.tasks, member)
-		}
-		s.mu.Unlock()
+		// A start that ends here leaves its process, as the ax driver can
+		// when a create ends on a cut call: the kernel abandons it.
 		return nil, "", errGone
 	}
 	r, err := s.other.Start(ctx, req.Input, WithRequest(req))
@@ -181,7 +182,27 @@ func (s *crashSpawner) Cancel(ctx context.Context, member, id string) error {
 	return s.other.Cancel(ctx, id)
 }
 
-func (s *crashSpawner) Abandon(_ context.Context, member string) error {
+func (s *crashSpawner) Abandon(ctx context.Context, member string) error {
+	s.mu.Lock()
+	s.abandons++
+	gate, at := s.abandonGate, s.abandonAt
+	s.abandonGate = nil
+	fail := s.abandonFails > 0
+	if fail {
+		s.abandonFails--
+	}
+	s.mu.Unlock()
+	if gate != nil {
+		close(at)
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if fail {
+		return errors.New("the platform refused the delete")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.tasks, member)
@@ -203,6 +224,49 @@ func (s *crashSpawner) counts() (spawns int, created, abandoned []string) {
 	return s.spawns, append([]string(nil), s.created...), append([]string(nil), s.abandoned...)
 }
 
+// deadSpawner is the spawner of a process that can die: after the cut,
+// nothing that the process asks of the platform has an effect, and the
+// call that was in flight ends with an error.
+type deadSpawner struct {
+	*crashSpawner
+	cut atomic.Bool
+}
+
+func (d *deadSpawner) gone() error {
+	if d.cut.Load() {
+		return errGone
+	}
+	return nil
+}
+
+func (d *deadSpawner) Find(ctx context.Context, member, id string) (*Run, error) {
+	if err := d.gone(); err != nil {
+		return nil, err
+	}
+	return d.crashSpawner.Find(ctx, member, id)
+}
+
+func (d *deadSpawner) Get(ctx context.Context, member, id string) (*Run, error) {
+	if err := d.gone(); err != nil {
+		return nil, err
+	}
+	return d.crashSpawner.Get(ctx, member, id)
+}
+
+func (d *deadSpawner) Cancel(ctx context.Context, member, id string) error {
+	if err := d.gone(); err != nil {
+		return err
+	}
+	return d.crashSpawner.Cancel(ctx, member, id)
+}
+
+func (d *deadSpawner) Abandon(ctx context.Context, member string) error {
+	if err := d.gone(); err != nil {
+		return err
+	}
+	return d.crashSpawner.Abandon(ctx, member)
+}
+
 // cutLedger is the ledger of a process that can die: after the cut, no
 // event reaches the disk.
 type cutLedger struct {
@@ -218,12 +282,17 @@ func (l *cutLedger) Append(ctx context.Context, e Event) (uint64, error) {
 }
 
 // spawnTool starts a child of its run as spawn_task does, keyed by its
-// tool call, and waits for the child to end.
+// tool call, with the metadata of its input, and waits for the child to
+// end.
 func spawnTool() Tool {
 	spec := ToolSpec{Name: "spawn", Description: "start a child", InputSchema: json.RawMessage(`{"type":"object"}`)}
-	return NewTool(spec, func(ctx context.Context, _ json.RawMessage) (ToolResult, error) {
+	return NewTool(spec, func(ctx context.Context, raw json.RawMessage) (ToolResult, error) {
+		var in struct {
+			Metadata map[string]string `json:"metadata"`
+		}
+		_ = json.Unmarshal(raw, &in)
 		a, info := AgentFrom(ctx), RunInfoFrom(ctx)
-		child, err := a.SpawnChild(ctx, info.RunID, NewRunRequest("child work", WithIdempotencyKey("spawn:"+info.RunID+":"+info.CallID)))
+		child, err := a.SpawnChild(ctx, info.RunID, NewRunRequest("child work", WithIdempotencyKey("spawn:"+info.RunID+":"+info.CallID), WithMetadata(in.Metadata)))
 		if err != nil {
 			return ErrorResult("spawn: " + err.Error()), nil
 		}
@@ -278,15 +347,23 @@ func eventually(t *testing.T, what string, ok func() bool) {
 
 // crashDuringSpawn starts a parent run whose spawn tool stops at the
 // boundary at, kills the parent process there, and opens the ledger in a
-// new process. It returns the new process, its model script, the parent
+// new process with the options. It returns the new process, the parent
 // run, and the ledger of the new process.
-func crashDuringSpawn(t *testing.T, sp *crashSpawner, at string) (*Agent, string, Ledger) {
+func crashDuringSpawn(t *testing.T, sp *crashSpawner, at string, opts ...Option) (*Agent, string, Ledger) {
+	t.Helper()
+	return crashDuringSpawnOf(t, sp, at, `{}`, opts...)
+}
+
+// crashDuringSpawnOf is crashDuringSpawn for a spawn call with the input of
+// the tool.
+func crashDuringSpawnOf(t *testing.T, sp *crashSpawner, at, input string, opts ...Option) (*Agent, string, Ledger) {
 	t.Helper()
 	ctx := testCtx(t)
 	root := filepath.Join(t.TempDir(), "runs")
 	cut := &cutLedger{Ledger: openFileLedgerAt(t, root)}
+	dead := &deadSpawner{crashSpawner: sp}
 	reached, release := sp.stop(at)
-	a := newTestAgent(t, newScript(callTools(use("c1", "spawn", `{}`))).Model(), WithLedger(cut), WithSpawner(sp), WithTools(spawnTool()))
+	a := newTestAgent(t, newScript(callTools(use("c1", "spawn", input))).Model(), WithLedger(cut), WithSpawner(dead), WithTools(spawnTool()))
 	parent, err := a.Start(ctx, "parent work")
 	if err != nil {
 		t.Fatal(err)
@@ -297,12 +374,13 @@ func crashDuringSpawn(t *testing.T, sp *crashSpawner, at string) (*Agent, string
 		t.Fatalf("Spawn never got to the boundary %q", at)
 	}
 	// The parent process dies here: nothing it does from now on reaches
-	// the disk, and its spawner call ends.
+	// the disk or the platform, and its spawner call ends.
 	cut.cut.Store(true)
+	dead.cut.Store(true)
 	release()
 
 	l := openFileLedgerAt(t, root)
-	b := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithLedger(l), WithSpawner(sp), WithTools(spawnTool()))
+	b := newTestAgent(t, newScript(endTurn("parent done")).Model(), append([]Option{WithLedger(l), WithSpawner(sp), WithTools(spawnTool())}, opts...)...)
 	return b, parent.ID, l
 }
 
@@ -394,9 +472,15 @@ func TestSpawnSurvivesACrashAtEveryBoundary(t *testing.T) {
 			if len(list) != 1 || list[0].Output != "child done" || list[0].ID == lost {
 				t.Fatalf("the child process holds %+v", list)
 			}
+			// The parent lists the lost child as failed, beside the child of
+			// the rerun.
 			kids, err := b.Children(ctx, parent)
-			if err != nil || len(kids) != 1 || kids[0].ID != list[0].ID || kids[0].State != StateCompleted {
-				t.Fatalf("children of the parent = %+v, %v", kids, err)
+			states := map[string]RunState{}
+			for _, k := range kids {
+				states[k.ID] = k.State
+			}
+			if err != nil || len(kids) != 2 || states[list[0].ID] != StateCompleted || states[lost] != StateFailed {
+				t.Fatalf("children of the parent = %v, %v", states, err)
 			}
 			if spawns, _, _ := sp.counts(); spawns != 2 {
 				t.Fatalf("Spawn ran %d times, want one per attempt", spawns)
@@ -472,7 +556,9 @@ func TestSpawnLookGoesOnWhileTheSpawnerCannotTell(t *testing.T) {
 	if err != nil || r.State != StateQueued || r.Member != member || r.Parent != parent {
 		t.Fatalf("the child while the spawner cannot tell = %+v, %v", r, err)
 	}
-	if b.Starting() != 1 {
+	// The look goes on at the next start, so it does not keep the process
+	// awake.
+	if b.Starting() != 0 {
 		t.Fatalf("Starting = %d while the parent looks for its child", b.Starting())
 	}
 	if spawns, _, abandoned := sp.counts(); spawns != 1 || len(abandoned) != 0 {

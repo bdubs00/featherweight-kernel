@@ -65,6 +65,7 @@ const (
 	maxAnswer      = 4 << 20
 	phaseRunning   = "Running"
 	phaseSuspended = "Suspended"
+	phaseFailed    = "Failed"
 )
 
 // droppedEnv names the variables of the parent that a child does not get:
@@ -227,10 +228,10 @@ func (s *Spawner) Plan(_ *fw.Run, req fw.RunRequest) (string, error) {
 
 // Find implements fw.Planner: after a restart of this process, it looks for
 // the child run id in the child Task at member. A Task that does not exist,
-// or that ax deletes, holds no run. A Task that does not run, because this
-// process went away before it resumed the Task, runs again for the look,
-// as Spawn would have made it run, so a Task without the run answers that
-// it does not have it.
+// that ax deletes, or that failed holds no run that answers. A Task that
+// does not run, because this process went away before it resumed the Task,
+// runs again for the look, as Spawn would have made it run, so a Task
+// without the run answers that it does not have it.
 func (s *Spawner) Find(ctx context.Context, member, id string) (*fw.Run, error) {
 	actor, err := actorOf(member)
 	if err != nil {
@@ -248,8 +249,11 @@ func (s *Spawner) Find(ctx context.Context, member, id string) (*fw.Run, error) 
 	if err != nil {
 		return nil, fmt.Errorf("ax: read the child Task %s: %w", actor, err)
 	}
-	if t.GetStatus().GetPhase() == v1alpha1.PhaseTerminating {
+	switch t.GetStatus().GetPhase() {
+	case v1alpha1.PhaseTerminating:
 		return nil, fmt.Errorf("%w: the child Task %s is being deleted", fw.ErrRunNotFound, actor)
+	case phaseFailed:
+		return nil, fmt.Errorf("%w: the child Task %s failed", fw.ErrRunNotFound, actor)
 	}
 	if t.GetStatus().GetPhase() != phaseRunning {
 		if err := s.awaitRunning(ctx, client, atespace, child); err != nil {
@@ -492,10 +496,16 @@ func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run, m
 
 // createTask creates a child Task and resumes it. ax creates every Task
 // suspended until a caller resumes it, so a Task that nobody resumes never
-// runs.
+// runs. A create that fails can still have made the Task, for example when
+// the call ends while the server works on it, so the Task is deleted, with
+// a context of its own. A Task of that name that exists is not one that
+// this call made, and it stays.
 func (s *Spawner) createTask(ctx context.Context, client v1alpha1.AXClient, spec *v1alpha1.Task) error {
 	atespace, name := spec.GetMetadata().GetAtespace(), spec.GetMetadata().GetName()
 	if _, err := client.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: spec}); err != nil {
+		if status.Code(err) != codes.AlreadyExists {
+			s.deleteTask(client, atespace, name)
+		}
 		return fmt.Errorf("ax: create the child Task %s/%s: %w", atespace, name, err)
 	}
 	if _, err := client.ResumeTask(ctx, &v1alpha1.ResumeTaskRequest{Atespace: atespace, Name: name}); err != nil {
@@ -534,13 +544,14 @@ func (s *Spawner) awaitRunning(ctx context.Context, client v1alpha1.AXClient, at
 
 // deleteTask removes a child Task that never got its run. The connection to
 // the ax server can be stale after a suspend of this Task, so it tries
-// three times.
+// three times. A Task that does not exist is gone already.
 func (s *Spawner) deleteTask(client v1alpha1.AXClient, atespace, name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		if _, err = client.DeleteTask(ctx, &v1alpha1.DeleteTaskRequest{Atespace: atespace, Name: name}); err == nil {
+		_, err = client.DeleteTask(ctx, &v1alpha1.DeleteTaskRequest{Atespace: atespace, Name: name})
+		if err == nil || status.Code(err) == codes.NotFound {
 			return
 		}
 		if sleep(ctx, 2*time.Second) != nil {

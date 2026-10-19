@@ -43,6 +43,10 @@ var (
 	// maxTokens, maxCostUSD, or maxToolCalls of the parent or of one of its
 	// ancestors (see Budget).
 	ErrTreeBudget = errors.New("fw: the budget of the run tree is used up")
+	// ErrRunExists is returned when a request names the id of a run that
+	// this process knows already: a run of this process, a child of one in
+	// another process, or a run of the ledger. A surface answers 409.
+	ErrRunExists = errors.New("fw: a run with that id exists")
 )
 
 // OriginKernel marks a message that the kernel adds itself, such as the
@@ -118,6 +122,10 @@ type runState struct {
 	held   bool
 	lent   bool
 	parked int
+	// standIn marks the record of a child or a branch that never got its
+	// run in another process (fork.go). Nothing drives it: it takes no
+	// message, no decision, and no branch, and a restart does not resume it.
+	standIn bool
 
 	emitMu    sync.Mutex
 	events    []Event // the full log while a driver holds a reference
@@ -182,13 +190,14 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		k.childSem = make(chan struct{}, n)
 	}
 	a.k = k
-	unfinished, err := a.rebuild(ctx)
+	unfinished, rec, err := a.rebuild(ctx)
 	if err != nil {
 		cancel()
 		return err
 	}
 	a.startFollow()
 	a.startEgress()
+	a.recover(rec)
 	if !a.noResume {
 		a.resume(unfinished)
 	}
@@ -288,6 +297,56 @@ func (a *Agent) shutdownKernel(ctx context.Context) {
 // the run of another through a shared key.
 func idemKey(principal, key string) string { return principal + "\x00" + key }
 
+// claimableLocked reports ErrRunExists for an id that this process knows: a
+// run of this process, or a child of one in another process, including a
+// child whose start is open. A run under the id of a child would answer for
+// the child. The caller holds k.mu.
+func (k *kernel) claimableLocked(id string) error {
+	if _, ok := k.runs[id]; ok {
+		return fmt.Errorf("%w: run %s", ErrRunExists, id)
+	}
+	if ref, ok := k.remote[id]; ok {
+		return fmt.Errorf("%w: %s is a child of run %s in another process", ErrRunExists, id, ref.parent)
+	}
+	return nil
+}
+
+// checkNamedID refuses the id that a request names when this process or
+// its ledger knows the id. The same start sent again under its idempotency
+// key passes, and returns the run that it started.
+func (a *Agent) checkNamedID(ctx context.Context, req RunRequest) error {
+	k := a.k
+	k.mu.Lock()
+	if req.IdempotencyKey != "" {
+		if id, ok := k.idem[idemKey(req.Principal, req.IdempotencyKey)]; ok && id == req.ID {
+			k.mu.Unlock()
+			return nil
+		}
+	}
+	err := k.claimableLocked(req.ID)
+	k.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	for _, err := range a.ledger.Read(ctx, req.ID, 0) {
+		if err != nil {
+			return fmt.Errorf("fw: read the ledger for the id %s: %w", req.ID, err)
+		}
+		return fmt.Errorf("%w: the ledger has a run %s", ErrRunExists, req.ID)
+	}
+	return nil
+}
+
+// drivable refuses a run that stands in for a child that never got its run
+// in another process. A message or a decision would run it here, without
+// the profile and the budget that the child got, as a run of its own.
+func (rs *runState) drivable() error {
+	if rs.standIn {
+		return fmt.Errorf("%w: run %s records a child that never ran in its process, so nothing runs it here", ErrInvalidRequest, rs.id)
+	}
+	return nil
+}
+
 func (k *kernel) isDraining() bool {
 	k.lifeMu.Lock()
 	defer k.lifeMu.Unlock()
@@ -385,7 +444,8 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	if p := PrincipalFrom(ctx); kind == "" && p != nil && p.Subject == req.Principal {
 		kind = p.Kind
 	}
-	if req.ID == "" {
+	namedID := req.ID != ""
+	if !namedID {
 		req.ID = NewID()
 	} else if err := checkRunID(req.ID); err != nil {
 		return nil, err
@@ -429,6 +489,11 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		}
 		if o, spent := a.limitSpent(p); spent {
 			return nil, o.refusal()
+		}
+	}
+	if namedID {
+		if err := a.checkNamedID(ctx, req); err != nil {
+			return nil, err
 		}
 	}
 	files, changes, err := a.keepFiles(req.Files)
@@ -485,9 +550,9 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			return prev.snapshot(), nil
 		}
 	}
-	if _, ok := k.runs[req.ID]; ok {
+	if err := k.claimableLocked(req.ID); err != nil {
 		k.mu.Unlock()
-		return nil, fmt.Errorf("fw: run %s already exists", req.ID)
+		return nil, err
 	}
 	if parent != nil {
 		if max := a.cfg.Spawn.MaxChildren; max > 0 && k.kids[req.Parent] >= max {
@@ -860,6 +925,9 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string)
 	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
 		return err
 	}
+	if err := rs.drivable(); err != nil {
+		return err
+	}
 	if msg.Role == "" {
 		msg.Role = RoleUser
 	}
@@ -923,6 +991,9 @@ func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error
 		return err
 	}
 	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
+		return err
+	}
+	if err := rs.drivable(); err != nil {
 		return err
 	}
 	verdict, err := normalizeDecision(d)
