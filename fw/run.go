@@ -251,6 +251,9 @@ type Run struct {
 	// consumer that receives only the lifecycle events of a run, such as
 	// the front of a fleet, knows the usage of the run up to this event.
 	UsageSeq uint64 `json:"usageSeq,omitempty"`
+	// kept is RunQueuedData.Kept: the events of a branch that are copies of
+	// the events of its source, whose usage the branch leaves out.
+	kept uint64
 }
 
 // RunRequest describes a run to start.
