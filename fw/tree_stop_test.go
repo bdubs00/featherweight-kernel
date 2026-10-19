@@ -351,7 +351,9 @@ func TestCancelReachesBelowAFinishedRunAndLeavesBranches(t *testing.T) {
 		}
 		return endTurn("done"), nil
 	}}
-	other := newTestAgent(t, newScript(endTurn("branch done")).Model())
+	// The branch works in the other process while its source is canceled:
+	// its model call waits.
+	other := newTestAgent(t, blockingModel(nil))
 	sp := &otherSpawner{other: other, branchWait: make(chan struct{})}
 	a := newTestAgent(t, m, WithTools(block), WithSpawner(sp))
 	root, err := a.Start(ctx, "waiter")
@@ -371,7 +373,10 @@ func TestCancelReachesBelowAFinishedRunAndLeavesBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	close(sp.branchWait)
-	eventually(t, "the branch starts", func() bool { return a.Starting() == 0 })
+	eventually(t, "the branch works", func() bool {
+		b, err := other.Get(ctx, branch.ID)
+		return a.Starting() == 0 && err == nil && b.State == StateRunning
+	})
 	if err := a.Cancel(ctx, root.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -379,8 +384,17 @@ func TestCancelReachesBelowAFinishedRunAndLeavesBranches(t *testing.T) {
 	defer cancel()
 	got, err := a.WaitFor(wctx, deep.ID, func(r *Run) bool { return r.State.Terminal() })
 	mustState(t, got, err, StateCanceled)
-	if b, err := other.Get(ctx, branch.ID); err != nil || b.State == StateCanceled {
-		t.Fatalf("the branch = %+v, %v", b, err)
+	// The cancels of other processes run in the background, so the branch
+	// has the time to see one, and it must not.
+	for range 15 {
+		if b, err := other.Get(ctx, branch.ID); err != nil || b.State != StateRunning {
+			t.Fatalf("the branch of a canceled source = %+v, %v", b, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// The branch ends here, so the other process closes at once.
+	if err := other.Cancel(ctx, branch.ID); err != nil {
+		t.Fatal(err)
 	}
 
 	// Cancel of a finished run cancels the open runs under it.
