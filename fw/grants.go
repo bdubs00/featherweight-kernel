@@ -145,12 +145,11 @@ func patternRules(rules []Rules, tool string) []PatternRule {
 // extraTools names the tools that the inline profile of a request gives
 // the run beyond the tool list of its named profile, in the order of Tools.
 // A tool that an ancestor does not allow is left out, because the run never
-// gets it.
-func (a *Agent) extraTools(ctx context.Context, req RunRequest, parent *runState) []string {
+// gets it. named is the profile that the caller read for the request.
+func (a *Agent) extraTools(ctx context.Context, req RunRequest, named AgentProfile, parent *runState) []string {
 	if req.Profile == nil || req.Profile.Tools == nil {
 		return nil
 	}
-	named := a.profileNamed(req.Agent)
 	run := named.Overlay(*req.Profile)
 	var ancestors [][]string
 	if parent != nil {

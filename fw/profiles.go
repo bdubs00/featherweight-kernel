@@ -11,6 +11,8 @@ package fw
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,14 +46,15 @@ func (a *Agent) profileNamed(name string) AgentProfile {
 	return AgentProfile{Name: name}
 }
 
-// resolveProfile resolves the profile of a new run once, when the kernel
-// queues it. The kernel records the result in fw.run.queued
-// (RunQueuedData.Resolved), and the run keeps it for its life (profileOf).
-// It is the named profile now with the inline profile of the request on
-// top, and these values filled in, so that a later change of the
-// configuration does not reach the run either:
+// resolveProfile resolves the configuration of a new run once, when the
+// kernel queues it, from named, the profile that the caller read once for
+// the whole request. It returns the record for fw.run.queued
+// (RunQueuedData.Resolved), which the run keeps for its life (profileOf),
+// and the text of the run, which stays in memory (textOf). The record is
+// the overlay of the inline profile on named, with these values filled in,
+// so that a later change of the configuration does not reach the run
+// either:
 //
-//   - System: DefaultSystemPrompt when the profile has none.
 //   - Model: the selector, through models and the model of the
 //     configuration.
 //   - Effort: the effort of the configuration when the profile has none.
@@ -61,36 +64,51 @@ func (a *Agent) profileNamed(name string) AgentProfile {
 //     the budget of the configuration. The budget of the request stays in
 //     RunQueuedData.Budget and wins over it.
 //
-// Instructions, Skills, Tools, and Policy are those of the overlay. Access
-// is left out: who can use the agent is authorization, and the kernel
-// always reads it from the profile now. The base policy of the process,
-// the tools that are connected, and the skills that are installed are not
-// part of a profile, so the kernel does not resolve them here.
-func (a *Agent) resolveProfile(ctx context.Context, req RunRequest, parent *runState) *AgentProfile {
-	prof := a.profileNamed(req.Agent)
+// Skills, Tools, and Policy are those of the overlay. The record holds no
+// configured text, only the digests of the text, and no access: who can
+// use the agent is authorization, and the kernel always reads it from the
+// profile now. The base policy of the process, the tools that are
+// connected, and the skills that are installed are not part of a profile,
+// so the kernel does not resolve them here.
+func (a *Agent) resolveProfile(ctx context.Context, req RunRequest, named AgentProfile, parent *runState) (*ResolvedProfile, *runText) {
+	prof := named
 	if req.Profile != nil {
 		prof = prof.Overlay(*req.Profile)
 	}
-	prof.Access = nil
-	if strings.TrimSpace(prof.System) == "" {
-		prof.System = DefaultSystemPrompt
+	res := &ResolvedProfile{
+		Model:    a.cfg.ModelSelector(prof.Model),
+		Effort:   prof.Effort,
+		Skills:   prof.Skills,
+		Tools:    prof.Tools,
+		TimeZone: prof.TimeZone,
+		Policy:   prof.Policy,
 	}
-	prof.Model = a.cfg.ModelSelector(prof.Model)
-	if prof.Effort == "" {
-		prof.Effort = a.cfg.Effort
+	if res.Effort == "" {
+		res.Effort = a.cfg.Effort
 	}
-	if prof.TimeZone == "" && parent != nil {
-		prof.TimeZone = a.zoneNameOf(ctx, parent)
+	if res.TimeZone == "" && parent != nil {
+		res.TimeZone = a.zoneNameOf(ctx, parent)
 	}
-	if prof.TimeZone == "" {
-		prof.TimeZone = a.cfg.Time.Zone
+	if res.TimeZone == "" {
+		res.TimeZone = a.cfg.Time.Zone
 	}
 	b := a.cfg.Budget
 	if prof.Budget != nil {
 		b = prof.Budget.Merge(b)
 	}
-	prof.Budget = &b
-	return &prof
+	res.Budget = &b
+	// The text of the inline profile reaches the model as fw.run.queued
+	// stores it, so the text of the run takes it the same way.
+	text := composeText(named, a.storedText(req.Profile))
+	res.SystemDigest, res.InstructionsDigest = text.digests()
+	return res, text
+}
+
+// profile returns the resolved profile as an AgentProfile of the agent,
+// without text, for the code that reads a profile.
+func (r *ResolvedProfile) profile(agent string) AgentProfile {
+	return AgentProfile{Name: agent, Skills: r.Skills, Tools: r.Tools, Model: r.Model, Effort: r.Effort,
+		TimeZone: r.TimeZone, Policy: r.Policy, Budget: r.Budget}
 }
 
 // selectorOf returns the model selector of a run. A resolved profile holds
@@ -101,6 +119,114 @@ func (a *Agent) selectorOf(q RunQueuedData, prof AgentProfile) string {
 		return prof.Model
 	}
 	return a.cfg.ModelSelector(prof.Model)
+}
+
+// runText is the text of a run that its system prompt holds: the system
+// prompt of its profile, DefaultSystemPrompt when it has none, and the
+// instructions of its profile. The instructions of the request are in
+// RunQueuedData.Instructions. The kernel keeps a runText in memory only,
+// because configured text never enters an event.
+type runText struct {
+	system       string
+	instructions []string
+}
+
+// composeText returns the text of a run from the named profile and the
+// inline profile, as Overlay composes them.
+func composeText(named AgentProfile, inline *AgentProfile) *runText {
+	p := AgentProfile{System: named.System, Instructions: named.Instructions}
+	if inline != nil {
+		p = p.Overlay(AgentProfile{System: inline.System, Instructions: inline.Instructions})
+	}
+	if strings.TrimSpace(p.System) == "" {
+		p.System = DefaultSystemPrompt
+	}
+	return &runText{system: p.System, instructions: p.Instructions}
+}
+
+// storedText returns the text of an inline profile as fw.run.queued holds
+// it, with every secret replaced (redact.go).
+func (a *Agent) storedText(inline *AgentProfile) *AgentProfile {
+	if inline == nil {
+		return nil
+	}
+	out := &AgentProfile{System: a.redact.text(inline.System)}
+	for _, s := range inline.Instructions {
+		out.Instructions = append(out.Instructions, a.redact.text(s))
+	}
+	return out
+}
+
+// digests returns the digests of the text as the model reads it, as
+// ResolvedProfile describes them.
+func (t *runText) digests() (system, instructions string) {
+	return textDigest(strings.TrimSpace(t.system)), textDigest(joinInstructions(t.instructions))
+}
+
+func textDigest(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// textOf returns the text of a run with a resolved profile. A run that this
+// process queued keeps the text that it was queued with in memory, so a
+// change of the profile does not reach it. A branch in this process takes
+// the text of its source when the digests agree. Otherwise, such as after
+// a restart, the kernel composes the text from the named profile now and
+// the inline profile of fw.run.queued and keeps it from then on. When its
+// digests differ from those that the run expects, the configuration
+// changed: the run goes on with the text now, and the kernel records the
+// change on the run as fw.run.annotated with MetaDriftSystem or
+// MetaDriftInstructions, the digest that the run expected, and the digest
+// of the text now. An earlier record of a change sets the digest that the
+// run expects, so each change is recorded once.
+func (a *Agent) textOf(ctx context.Context, rs *runState, q RunQueuedData) (*runText, error) {
+	rs.mu.Lock()
+	t := rs.text
+	meta := rs.run.Metadata
+	rs.mu.Unlock()
+	if t != nil {
+		return t, nil
+	}
+	want := map[string]string{MetaDriftSystem: q.Resolved.SystemDigest, MetaDriftInstructions: q.Resolved.InstructionsDigest}
+	for key := range want {
+		if _, now, ok := strings.Cut(meta[key], " -> "); ok {
+			want[key] = now
+		}
+	}
+	agree := func(t *runText) map[string]string {
+		sys, ins := t.digests()
+		changed := map[string]string{}
+		if sys != want[MetaDriftSystem] {
+			changed[MetaDriftSystem] = want[MetaDriftSystem] + " -> " + sys
+		}
+		if ins != want[MetaDriftInstructions] {
+			changed[MetaDriftInstructions] = want[MetaDriftInstructions] + " -> " + ins
+		}
+		return changed
+	}
+	if src, err := a.k.lookup(q.Metadata[MetaForkOf]); err == nil && src != rs {
+		src.mu.Lock()
+		st := src.text
+		src.mu.Unlock()
+		if st != nil && len(agree(st)) == 0 {
+			t = st
+		}
+	}
+	if t == nil {
+		t = composeText(a.profileNamed(q.Agent), q.Profile)
+		if changed := agree(t); len(changed) > 0 {
+			if _, err := a.emit(ctx, rs, EvRunAnnotated, RunAnnotatedData{Metadata: changed}); err != nil {
+				return nil, err
+			}
+			a.log.Warn("the profile text of a run changed since it was queued; the run goes on with the text now",
+				"run", rs.id, "agent", q.Agent, "changes", changed)
+		}
+	}
+	rs.mu.Lock()
+	rs.text = t
+	rs.mu.Unlock()
+	return t, nil
 }
 
 // tighten returns the resolved rules of a run with the rules that its named

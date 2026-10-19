@@ -134,16 +134,58 @@ type RunQueuedData struct {
 	// beyond the tool list of its named profile, so every surface can tell
 	// the person.
 	ExtraTools []string `json:"extraTools,omitempty"`
-	// Resolved is the effective profile of the run, resolved once when the
-	// kernel queued it: the named profile with the inline profile on top,
-	// and the model selector, the effort, the time zone, and the budget
-	// defaults of the configuration filled in. It never holds Access. The
-	// run keeps it for its life, so a change to the profile or to the
-	// configuration reaches new runs only. The policy of the named profile
-	// still applies on top as a tightening. A ledger of an older kernel has
-	// none, and such a run reads the named profile at each step.
-	Resolved *AgentProfile `json:"resolved,omitempty"`
+	// Resolved is the configuration of the run that the kernel resolved
+	// once, when it queued the run (see ResolvedProfile). A ledger of an
+	// older kernel has none, and such a run reads its named profile at each
+	// step.
+	Resolved *ResolvedProfile `json:"resolved,omitempty"`
 }
+
+// ResolvedProfile is the configuration of a run that the kernel resolves
+// from the named profile, the inline profile of the request, and the
+// configuration when it queues the run. The run keeps it for its life:
+// across turns, follow-ups, waits, restarts, and branches, so a change to
+// the profile or to the configuration reaches new runs only.
+//
+// It holds no configured text. The system prompt and the instructions stay
+// in the configuration, the text of the inline profile is in
+// RunQueuedData.Profile, and the kernel keeps the text of the run in
+// memory. SystemDigest and InstructionsDigest tie the run to that text:
+// each is "sha256:" and the hex SHA-256 of the system prompt of the run
+// (the inline one, else the named one, else DefaultSystemPrompt) and of
+// its instructions (those of the named profile, then those of the inline
+// profile, each without the spaces at its start and end, the empty ones
+// left out, joined by a blank line), as the model reads them. After a
+// restart, a text with other digests means that the configuration
+// changed: the run goes on with the text now, and the kernel records the
+// change on the run (MetaDriftSystem, MetaDriftInstructions).
+//
+// Model is a selector. Effort and TimeZone are those of the overlay, else
+// the effort of the configuration and the zone of the parent run or of the
+// configuration. Skills and Tools are the allowlists of the overlay.
+// Budget is the budget of the overlay with each zero field taken from the
+// budget of the configuration. Policy is the rules of the overlay; the
+// rules that the named profile has now apply on top as a tightening. The
+// description and the access block of a profile are never part of it.
+type ResolvedProfile struct {
+	Model              string   `json:"model,omitempty"`
+	Effort             string   `json:"effort,omitempty"`
+	Skills             []string `json:"skills"` // nil means every skill, and an empty list none
+	Tools              []string `json:"tools,omitempty"`
+	TimeZone           string   `json:"timeZone,omitempty"`
+	Policy             *Rules   `json:"policy,omitempty"`
+	Budget             *Budget  `json:"budget,omitempty"`
+	SystemDigest       string   `json:"systemDigest,omitempty"`
+	InstructionsDigest string   `json:"instructionsDigest,omitempty"`
+}
+
+// Metadata keys that the kernel sets with fw.run.annotated when the text
+// of a run differs after a restart from the text that it was queued with
+// (see ResolvedProfile). The value is "<old digest> -> <new digest>".
+const (
+	MetaDriftSystem       = "fw.drift.system"
+	MetaDriftInstructions = "fw.drift.instructions"
+)
 
 // RunStartedData is the payload of fw.run.started.
 type RunStartedData struct {
