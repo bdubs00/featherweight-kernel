@@ -150,3 +150,33 @@ func TestForkMetadataCountsUsage(t *testing.T) {
 		t.Fatalf("replay of the branch = %+v %+v", rp.Metadata, rp.Usage)
 	}
 }
+
+// TestForkEventsCountsTheCopies sends a branch to ForkEvents, as another
+// process does, with a forged Kept and with none, as an older kernel sends
+// it. The process counts the copies itself: the branch counts its own model
+// calls, and maxTokens stops it.
+func TestForkEventsCountsTheCopies(t *testing.T) {
+	for _, forged := range []uint64{1 << 40, 0} {
+		ctx := testCtx(t)
+		s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)), callTools(use("c2", "echo", `{"text":"b"}`)),
+			callTools(use("c3", "echo", `{"text":"c"}`)), endTurn("done"))
+		a := newTestAgent(t, s.Model(), WithTools(echoTool(nil)))
+		q := MustEvent("X", EvRunQueued, RunQueuedData{Agent: "default", Input: "go", Principal: "p", Kept: forged, Budget: &Budget{MaxTokens: 20}})
+		q.Seq = 1
+		r, err := a.ForkEvents(ctx, []Event{q}, ForkRequest{ID: NewID(), Input: "work"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err = a.WaitFor(ctx, r.ID, func(r *Run) bool { return r.State.Terminal() })
+		mustState(t, r, err, StateFailed)
+		evs := ledgerEvents(t, a.Ledger(), r.ID)
+		var kept RunQueuedData
+		firstOf(t, evs, EvRunQueued, &kept)
+		var d RunFinishedData
+		_ = evs[len(evs)-1].Decode(&d)
+		if kept.Kept != 1 || countType(evs, EvModelResponded) != 2 || countType(evs, EvBudgetExceeded) != 1 ||
+			r.Usage.InputTokens != 20 || d.Totals == nil || d.Totals.InputTokens != 20 {
+			t.Fatalf("forged %d: kept %d, %d calls, usage %+v, totals %+v, error %q", forged, kept.Kept, countType(evs, EvModelResponded), r.Usage, d.Totals, r.Error)
+		}
+	}
+}

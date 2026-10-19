@@ -133,8 +133,9 @@ type RunQueuedData struct {
 	// Kept is set on the branch of a run (Agent.Fork): the number of events
 	// at the start of the ledger of the branch that it kept from its
 	// source, this event included. The usage of the branch leaves them out,
-	// because the source holds that usage (see Run.Apply). Only a fork sets
-	// it; a request cannot.
+	// because the source holds that usage (see Run.Apply). The process that
+	// writes the branch sets it to the number of the copies, also for a
+	// branch that another process sends; a request cannot set it.
 	Kept uint64 `json:"kept,omitempty"`
 	// ExtraTools names the tools that the inline profile gives the run
 	// beyond the tool list of its named profile, so every surface can tell

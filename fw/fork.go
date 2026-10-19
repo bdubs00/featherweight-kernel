@@ -378,6 +378,10 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 	if id == "" {
 		id = NewID()
 	}
+	// Every event of kept is a copy, so Kept is their number, whatever the
+	// fw.run.queued of the copies says: the body of ForkEvents comes from
+	// another process, and its value never counts.
+	q.Kept = uint64(len(kept))
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
 	k.mu.Lock()
@@ -388,8 +392,20 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 		delete(k.runs, id)
 		k.mu.Unlock()
 	}
-	for _, e := range kept {
-		ne, err := NewEvent(id, e.Type, e.Data)
+	for i, e := range kept {
+		data := any(e.Data)
+		if i == 0 && e.Type == EvRunQueued {
+			var d RunQueuedData
+			if err := e.Decode(&d); err != nil {
+				undo()
+				return nil, fmt.Errorf("fw: the fw.run.queued of the branch: %w", err)
+			}
+			if d.Kept != q.Kept {
+				d.Kept = q.Kept
+				data = d
+			}
+		}
+		ne, err := NewEvent(id, e.Type, data)
 		if err != nil {
 			undo()
 			return nil, err
