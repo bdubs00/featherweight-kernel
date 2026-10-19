@@ -3,16 +3,27 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
+// calls numbers the tool calls of call.
+var calls atomic.Int64
+
 // call runs a tool with a JSON input and fails the test on a Go error.
+// Each call in the context of a run gets a call id of its own, as each
+// tool call of a model has one.
 func call(t *testing.T, ctx context.Context, tool fw.Tool, input string) fw.ToolResult {
 	t.Helper()
+	if info := fw.RunInfoFrom(ctx); info.CallID != "" {
+		info.CallID = fmt.Sprintf("%s-%d", info.CallID, calls.Add(1))
+		ctx = fw.WithRunInfo(ctx, info)
+	}
 	res, err := tool.Call(ctx, json.RawMessage(input))
 	if err != nil {
 		t.Fatalf("%s %s: unexpected Go error: %v", tool.Spec().Name, input, err)

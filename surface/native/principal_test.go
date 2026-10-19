@@ -45,3 +45,35 @@ func TestTrustedCallerStartsARunForAPerson(t *testing.T) {
 		t.Fatalf("a trusted caller without a principal started the run as %q", r.Principal)
 	}
 }
+
+// TestTrustedCallerNamesTheIDOfARun checks the id in the body: a trusted
+// process names the id of the run, as a parent in another process does
+// for its child, and the same start sent again under its idempotency key
+// is the same run. A person cannot name the id.
+func TestTrustedCallerNamesTheIDOfARun(t *testing.T) {
+	callers := tokenMap{
+		"alice-token":  {Subject: "alice", Kind: fw.KindUser},
+		"member-token": {Subject: fw.KindToken, Kind: fw.KindToken},
+	}
+	a := newAgent(t, newScript(endTurn("done")).model(), fw.WithAuthn(callers))
+	srv := serve(t, a)
+	id := fw.NewID()
+	body := `{"input":"for ada","principal":"ada","id":"` + id + `"}`
+
+	resp, b := do(t, "POST", srv.URL+"/v1/runs", body, "Authorization", "Bearer member-token", HeaderIdempotencyKey, "spawn:p:c")
+	if r := decodeRun(t, resp, b, http.StatusCreated); r.ID != id {
+		t.Fatalf("a trusted caller started the run %q, want %q", r.ID, id)
+	}
+	resp, b = do(t, "POST", srv.URL+"/v1/runs", body, "Authorization", "Bearer member-token", HeaderIdempotencyKey, "spawn:p:c")
+	if r := decodeRun(t, resp, b, http.StatusCreated); r.ID != id {
+		t.Fatalf("the start sent again gave the run %q, want %q", r.ID, id)
+	}
+	if list, err := a.List(t.Context()); err != nil || len(list) != 1 {
+		t.Fatalf("the agent holds %d runs, %v", len(list), err)
+	}
+
+	resp, _ = do(t, "POST", srv.URL+"/v1/runs", `{"input":"mine","id":"`+fw.NewID()+`"}`, "Authorization", "Bearer alice-token")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a person named the id of a run: status %d", resp.StatusCode)
+	}
+}

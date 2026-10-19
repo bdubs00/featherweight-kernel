@@ -45,12 +45,15 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 				_ = e.Decode(&q)
 			case EvRunChild:
 				var d RunChildData
-				if e.Decode(&d) == nil && d.Child != "" && d.Member != "" {
-					// A branch is recorded when it is placed and again
-					// when its process took it; the later event only
-					// marks the start.
+				if e.Decode(&d) == nil && d.Child != "" && (d.Member != "" || d.spawning()) {
+					// A child is recorded before its start and again when
+					// it started; the later event only marks the start,
+					// and names the member when the first did not.
 					if i, ok := index[d.Child]; ok {
 						remote[i].Started = remote[i].Started || d.Started
+						if remote[i].Member == "" {
+							remote[i].Member = d.Member
+						}
 					} else {
 						index[d.Child] = len(remote)
 						remote = append(remote, d)
@@ -70,9 +73,9 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 			k.kids[q.Parent]++
 		}
 		for _, d := range remote {
-			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1}
+			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1, key: d.Key}
 			k.kids[id]++
-			if d.placed() {
+			if d.placed() || d.spawning() {
 				lost = append(lost, lostBranch{src: rs, data: d})
 			}
 		}
@@ -98,12 +101,19 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 	// A branch that was placed in another process but never started when
 	// this process went away is lost: no process has it, and nothing will
 	// send it. It is recorded here as failed, and its process is abandoned.
+	// A child of spawn_task whose start was open can exist, because its
+	// spawner was on its way to start it, so this process looks for it
+	// (spawn.go).
 	for _, l := range lost {
 		k.mu.Lock()
 		_, pending := k.remote[l.data.Child]
 		k.mu.Unlock()
-		if pending {
+		switch {
+		case !pending:
+		case l.data.placed():
 			a.recordLostBranch(l.src, l.data)
+		default:
+			a.findChild(l.src, l.data)
 		}
 	}
 	sort.SliceStable(unfinished, func(i, j int) bool {
@@ -113,7 +123,8 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 }
 
 // lostBranch is a branch that its source placed in another process and
-// never started, found at a rebuild.
+// never started, or a child of spawn_task whose start was open, found at a
+// rebuild.
 type lostBranch struct {
 	src  *runState
 	data RunChildData

@@ -127,6 +127,12 @@ func (spawnTaskTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 	if !ok {
 		return bad, nil
 	}
+	// The start is keyed by the tool call, so a rerun of the call after a
+	// restart reaches the child of the first attempt instead of a second
+	// child.
+	if call := fw.RunInfoFrom(ctx).CallID; call != "" {
+		opts = append(opts, fw.WithIdempotencyKey("spawn_task:"+parent+":"+call))
+	}
 	run, err := a.SpawnChild(ctx, parent, fw.NewRunRequest(in.Input, opts...))
 	if err != nil {
 		if ctx.Err() != nil {

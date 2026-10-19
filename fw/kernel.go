@@ -164,9 +164,10 @@ func (a *Agent) startKernel(ctx context.Context) error {
 	return nil
 }
 
-// cancelStarts ends the start of every branch in another process that is
-// still open and waits for each record, until ctx ends or five seconds
-// pass.
+// cancelStarts ends the start of every branch and child in another
+// process that is still open and waits for each record, until ctx ends or
+// five seconds pass. A look for a child after a restart ends without a
+// record, so the next start looks again.
 func (a *Agent) cancelStarts(ctx context.Context) {
 	k := a.k
 	k.mu.Lock()
@@ -478,8 +479,8 @@ func (a *Agent) WaitFor(ctx context.Context, id string, done func(*Run) bool) (*
 	if err != nil {
 		if ref, ok := a.remoteChild(id); ok {
 			if r, ok := ref.starting(); ok {
-				// The branch is on its way to its process. Wait for the
-				// start to end, then ask again: the branch is then in that
+				// The child is on its way to its process. Wait for the
+				// start to end, then ask again: the child is then in that
 				// process, or recorded here as failed.
 				if done(r) {
 					return r, nil
@@ -808,7 +809,17 @@ func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error
 				return err
 			}
 			if _, ok := ref.starting(); ok {
-				return fmt.Errorf("%w: the branch %s has not started in %s yet, so it has no approval to decide", ErrInvalidRequest, id, ref.member)
+				if ref.start.find {
+					// A child that a restart interrupted can exist and wait
+					// for a decision. Wait until the look for it ends.
+					select {
+					case <-ref.start.done:
+						return a.Decide(ctx, id, d)
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				return fmt.Errorf("%w: the run %s has not started in %s yet, so it has no approval to decide", ErrInvalidRequest, id, ref.member)
 			}
 			return a.spawner.Decide(ctx, ref.member, id, d)
 		}
@@ -891,7 +902,17 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 				return err
 			}
 			if _, ok := ref.starting(); ok {
-				// The start ends, and the branch is recorded here as
+				if ref.start.find {
+					// A child that a restart interrupted can exist. Wait
+					// until the look for it ends, then cancel what there is.
+					select {
+					case <-ref.start.done:
+						return a.Cancel(ctx, id)
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				// The start ends, and the child is recorded here as
 				// canceled. Wait for that record, so the next Get sees it.
 				ref.start.cancel()
 				select {
