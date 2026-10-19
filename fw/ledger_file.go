@@ -93,10 +93,11 @@ type fileRun struct {
 }
 
 // keepsDone reports whether an event leaves a finished run finished. An
-// annotation adds metadata and opens nothing again; every other event
-// after the end, such as a follow-up message, works on the run again.
+// annotation and the report of a child add facts and open nothing again;
+// every other event after the end, such as a follow-up message, works on
+// the run again (LeavesFinished).
 func keepsDone(done bool, typ string) bool {
-	return IsTerminal(typ) || (done && typ == EvRunAnnotated)
+	return IsTerminal(typ) || (done && LeavesFinished(typ))
 }
 
 // needsIntentSync reports whether an event must reach the disk before

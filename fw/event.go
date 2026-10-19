@@ -59,6 +59,16 @@ const (
 // IsTerminal reports whether an event type ends a run.
 func IsTerminal(typ string) bool { return typ == EvRunFinished }
 
+// LeavesFinished reports whether an event of the type leaves a finished run
+// finished: fw.run.annotated, fw.run.child, and fw.child.reported add facts
+// to a run and do no work on it, so they can arrive after its end, for
+// example the report of a child that ends after its parent, or a branch of
+// a finished run in another process. Every other event after the end, such
+// as a follow-up message, works on the run again.
+func LeavesFinished(typ string) bool {
+	return typ == EvRunAnnotated || typ == EvRunChild || typ == EvChildReported
+}
+
 // NewEvent builds an event for a run. Seq and Source are set by the ledger.
 func NewEvent(runID, typ string, data any) (Event, error) {
 	var raw json.RawMessage

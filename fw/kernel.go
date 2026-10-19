@@ -899,6 +899,7 @@ func (a *Agent) Events(ctx context.Context, id string, from uint64) (<-chan Even
 	go func() {
 		defer close(out)
 		defer cancel()
+		ended := false
 		for e := range in {
 			select {
 			case out <- e:
@@ -906,8 +907,16 @@ func (a *Agent) Events(ctx context.Context, id string, from uint64) (<-chan Even
 				return
 			}
 			// A follow-up reopens a finished run, so close only when no
-			// event follows the terminal event.
-			if IsTerminal(e.Type) && rs.lastSeq() <= e.Seq {
+			// event follows the terminal event. A note after the end, such
+			// as an annotation or the report of a child, leaves the run
+			// finished (LeavesFinished).
+			switch {
+			case IsTerminal(e.Type):
+				ended = true
+			case !LeavesFinished(e.Type):
+				ended = false
+			}
+			if ended && rs.lastSeq() <= e.Seq {
 				return
 			}
 		}
