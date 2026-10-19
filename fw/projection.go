@@ -231,14 +231,21 @@ func ProjectRun(events []Event, prices ...Prices) *Run {
 // catches up. The cost then is the cost at the prices of that kernel; the
 // prices argument applies only to the increments after the totals. An
 // event of an older kernel has no totals and changes the usage in no way.
+//
+// A fw.run.queued with a lower sequence number than an event that Apply
+// already folded, which a bus can deliver late, gives the run its
+// identity and changes nothing else: the state, the usage, and the time
+// of the latest change stay, and the metadata and the title of later
+// annotations win.
 func (r *Run) Apply(e Event, prices Prices) {
 	if r.ID == "" {
 		r.ID = e.Subject
 	}
+	late := e.Seq != 0 && e.Seq < r.Seq
 	if e.Seq > r.Seq {
 		r.Seq = e.Seq
 	}
-	if !e.Time.IsZero() {
+	if !e.Time.IsZero() && !late {
 		r.UpdatedAt = e.Time
 	}
 	switch e.Type {
@@ -248,14 +255,26 @@ func (r *Run) Apply(e Event, prices Prices) {
 			return
 		}
 		r.Agent, r.Input, r.Origin = d.Agent, d.Input, d.Origin
-		r.Principal, r.Parent, r.Metadata = d.Principal, d.Parent, d.Metadata
+		r.Principal, r.Parent = d.Principal, d.Parent
 		r.Depth, r.ExtraTools = d.Depth, d.ExtraTools
-		r.Title = strings.TrimSpace(d.Metadata[MetaTitle])
-		if r.Title == "" {
-			r.Title = TitleFrom(d.Input)
-		}
-		r.State = StateQueued
 		r.CreatedAt = e.Time
+		title := strings.TrimSpace(d.Metadata[MetaTitle])
+		if title == "" {
+			title = TitleFrom(d.Input)
+		}
+		if late {
+			if len(d.Metadata) > 0 {
+				md := maps.Clone(d.Metadata)
+				maps.Copy(md, r.Metadata)
+				r.Metadata = md
+			}
+			if r.Title == "" {
+				r.Title = title
+			}
+			return
+		}
+		r.Metadata, r.Title = d.Metadata, title
+		r.State = StateQueued
 	case EvRunStarted, EvRunResumed, EvTurnStarted:
 		if e.Type == EvTurnStarted {
 			r.Usage.Turns++
