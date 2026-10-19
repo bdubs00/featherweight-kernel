@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -346,4 +347,81 @@ func TestBranchOfBranchKeepsTheText(t *testing.T) {
 			t.Fatalf("branch %d records a change: %v", i, n)
 		}
 	}
+}
+
+// An inline instruction with a token behind "Bearer" and a tab never
+// reaches the ledger, and the model reads the same text before and after
+// a restart, with no record of a change.
+func TestInlineTokenBehindAnEscapeStaysOut(t *testing.T) {
+	ctx := testCtx(t)
+	dir := filepath.Join(t.TempDir(), "runs")
+	rec := &pinRecorder{}
+	start := func() *Agent {
+		cfg := pinConfig(t, "pintest/base")
+		cfg.Agents = map[string]AgentProfile{"worker": {}}
+		return pinAgent(t, cfg, pinLedger(t, dir), rec)
+	}
+	a := start()
+	instr := "Call the API with Authorization: Bearer\tabcdefghijklmnopqrstuvwxyz0123."
+	rec.script(endTurn("one"))
+	r, err := a.Run(ctx, "work", AsAgent("worker"), WithRunProfile(AgentProfile{Instructions: []string{instr}}))
+	mustState(t, r, err, StateCompleted)
+	eventsHold(t, a.Ledger(), r.ID, "abcdefghijklmnopqrstuvwxyz0123")
+	closePin(a)
+
+	b := start()
+	rec.script(endTurn("two"))
+	if err := b.Send(ctx, r.ID, UserText("more"), OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	got, err := b.Wait(ctx, r.ID)
+	mustState(t, got, err, StateCompleted)
+	if before, after := rec.call(0).system, rec.call(1).system; before != after || strings.Contains(after, "abcdefghijklmnopqrstuvwxyz0123") {
+		t.Fatalf("system prompt before the restart %q, after %q", before, after)
+	}
+	if n := driftNotes(t, b.Ledger(), r.ID); len(n) != 0 {
+		t.Fatalf("records of a change, but nothing changed: %v", n)
+	}
+}
+
+// A branch in another process starts from fw.run.queued as the source
+// stores it: a secret that only the source knows stays out of the other
+// ledger, and the model of the branch reads what the model of the source
+// read, with no record of a change.
+func TestRemoteBranchTakesTheStoredRequest(t *testing.T) {
+	ctx := testCtx(t)
+	t.Setenv("SOURCE_ONLY_TOKEN", "srcsecret-77a1b2c3")
+	profiles := func() map[string]AgentProfile { return map[string]AgentProfile{"worker": {System: "Same."}} }
+	there := &pinRecorder{}
+	recA := &pinRecorder{}
+	cfgA := pinConfig(t, "pintest/base")
+	cfgA.Agents = profiles()
+	sp := &otherSpawner{}
+	a := pinAgent(t, cfgA, NewMemLedger(), recA, WithSpawner(sp))
+	if err := os.Unsetenv("SOURCE_ONLY_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+	cfgB := pinConfig(t, "pintest/base")
+	cfgB.Agents = profiles()
+	lb := NewMemLedger()
+	sp.other = pinAgent(t, cfgB, lb, there)
+
+	recA.script(endTurn("one"))
+	inline := AgentProfile{Instructions: []string{"Use the code srcsecret-77a1b2c3 for the vault."}}
+	r, err := a.Run(ctx, "work srcsecret-77a1b2c3", AsAgent("worker"), WithRunProfile(inline))
+	mustState(t, r, err, StateCompleted)
+	there.script(endTurn("branch"))
+	b, err := a.Fork(ctx, r.ID, ForkRequest{Input: "go on", Spawn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.Wait(ctx, b.ID)
+	mustState(t, got, err, StateCompleted)
+	if src, br := recA.call(0).system, there.call(0).system; src != br {
+		t.Fatalf("the branch reads %q, the source read %q", br, src)
+	}
+	if n := driftNotes(t, lb, b.ID); len(n) != 0 {
+		t.Fatalf("records of a change, but nothing changed: %v", n)
+	}
+	eventsHold(t, lb, b.ID, "srcsecret-77a1b2c3")
 }

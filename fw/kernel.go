@@ -374,7 +374,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, err
 	}
 	extra := a.extraTools(ctx, req, named, parent)
-	resolved, text := a.resolveProfile(ctx, req, named, parent)
+	resolved := a.resolveProfile(ctx, req, named, parent)
 	req.Metadata = inheritBatch(req.Metadata, parentRun)
 	meta := a.annotate(ctx, &req, parentRun, req.Metadata)
 	if req.IdempotencyKey != "" {
@@ -383,7 +383,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		}
 		meta["idempotencyKey"] = req.IdempotencyKey
 	}
-	ev, err := NewEvent(req.ID, EvRunQueued, RunQueuedData{
+	queued := RunQueuedData{
 		Agent:         req.Agent,
 		Input:         req.Input,
 		Instructions:  req.Instructions,
@@ -398,7 +398,9 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		Files:         files,
 		ExtraTools:    extra,
 		Resolved:      resolved,
-	})
+	}
+	text := a.pinText(named, &queued)
+	ev, err := NewEvent(req.ID, EvRunQueued, queued)
 	if err != nil {
 		return nil, err
 	}

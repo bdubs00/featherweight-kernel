@@ -49,8 +49,8 @@ func (a *Agent) profileNamed(name string) AgentProfile {
 // resolveProfile resolves the configuration of a new run once, when the
 // kernel queues it, from named, the profile that the caller read once for
 // the whole request. It returns the record for fw.run.queued
-// (RunQueuedData.Resolved), which the run keeps for its life (profileOf),
-// and the text of the run, which stays in memory (textOf). The record is
+// (RunQueuedData.Resolved), which the run keeps for its life (profileOf);
+// pinText adds the digests of the text. The record is
 // the overlay of the inline profile on named, with these values filled in,
 // so that a later change of the configuration does not reach the run
 // either:
@@ -70,7 +70,7 @@ func (a *Agent) profileNamed(name string) AgentProfile {
 // profile now. The base policy of the process, the tools that are
 // connected, and the skills that are installed are not part of a profile,
 // so the kernel does not resolve them here.
-func (a *Agent) resolveProfile(ctx context.Context, req RunRequest, named AgentProfile, parent *runState) (*ResolvedProfile, *runText) {
+func (a *Agent) resolveProfile(ctx context.Context, req RunRequest, named AgentProfile, parent *runState) *ResolvedProfile {
 	prof := named
 	if req.Profile != nil {
 		prof = prof.Overlay(*req.Profile)
@@ -97,11 +97,24 @@ func (a *Agent) resolveProfile(ctx context.Context, req RunRequest, named AgentP
 		b = prof.Budget.Merge(b)
 	}
 	res.Budget = &b
-	// The text of the inline profile reaches the model as fw.run.queued
-	// stores it, so the text of the run takes it the same way.
-	text := composeText(named, a.storedText(req.Profile))
-	res.SystemDigest, res.InstructionsDigest = text.digests()
-	return res, text
+	return res
+}
+
+// pinText returns the text of a new run, which stays in memory (textOf),
+// and sets its digests in q.Resolved. The text of the inline profile
+// reaches the model as fw.run.queued stores it, so pinText takes it from q
+// with every secret replaced, as appendLocked replaces them in the event.
+func (a *Agent) pinText(named AgentProfile, q *RunQueuedData) *runText {
+	inline := q.Profile
+	if raw, err := json.Marshal(q); err == nil {
+		var stored RunQueuedData
+		if json.Unmarshal(a.redact.data(raw), &stored) == nil {
+			inline = stored.Profile
+		}
+	}
+	text := composeText(named, inline)
+	q.Resolved.SystemDigest, q.Resolved.InstructionsDigest = text.digests()
+	return text
 }
 
 // profile returns the resolved profile as an AgentProfile of the agent,
@@ -142,19 +155,6 @@ func composeText(named AgentProfile, inline *AgentProfile) *runText {
 		p.System = DefaultSystemPrompt
 	}
 	return &runText{system: p.System, instructions: p.Instructions}
-}
-
-// storedText returns the text of an inline profile as fw.run.queued holds
-// it, with every secret replaced (redact.go).
-func (a *Agent) storedText(inline *AgentProfile) *AgentProfile {
-	if inline == nil {
-		return nil
-	}
-	out := &AgentProfile{System: a.redact.text(inline.System)}
-	for _, s := range inline.Instructions {
-		out.Instructions = append(out.Instructions, a.redact.text(s))
-	}
-	return out
 }
 
 // digests returns the digests of the text as the model reads it, as
