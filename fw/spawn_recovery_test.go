@@ -357,7 +357,7 @@ func keptReason(t *testing.T, l Ledger, parent, child string) string {
 	for _, e := range ledgerEvents(t, l, parent) {
 		var d struct {
 			Child string `json:"child"`
-			Kept  string `json:"kept"`
+			Kept  string `json:"keptBecause"`
 		}
 		if e.Type == EvRunChild && json.Unmarshal(e.Data, &d) == nil && d.Child == child && d.Kept != "" {
 			return d.Kept

@@ -198,11 +198,11 @@ type RunChildData struct {
 	Ended  string `json:"ended,omitempty"`
 	Reason string `json:"reason,omitempty"`
 
-	// Kept says why a look for the child gave up while the child can still
+	// KeptBecause says why a look for the child gave up while the child can still
 	// run in its process. The child stays a child of the parent, with its
 	// share of the tree, its place under spawn.maxChildren, and the key of
 	// its start, and the next start of the parent looks for it again.
-	Kept string `json:"kept,omitempty"`
+	KeptBecause string `json:"keptBecause,omitempty"`
 }
 
 // The kinds of the first record of a child in another process.
@@ -806,7 +806,7 @@ type lookPacer interface {
 // The kernel cannot know that such a child never ran, so it stays a child
 // of the parent (keep): with its share of the tree, its place under
 // spawn.maxChildren, and the key of its start, so a rerun of the call
-// starts no second child. The parent records why (RunChildData.Kept), so
+// starts no second child. The parent records why (RunChildData.KeptBecause), so
 // a person sees what happened. A look for a child whose start
 // already ended for its caller cancels the child that it finds and removes
 // its process the same way, because nothing reads that child; at those
@@ -837,7 +837,7 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 	keep := func(reason string) {
 		a.log.Warn("look for a child gives up and keeps the child", "run", ref.parent, "child", id, "member", ref.member, "reason", reason)
 		if rs, err := k.lookup(ref.parent); err == nil {
-			if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: id, Member: ref.member, Kind: childSpawn, Kept: reason}); err != nil {
+			if _, err := a.emit(nil, rs, EvRunChild, RunChildData{Child: id, Member: ref.member, Kind: childSpawn, KeptBecause: reason}); err != nil {
 				a.log.Error("record a child that a look kept", "run", ref.parent, "child", id, "error", err)
 			}
 		}
