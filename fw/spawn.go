@@ -188,6 +188,15 @@ type RunChildData struct {
 	// metadata of a request, which can name MetaForkOf, cannot make a child
 	// look like a branch. A record of an older kernel has no kind.
 	Kind string `json:"kind,omitempty"`
+
+	// Ended is the outcome that the caller of a start of spawn_task got
+	// when the start ended without a child, failed or canceled, and Reason
+	// says why. The kernel records them when it could not remove the
+	// process of such a start, so the look for the child, also after a
+	// restart, ends a child that it finds instead of following it: nothing
+	// reads that child.
+	Ended  string `json:"ended,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // The kinds of the first record of a child in another process.
@@ -314,6 +323,7 @@ type branchStart struct {
 	cancel context.CancelFunc // ends the start
 	run    *Run               // the child as this process knows it until the start ends
 	find   bool               // the start looks for a child after a restart
+	drop   bool               // the look ends the child that it finds, whose start failed to its caller
 }
 
 // starting returns the branch as this process knows it while its start is
@@ -561,13 +571,20 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 // endStart ends a start that did not give a child: it records the child
 // here as a run with the outcome and the reason, once the planner abandoned
 // the process of the child. When the abandon failed (aerr), the process can
-// still exist, so the child stays a child of the parent and the look of a
-// restart takes over at once: it removes the process before it records the
-// end, however many tries that takes.
+// still exist, and the child too, if it took its run before the start
+// failed. The caller learns that the child did not start, so nothing will
+// read that child. The parent records the outcome on the child, and a look
+// takes over at once, also after a restart: it ends a child that it finds,
+// and removes the process before it records the end, however many tries
+// that takes.
 func (a *Agent) endStart(p *runState, d RunChildData, start *branchStart, outcome, reason string, aerr error) {
 	k := a.k
 	if aerr != nil && d.Member != "" {
 		a.log.Warn("the process of a child that did not start stays for a look", "run", p.id, "child", d.Child, "member", d.Member, "error", aerr)
+		d.Ended, d.Reason = outcome, reason
+		if _, err := a.emit(nil, p, EvRunChild, d); err != nil {
+			a.log.Error("record the end of a start in another process", "run", p.id, "child", d.Child, "error", err)
+		}
 		a.findChild(p, d, outcome, reason)
 	} else {
 		a.recordBranchEnd(d.Child, p.id, d.queued(p.id, p.depth+1), outcome, reason)
@@ -713,10 +730,15 @@ func (a *Agent) spawnedBefore(ctx context.Context, parent, key string) (*Run, bo
 // planner cannot tell, the child stays a child of the parent and the look
 // goes on, up to lookLimit. Until the look ends, the parent answers Get for
 // the child, and WaitFor, Cancel, Decide, and a start under the same key
-// wait for the end.
+// wait for the end. A child whose start already ended for its caller
+// (d.Ended) is ended where the look finds it, with that outcome.
 func (a *Agent) findChild(parent *runState, d RunChildData, outcome, why string) {
 	k := a.k
 	q := d.queued(parent.id, parent.depth+1)
+	drop := d.Ended != ""
+	if drop {
+		outcome, why = d.Ended, d.Reason
+	}
 	planner, ok := a.spawner.(Planner)
 	switch {
 	case a.spawner != nil && d.Member == "":
@@ -739,7 +761,7 @@ func (a *Agent) findChild(parent *runState, d RunChildData, outcome, why string)
 		return
 	}
 	ctx, cancel := context.WithCancel(k.ctx)
-	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder, find: true}
+	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder, find: true, drop: drop}
 	ref := childRef{parent: parent.id, member: d.Member, depth: parent.depth + 1, start: start, key: d.Key, reserved: d.Reserved, known: d.Kind != ""}
 	a.decorateChild(placeholder, ref)
 	k.mu.Lock()
@@ -761,8 +783,10 @@ const lookLimit = 15 * time.Minute
 // remove; a failed abandon is tried again. Past lookLimit, the look gives
 // up: it abandons the process, because a child that the parent cannot
 // reach can never report to it, and records the child as failed with the
-// reason, so a person sees what happened. Every call to the spawner ends
-// before the look ends, so none outlives Close.
+// reason, so a person sees what happened. A look for a child whose start
+// already ended for its caller cancels the child that it finds and removes
+// its process the same way, because nothing reads that child. Every call
+// to the spawner ends before the look ends, so none outlives Close.
 func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id string, q RunQueuedData, outcome, why string) {
 	k := a.k
 	defer ref.start.cancel()
@@ -785,7 +809,7 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 			done()
 			return
 		}
-		if err == nil {
+		if err == nil && !ref.start.drop {
 			a.adoptChild(ctx, ref, id)
 			done()
 			// The read of the look counts the tree of the child, and a tree
@@ -794,9 +818,23 @@ func (a *Agent) find(ctx context.Context, planner Planner, ref childRef, id stri
 			a.observe(id, ref, found)
 			return
 		}
-		missing := errors.Is(err, ErrRunNotFound)
-		end, reason := outcome, why+": "+err.Error()
-		if !missing {
+		missing := err == nil || errors.Is(err, ErrRunNotFound)
+		var end, reason string
+		switch {
+		case err == nil:
+			// The child runs, but its start ended for its caller, so
+			// nothing reads it: it ends, and its process goes.
+			cctx, cancel := context.WithTimeout(ctx, time.Minute)
+			if cerr := a.spawner.Cancel(cctx, ref.member, id); cerr != nil {
+				a.log.Warn("cancel a child whose start ended for its caller", "run", ref.parent, "child", id, "member", ref.member, "error", cerr)
+			}
+			cancel()
+			end, reason = outcome, why
+		case missing:
+			end, reason = outcome, why+": "+err.Error()
+		case ref.start.drop:
+			end, reason = outcome, why+"; this process could not reach "+ref.member+" to end the child: "+err.Error()
+		default:
 			end, reason = "failed", "this process could not reach "+ref.member+" to look for the child: "+err.Error()
 		}
 		late := !a.now().Before(deadline)

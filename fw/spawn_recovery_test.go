@@ -609,3 +609,91 @@ func TestLookKeepsTheShareOfItsChild(t *testing.T) {
 	}
 	sp.setFindErr(nil)
 }
+
+// runningParent starts a parent run whose model waits until the run is
+// canceled, so the parent does not end while a test works on its child.
+func runningParent(t *testing.T, a *Agent) string {
+	t.Helper()
+	ctx := testCtx(t)
+	parent, err := a.Start(ctx, "parent work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the parent runs", func() bool {
+		r, err := a.Get(ctx, parent.ID)
+		return err == nil && r.State == StateRunning
+	})
+	t.Cleanup(func() { _ = a.Cancel(context.Background(), parent.ID) })
+	return parent.ID
+}
+
+// A start that failed for its caller after the child took its run, and
+// whose process did not go at once, does not leave the child running: the
+// look that takes over finds the child, cancels it, and removes its
+// process, because the caller learned that the child did not start and
+// nothing reads it. The parent still runs, so it is not the end of the
+// parent that cancels the child.
+func TestFailedStartWhoseChildRunsIsEnded(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	sp.abandonFails = 1
+	l := NewMemLedger()
+	a := newTestAgent(t, blockingModel(nil), WithLedger(l), WithSpawner(sp))
+	parent := runningParent(t, a)
+	id, done, release := startHeld(t, a, sp, parent, beforeEnd, false)
+	release()
+	if err := <-done; err == nil {
+		t.Fatal("SpawnChild of a failed start returned no error")
+	}
+	r, err := other.WaitFor(ctx, id, func(r *Run) bool { return r.State.Terminal() })
+	if err != nil || r.State != StateCanceled {
+		t.Fatalf("the child of the failed start = %+v, %v", r, err)
+	}
+	eventually(t, "the process of the child goes", func() bool { return sp.alive(taskOf(id)) != nil })
+	eventually(t, "the child is recorded as failed", func() bool {
+		r, err := a.Get(ctx, id)
+		return err == nil && r.State == StateFailed && strings.Contains(r.Error, "did not start")
+	})
+	if _, ok := a.remoteChild(id); ok {
+		t.Fatal("the parent still follows the child of the failed start")
+	}
+	if r, _ := a.Get(ctx, parent); r.State != StateRunning {
+		t.Fatalf("the parent = %s", r.State)
+	}
+}
+
+// The end of a start that failed for its caller is on the record, so the
+// look after a restart ends the child too, instead of following it.
+func TestFailedStartWhoseChildRunsIsEndedAfterARestart(t *testing.T) {
+	ctx := testCtx(t)
+	other := newTestAgent(t, blockingModel(nil))
+	sp := newCrashSpawner(other)
+	sp.abandonFails = 1
+	sp.setFindErr(errors.New("the platform does not answer"))
+	l := NewMemLedger()
+	cut := &cutLedger{Ledger: l}
+	dead := &deadSpawner{crashSpawner: sp}
+	a := newTestAgent(t, blockingModel(nil), WithLedger(cut), WithSpawner(dead))
+	parent := runningParent(t, a)
+	id, done, release := startHeld(t, a, sp, parent, beforeEnd, false)
+	release()
+	if err := <-done; err == nil {
+		t.Fatal("SpawnChild of a failed start returned no error")
+	}
+	cut.cut.Store(true) // the parent process dies while it looks for the child
+	dead.cut.Store(true)
+
+	b := newTestAgent(t, blockingModel(nil), WithLedger(l), WithSpawner(sp))
+	sp.setFindErr(nil)
+	r, err := other.WaitFor(ctx, id, func(r *Run) bool { return r.State.Terminal() })
+	if err != nil || r.State != StateCanceled {
+		t.Fatalf("the child of the failed start after the restart = %+v, %v", r, err)
+	}
+	eventually(t, "the child is recorded as failed", func() bool {
+		r, err := b.Get(ctx, id)
+		return err == nil && r.State == StateFailed && strings.Contains(r.Error, "did not start")
+	})
+	eventually(t, "the process of the child goes", func() bool { return sp.alive(taskOf(id)) != nil })
+	_ = b.Cancel(ctx, parent)
+}

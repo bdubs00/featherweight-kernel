@@ -61,6 +61,9 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, recovery, error) {
 						if remote[i].Member == "" {
 							remote[i].Member = d.Member
 						}
+						if d.Ended != "" {
+							remote[i].Ended, remote[i].Reason = d.Ended, d.Reason
+						}
 					} else {
 						index[d.Child] = len(remote)
 						remote = append(remote, d)
