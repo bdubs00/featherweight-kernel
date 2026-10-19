@@ -548,6 +548,9 @@ func summarize(e fw.Event, tools map[string]string) string {
 		var d fw.BudgetExceededData
 		if e.Decode(&d) == nil {
 			add("limit=%s value=%g", d.Limit, d.Value)
+			if d.Scope != "" {
+				add("scope=%s run=%s", d.Scope, d.Run)
+			}
 		}
 	case fw.EvLoopDetected:
 		var d fw.LoopDetectedData

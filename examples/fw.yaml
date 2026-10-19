@@ -221,12 +221,12 @@ policy:
   deny: []
   external: null                # { mcp: control, tool: decide } or { bus: fw.policy, timeout: 5s }; it replaces the rules above, and a profile can only tighten it
 
-budget:
-  maxTurns: 200
-  maxTokens: 2000000
-  maxCostUSD: 0                 # 0 is off; needs prices
+budget:                         # maxTokens, maxCostUSD, and maxToolCalls hold for a run and every run under it together
+  maxTurns: 200                 # model turns of one run
+  maxTokens: 2000000            # tokens of the run and of its child runs together
+  maxCostUSD: 0                 # 0 is off; needs prices; the run and its child runs together
   deadline: 2h                  # working time; time spent waiting for a person, a follow-up, or a wake does not count
-  maxToolCalls: 1000            # tool calls in one run
+  maxToolCalls: 1000            # tool calls of the run and of its child runs together
   maxCallsPerTurn: 32           # tool calls in one model response
   maxRepeats: 5                 # the same call this many times in a row fails the run; a cycle of two or three calls counts
 
@@ -242,6 +242,8 @@ time:                           # the clock of the agent (docs/ARCHITECTURE.md s
 spawn:                          # child runs through spawn_task
   maxDepth: 3                   # 1 lets a run start children, 2 lets those start children
   maxChildren: 16               # child runs that one run can start in its life
+  maxDescendants: 32            # runs that one tree can hold under its root, at every depth and in every process
+  maxRunning: 8                 # child runs of this process that work at the same time; a run that waits for its children gives its place up
   driver: ""                    # empty runs the children in this process; ax runs each child in a child Task through ax.server and ax.router. FW_SPAWN_DRIVER
 
 prices: {}                      # "anthropic/claude-opus-5-5": { input: 4.00, output: 20.00 } per million tokens

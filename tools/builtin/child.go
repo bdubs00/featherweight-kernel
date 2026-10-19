@@ -199,7 +199,12 @@ func childResult(tool string, r *fw.Run) fw.ToolResult {
 		}
 		res = fw.TextResult(out)
 	case fw.StateCanceled:
-		res = fw.ErrorResult(fmt.Sprintf("%s: child run %s was canceled.", tool, r.ID))
+		msg := fmt.Sprintf("%s: child run %s was canceled.", tool, r.ID)
+		if e := strings.TrimPrefix(r.Error, "canceled: "); e != "" && e != "canceled" {
+			// A stop of the tree says what ran out.
+			msg = fmt.Sprintf("%s: child run %s was canceled: %s.", tool, r.ID, e)
+		}
+		res = fw.ErrorResult(msg)
 	case fw.StateFailed:
 		msg := fmt.Sprintf("%s: child run %s failed: %s", tool, r.ID, r.Error)
 		if o := strings.TrimSpace(r.Output); o != "" {

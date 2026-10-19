@@ -539,6 +539,9 @@ func describe(e fw.Event) string {
 	case fw.EvBudgetExceeded:
 		var d fw.BudgetExceededData
 		if e.Decode(&d) == nil {
+			if d.Scope == fw.ScopeTree {
+				return fmt.Sprintf("budget exceeded: %s of the run tree of %s at %g", d.Limit, d.Run, d.Value)
+			}
 			return fmt.Sprintf("budget exceeded: %s at %g", d.Limit, d.Value)
 		}
 	case fw.EvLoopDetected:

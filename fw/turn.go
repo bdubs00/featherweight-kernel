@@ -422,11 +422,19 @@ func (a *Agent) brief(ctx context.Context, rs *runState, tools []Tool) string {
 // and calls the model once.
 func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
-	if limit, value, over := a.overBudget(rs, c); over {
-		if _, err := a.emit(ctx, rs, EvBudgetExceeded, BudgetExceededData{Limit: limit, Value: value}); err != nil {
+	if o, over := a.overBudget(rs, c); over {
+		if _, err := a.emit(ctx, rs, EvBudgetExceeded, o.data()); err != nil {
 			return err
 		}
-		return a.finish(ctx, rs, OutcomeFailed, "", "budget exceeded: "+limit)
+		if err := a.finish(ctx, rs, OutcomeFailed, "", "budget exceeded: "+o.text(rs.id)); err != nil {
+			return err
+		}
+		// No run under the owner of a shared limit can spend more, so the
+		// open ones stop now instead of at their next step.
+		if o.shared() {
+			a.stopTree(o)
+		}
+		return nil
 	}
 	selector := a.selectorOf(c.queued, prof)
 	model, err := a.openModel(ctx, selector)
@@ -664,7 +672,9 @@ func (a *Agent) lineage(rs *runState) []*runState {
 
 // budgetOf returns the effective budget of a run: its own budget
 // (ownBudget), capped by the budget of the parent so that a child never
-// outgrows its parent.
+// outgrows its parent. The limits that a tree shares hold for the tree of
+// each ancestor too (roomOf), so the cap of those is a bound on the run
+// alone.
 func (a *Agent) budgetOf(rs *runState) Budget {
 	b := a.ownBudget(rs)
 	if rs.parent != "" {
@@ -675,31 +685,29 @@ func (a *Agent) budgetOf(rs *runState) Budget {
 	return b
 }
 
-// overBudget compares the usage of the run with its effective budget.
-func (a *Agent) overBudget(rs *runState, c *cursor) (string, float64, bool) {
+// overBudget compares the usage of the run with its effective budget, the
+// usage of its tree and of the tree of each ancestor with the budget of
+// that run, and the working time of the lineage with each deadline. The
+// turns of a run count against its own budget alone.
+func (a *Agent) overBudget(rs *runState, c *cursor) (overrun, bool) {
 	b := a.budgetOf(rs)
-	rs.mu.Lock()
-	u := rs.run.Usage
-	rs.mu.Unlock()
 	next := c.turns
 	if !c.turnOpen {
 		next++
 	}
-	tokens := u.InputTokens + u.OutputTokens
-	switch {
-	case b.MaxTurns > 0 && next > b.MaxTurns:
-		return "maxTurns", float64(c.turns), true
-	case b.MaxTokens > 0 && tokens >= b.MaxTokens:
-		return "maxTokens", float64(tokens), true
-	case b.MaxCostUSD > 0 && u.CostUSD >= b.MaxCostUSD:
-		return "maxCostUSD", u.CostUSD, true
-	case b.MaxToolCalls > 0 && c.toolCalls >= b.MaxToolCalls:
-		return "maxToolCalls", float64(c.toolCalls), true
+	if b.MaxTurns > 0 && next > b.MaxTurns {
+		return overrun{limit: "maxTurns", value: float64(c.turns), max: float64(b.MaxTurns), owner: rs}, true
+	}
+	if o, over := ownSpent(rs, b, c.toolCalls); over {
+		return o, true
+	}
+	if o, over := a.treeSpent(rs); over {
+		return o, true
 	}
 	if worked, over := a.pastDeadline(rs); over {
-		return "deadline", worked.Seconds(), true
+		return overrun{limit: "deadline", value: worked.Seconds(), owner: rs}, true
 	}
-	return "", 0, false
+	return overrun{}, false
 }
 
 // pastDeadline reports whether the run or one of its ancestors used up the
@@ -927,11 +935,34 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 		return a.finish(ctx, rs, OutcomeFailed, TextOf(c.resp.Content), fmt.Sprintf("budget exceeded: maxRepeats (the model made the same %s call %d times in a row)", describeLoop(tool, period), count))
 	}
 
+	// A run whose tree, or the tree of an ancestor, used up its tokens or
+	// its cost runs no more tools: each open call gets an error result,
+	// and the run stops at its next step.
+	if o, spent := a.limitSpent(rs); spent && o.limit != "maxToolCalls" {
+		var plan []plannedCall
+		for _, u := range uses {
+			if rec := c.calls[u.ID]; rec != nil && !rec.responded {
+				plan = append(plan, plannedCall{use: u, result: ErrorResult("not run: " + o.why() + ". This run stops.")})
+			}
+		}
+		if err := a.execute(ctx, rs, plan); err != nil {
+			return err
+		}
+		return a.closeTurn(ctx, rs, c)
+	}
+
 	_, byName := a.runTools(ctx, rs, prof)
 	policy := a.policyFor(rs, prof)
 	room := -1 // tool calls left in the run, or -1 for no limit
 	if b.MaxToolCalls > 0 {
 		room = max(b.MaxToolCalls-c.toolCalls, 0)
+	}
+	// The tool calls of a tree count against the budget of each run above
+	// them, so the tightest tree of the lineage bounds this response too.
+	calls := a.roomOf(rs).calls
+	shared := -1
+	if calls.set {
+		shared = max(int(calls.left), 0)
 	}
 	var plan []plannedCall
 	for i, u := range uses {
@@ -952,6 +983,10 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 			continue
 		case room == 0:
 			p.result = ErrorResult(fmt.Sprintf("not run: the run reached its limit of %d tool calls (budget.maxToolCalls). Finish with what you have.", b.MaxToolCalls))
+			plan = append(plan, p)
+			continue
+		case shared == 0:
+			p.result = ErrorResult(fmt.Sprintf("not run: the runs of this tree used the %d tool calls of the budget of run %s (budget.maxToolCalls, which a run shares with the runs under it). Finish with what you have.", int(calls.max), calls.owner.id))
 			plan = append(plan, p)
 			continue
 		}
@@ -1000,6 +1035,9 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 		}
 		if p.run && room > 0 {
 			room--
+		}
+		if p.run && shared > 0 {
+			shared--
 		}
 		plan = append(plan, p)
 	}
@@ -1278,6 +1316,9 @@ func (a *Agent) waitDecision(ctx, runCtx context.Context, rs *runState, req Appr
 	if _, err := a.emit(runCtx, rs, EvApprovalRequested, req); err != nil {
 		return ApprovalDecidedData{}, err
 	}
+	// A child run that waits for a person gives up its slot of
+	// spawn.maxRunning, so the parent that relays the question can work.
+	defer a.park(rs)()
 	select {
 	case d := <-ch:
 		return d, nil

@@ -133,7 +133,7 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	// The start outlives the request of the caller, and Cancel ends it.
 	bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder}
-	ref := childRef{parent: src, member: member, depth: depth, start: start}
+	ref := childRef{parent: src, member: member, depth: depth, start: start, branch: true}
 	a.decorateChild(placeholder, ref)
 	placed := RunChildData{Child: req.ID, Member: member, Principal: q.Principal, PrincipalKind: q.PrincipalKind, Metadata: q.Metadata}
 	if _, err := a.emit(nil, rs, EvRunChild, placed); err != nil {
@@ -346,7 +346,7 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 		if e.Seq > req.Seq {
 			break
 		}
-		if e.Type == EvRunChild {
+		if e.Type == EvRunChild || e.Type == EvChildReported {
 			continue // the children belong to the source
 		}
 		if e.Type == EvRunQueued {
@@ -387,6 +387,7 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 	}
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
+	brs.maxDesc = maxDescOf(q.Metadata)
 	k.mu.Lock()
 	k.runs[id] = brs
 	k.mu.Unlock()

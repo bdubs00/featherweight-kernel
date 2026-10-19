@@ -19,11 +19,16 @@ import (
 // rebuild loads every run of the ledger into the cache. It returns the runs
 // whose state is not terminal, oldest first. The state, not the last event,
 // decides: metadata that arrives after fw.run.finished leaves a run
-// finished, and a follow-up message opens it again.
+// finished, and a follow-up message opens it again. The tree of each run
+// comes back with it: its children in this process from their
+// fw.run.queued, its children in other processes with their shares from
+// fw.run.child, and what those last reported from fw.child.reported, so
+// the usage and the size of the tree count again before the first read.
 func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 	k := a.k
 	var unfinished []*runState
 	var lost []lostBranch
+	reports := map[string]ChildReportedData{}
 	for id, err := range a.ledger.Runs(ctx) {
 		if err != nil {
 			return nil, fmt.Errorf("fw: list runs: %w", err)
@@ -59,6 +64,13 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 						remote = append(remote, d)
 					}
 				}
+			case EvChildReported:
+				var d ChildReportedData
+				if e.Decode(&d) == nil && d.Child != "" {
+					prev := reports[d.Child]
+					d.TreeUsage = d.TreeUsage.atLeast(prev.TreeUsage)
+					reports[d.Child] = d
+				}
 			}
 			if trace == "" {
 				trace = e.TraceParent
@@ -66,14 +78,17 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		}
 		rs := k.newRunState(id, q.Agent, trace)
 		rs.parent, rs.depth, rs.queued = q.Parent, q.Depth, q
+		rs.maxDesc = maxDescOf(q.Metadata)
 		rs.run = *ProjectRun(evs, a.prices)
 		k.mu.Lock()
 		k.runs[id] = rs
 		if q.Parent != "" {
 			k.kids[q.Parent]++
+			k.children[q.Parent] = append(k.children[q.Parent], rs)
 		}
 		for _, d := range remote {
-			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1, key: d.Key}
+			k.remote[d.Child] = childRef{parent: id, member: d.Member, depth: q.Depth + 1, key: d.Key,
+				reserved: d.Reserved, branch: d.Metadata[MetaForkOf] != ""}
 			k.kids[id]++
 			if d.placed() || d.spawning() {
 				lost = append(lost, lostBranch{src: rs, data: d})
@@ -95,6 +110,11 @@ func (a *Agent) rebuild(ctx context.Context) ([]*runState, error) {
 		if _, ok := k.runs[id]; ok {
 			delete(k.remote, id)
 			k.kids[ref.parent]--
+		}
+	}
+	for id, d := range reports {
+		if _, ok := k.remote[id]; ok {
+			k.reports[id] = &childReport{tree: d.TreeUsage, state: d.State, open: d.Open, rec: d}
 		}
 	}
 	k.mu.Unlock()

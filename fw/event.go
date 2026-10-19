@@ -49,7 +49,8 @@ const (
 	EvRunSuspended      = "fw.run.suspended"
 	EvRunResumed        = "fw.run.resumed"
 	EvRunFinished       = "fw.run.finished"
-	EvRunChild          = "fw.run.child" // a spawner started a child of this run in another process; see RunChildData
+	EvRunChild          = "fw.run.child"      // a spawner started a child of this run in another process; see RunChildData
+	EvChildReported     = "fw.child.reported" // the usage that a child in another process last reported; see ChildReportedData
 	EvLoopDetected      = "fw.loop.detected"
 	// EvToolSend is published on the bus by the send tool. It is not a ledger event.
 	EvToolSend = "fw.tool.send"
@@ -317,10 +318,37 @@ type LoopDetectedData struct {
 	Action string `json:"action"`
 }
 
-// BudgetExceededData is the payload of fw.budget.exceeded.
+// BudgetExceededData is the payload of fw.budget.exceeded. Limit names the
+// limit, such as maxTokens, and Value is the usage that reached it. Max is
+// the limit itself, when the kernel recorded it. Scope is ScopeTree when
+// the usage of a run and of the runs under it reached a limit that holds
+// for the tree (see Budget), and Run then names the run whose budget holds
+// the limit: this run or one of its ancestors.
 type BudgetExceededData struct {
 	Limit string  `json:"limit"`
 	Value float64 `json:"value"`
+	Max   float64 `json:"max,omitempty"`
+	Scope string  `json:"scope,omitempty"`
+	Run   string  `json:"run,omitempty"`
+}
+
+// ScopeTree is the scope of a fw.budget.exceeded event that a tree of runs
+// reached together.
+const ScopeTree = "tree"
+
+// ChildReportedData is the payload of EvChildReported. The kernel appends
+// it to a parent run when it reads a child in another process and sees
+// that the child ended, and at most once a minute while the usage of the
+// child grows, so a restart of the parent knows what the tree of the child
+// used. TreeUsage is the usage of the child and of every run under it, as
+// the child reported it (Run.TreeUsage), State is the state of the child,
+// and Open is its Run.TreeOpen.
+type ChildReportedData struct {
+	Child     string   `json:"child"`
+	Member    string   `json:"member,omitempty"`
+	State     RunState `json:"state"`
+	TreeUsage RunUsage `json:"treeUsage"`
+	Open      int      `json:"open,omitempty"`
 }
 
 // ErrorData is the payload of fw.error.

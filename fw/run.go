@@ -35,6 +35,13 @@ func (s RunState) Terminal() bool {
 // three calls that comes back in the same order. One turn before MaxRepeats
 // is reached, the kernel tells the model that it is repeating itself. At
 // MaxRepeats, the run fails with fw.budget.exceeded.
+//
+// MaxTokens, MaxCostUSD, and MaxToolCalls hold for the tree of the run: the
+// run and every run under it, in this process and in others, share them
+// (docs/ARCHITECTURE.md section 5.2). MaxTurns, MaxCallsPerTurn, and
+// MaxRepeats hold for each run alone, because they describe the shape of
+// one conversation. The deadline counts the working time of the run and of
+// each of its ancestors.
 type Budget struct {
 	MaxTurns        int           `yaml:"maxTurns,omitempty" json:"maxTurns,omitempty"`
 	MaxTokens       int           `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
@@ -73,7 +80,9 @@ func (b Budget) Merge(o Budget) Budget {
 
 // Cap returns b with every limit that is larger than the same limit of o
 // lowered to it. A limit that o leaves at zero stays as it is. The kernel
-// caps the budget of a child run by the budget of its parent.
+// caps the budget of a child run by the budget of its parent, and the
+// budget of a child in another process by what the tree of the parent has
+// left (see Budget).
 func (b Budget) Cap(o Budget) Budget {
 	capInt := func(v, limit int) int {
 		if limit > 0 && (v == 0 || v > limit) {
@@ -213,6 +222,33 @@ type RunUsage struct {
 	UnpricedTokens int `json:"unpricedTokens,omitempty"`
 }
 
+// plus returns the sum of two usages, field by field.
+func (u RunUsage) plus(o RunUsage) RunUsage {
+	u.Usage = u.Usage.Add(o.Usage)
+	u.Turns += o.Turns
+	u.ToolCalls += o.ToolCalls
+	u.CostUSD += o.CostUSD
+	u.UnpricedTokens += o.UnpricedTokens
+	return u
+}
+
+// atLeast returns u with each field raised to the same field of o. Every
+// field of a usage only grows, so two reads of one run give the later one.
+func (u RunUsage) atLeast(o RunUsage) RunUsage {
+	u.InputTokens = max(u.InputTokens, o.InputTokens)
+	u.OutputTokens = max(u.OutputTokens, o.OutputTokens)
+	u.CacheReadTokens = max(u.CacheReadTokens, o.CacheReadTokens)
+	u.CacheWriteTokens = max(u.CacheWriteTokens, o.CacheWriteTokens)
+	u.Turns = max(u.Turns, o.Turns)
+	u.ToolCalls = max(u.ToolCalls, o.ToolCalls)
+	u.CostUSD = max(u.CostUSD, o.CostUSD)
+	u.UnpricedTokens = max(u.UnpricedTokens, o.UnpricedTokens)
+	return u
+}
+
+// tokens returns the tokens that the budget counts: input and output.
+func (u RunUsage) tokens() int { return u.InputTokens + u.OutputTokens }
+
 // Run is the status object of a run. It is a projection of the ledger.
 type Run struct {
 	ID    string `json:"id"`
@@ -251,6 +287,20 @@ type Run struct {
 	// consumer that receives only the lifecycle events of a run, such as
 	// the front of a fleet, knows the usage of the run up to this event.
 	UsageSeq uint64 `json:"usageSeq,omitempty"`
+	// TreeUsage is the usage of the run and of every run under it, as the
+	// kernel that holds the run knows it: its children in this process as
+	// they are now, and its children in other processes as each one last
+	// reported its own tree. It includes Usage. A sum over several runs
+	// adds Usage and never TreeUsage, which counts the same calls again.
+	// It is nil for a run that started no child. The ledger never holds
+	// it: the kernel sets it on each run that it reports, so a parent in
+	// another process reads the whole tree of a child in one read.
+	TreeUsage *RunUsage `json:"treeUsage,omitempty"`
+	// TreeOpen counts the runs under the run that have not finished, as
+	// the kernel knows them, with TreeUsage. A parent in another process
+	// goes on reading a finished child while it is not zero, because the
+	// tree of the child can still grow.
+	TreeOpen int `json:"treeOpen,omitempty"`
 }
 
 // RunRequest describes a run to start.

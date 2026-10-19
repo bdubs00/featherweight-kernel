@@ -3,6 +3,7 @@ package fw
 import (
 	"crypto/tls"
 	"log/slog"
+	"time"
 )
 
 // Option configures New.
@@ -38,6 +39,10 @@ type options struct {
 	services   []Service
 	noServices bool
 	spawner    Spawner
+	// followEvery and recordEvery replace the intervals of tree.go; only a
+	// test of this package sets them.
+	followEvery time.Duration
+	recordEvery time.Duration
 }
 
 // WithServices adds services to the registered ones (see Service).

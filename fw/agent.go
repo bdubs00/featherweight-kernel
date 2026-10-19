@@ -45,9 +45,13 @@ type Agent struct {
 	tlsConfig *tls.Config
 	prices    Prices
 	clock     Clock
-	spawner   Spawner   // the children in other processes, see spawn.go
-	node      string    // the name of this process, see Config.Node
-	started   time.Time // when New built this agent, see Started
+	spawner   Spawner // the children in other processes, see spawn.go
+	// followEvery and recordEvery are the intervals of the reads of the
+	// children in other processes and of their records, see tree.go.
+	followEvery time.Duration
+	recordEvery time.Duration
+	node        string    // the name of this process, see Config.Node
+	started     time.Time // when New built this agent, see Started
 
 	tokMu        sync.RWMutex
 	personTokens PersonTokens // the tokens of people from a linked package, see connect.go
@@ -150,6 +154,13 @@ func New(opts ...Option) (*Agent, error) {
 		annotators: o.annotators,
 		models:     map[string]Model{},
 		noResume:   o.noResume,
+	}
+	a.followEvery, a.recordEvery = defaultFollowEvery, defaultRecordEvery
+	if o.followEvery > 0 {
+		a.followEvery = o.followEvery
+	}
+	if o.recordEvery > 0 {
+		a.recordEvery = o.recordEvery
 	}
 	a.ready.Store(true)
 	if a.log == nil {

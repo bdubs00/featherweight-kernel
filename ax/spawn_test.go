@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -502,7 +503,7 @@ func TestChildTaskInheritsTheEgress(t *testing.T) {
 		{TLS: &EgressHosts{Hostnames: []string{"github.com", "*.github.com"}, Ports: []int32{443}}},
 		{},
 	}}}}
-	child := s.childTask(base, "team", "c", &fw.Run{ID: "01P"})
+	child := s.childTask(base, "team", "c", &fw.Run{ID: "01P"}, -1)
 	rules := child.Spec.GetEgress().GetRules()
 	if len(rules) != 3 {
 		t.Fatalf("rules = %v, want 3", rules)
@@ -516,7 +517,7 @@ func TestChildTaskInheritsTheEgress(t *testing.T) {
 	if h := rules[2].GetTls(); h == nil || len(h.GetHostnames()) != 2 || h.GetPorts()[0] != 443 {
 		t.Fatalf("tls rule = %v", rules[2])
 	}
-	plain := s.childTask(&Task{Metadata: ObjectMeta{Name: "m", Atespace: "team"}, Spec: TaskSpec{Image: "img"}}, "team", "c", &fw.Run{ID: "01P"})
+	plain := s.childTask(&Task{Metadata: ObjectMeta{Name: "m", Atespace: "team"}, Spec: TaskSpec{Image: "img"}}, "team", "c", &fw.Run{ID: "01P"}, -1)
 	if plain.Spec.GetEgress() != nil {
 		t.Fatalf("a parent without egress gave the child %v", plain.Spec.GetEgress())
 	}
@@ -531,7 +532,7 @@ func TestChildTaskCarriesTheDepthTheConfigExpects(t *testing.T) {
 	s := newSpawnerUnderTest(t, ax, router)
 	base := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img"}}
 	for depth, want := range map[int]string{0: "2", 1: "1", 2: "", 3: ""} {
-		child := s.childTask(base, "team", "c", &fw.Run{ID: "01P", Depth: depth})
+		child := s.childTask(base, "team", "c", &fw.Run{ID: "01P", Depth: depth}, -1)
 		env := map[string]string{}
 		for _, e := range child.Spec.Env {
 			env[e.Name] = e.Value
@@ -544,11 +545,56 @@ func TestChildTaskCarriesTheDepthTheConfigExpects(t *testing.T) {
 		}
 	}
 	s.cfg.Spawn.MaxDepth = 0
-	child := s.childTask(base, "team", "c", &fw.Run{ID: "01P", Depth: 20})
+	child := s.childTask(base, "team", "c", &fw.Run{ID: "01P", Depth: 20}, -1)
 	for _, e := range child.Spec.Env {
 		if (e.Name == EnvSpawnMaxDepth && e.Value != "0") || (e.Name == EnvSpawnDisabled && e.Value != "false") {
 			t.Fatalf("unlimited depth changed meaning: %v", child.Spec.Env)
 		}
+	}
+}
+
+// TestChildTaskCarriesItsShareOfTheTree proves that a child Task gets the
+// runs that its share of spawn.maxDescendants leaves under it, that a share
+// without room disables spawning there, because zero means unlimited, and
+// that an inherited value never survives. A branch has no share and gets
+// the limit of this process.
+func TestChildTaskCarriesItsShareOfTheTree(t *testing.T) {
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	s := newSpawnerUnderTest(t, ax, router)
+	base := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img",
+		Env: []EnvVar{{Name: EnvSpawnMaxDescendants, Value: "999"}}}}
+	for _, tc := range []struct {
+		share    int
+		want     string
+		disabled bool
+	}{{2, "2", false}, {0, "", true}, {-1, fmt.Sprint(fw.DefaultSpawnDescendants), false}} {
+		child := s.childTask(base, "team", "c", &fw.Run{ID: "01P"}, tc.share)
+		env, n := map[string]string{}, 0
+		for _, e := range child.Spec.Env {
+			env[e.Name] = e.Value
+			if e.Name == EnvSpawnMaxDescendants {
+				n++
+			}
+		}
+		if got := env[EnvSpawnMaxDescendants]; got != tc.want || n > 1 || (env[EnvSpawnDisabled] == "true") != tc.disabled {
+			t.Fatalf("share %d: env = %v", tc.share, env)
+		}
+	}
+	// Spawn reads the share from the request that the kernel filled.
+	parent := &fw.Run{ID: "01PARENT"}
+	req := fw.RunRequest{ID: "01CHILD", Input: "x", Metadata: map[string]string{fw.MetaParent: parent.ID, fw.MetaMaxDescendants: "3"}}
+	if _, _, err := s.Spawn(context.Background(), parent, req); err != nil {
+		t.Fatal(err)
+	}
+	got := ""
+	for _, e := range ax.created()[0].GetSpec().GetEnv() {
+		if e.GetName() == EnvSpawnMaxDescendants {
+			got = e.GetValue()
+		}
+	}
+	if got != "3" {
+		t.Fatalf("the child Task got %s=%q", EnvSpawnMaxDescendants, got)
 	}
 }
 

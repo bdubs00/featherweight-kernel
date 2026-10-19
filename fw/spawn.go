@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -132,6 +133,12 @@ const (
 	// MetaParentMember is the name of the process that holds the parent,
 	// such as "ax:<atespace>/<task>".
 	MetaParentMember = "fw.parentMember"
+	// MetaMaxDescendants is the most runs that a run can have under it, as
+	// a decimal number; "0" means that it starts no child. The kernel sets
+	// it on a child that a Spawner runs, to the share of spawn.maxDescendants
+	// that the parent reserved for the child, and every kernel holds the
+	// tree of the run to it, or to spawn.maxDescendants when that is less.
+	MetaMaxDescendants = "fw.maxDescendants"
 )
 
 // RunChildData is the data of EvRunChild, which the kernel appends to a
@@ -164,6 +171,12 @@ type RunChildData struct {
 	Agent string `json:"agent,omitempty"`
 	Input string `json:"input,omitempty"`
 	Key   string `json:"key,omitempty"`
+
+	// Reserved is the number of runs that the child holds of the tree of
+	// its parent (spawn.maxDescendants): the child and the runs that it can
+	// start under it, which travel to it in MetaMaxDescendants. An event of
+	// an older kernel has none, and the child then counts as one run.
+	Reserved int `json:"reserved,omitempty"`
 }
 
 // placed reports whether the event records a branch that its process has
@@ -208,13 +221,18 @@ func inheritBatch(meta map[string]string, parent *Run) map[string]string {
 
 // childRef is where a remote child lives. A child that its process does
 // not have yet carries its start. key is the idempotency key of the start
-// of a child of spawn_task.
+// of a child of spawn_task. reserved is the number of runs of the tree of
+// the parent that the child holds (spawn.maxDescendants). A branch is a
+// run of its own: it shares no budget and no count with the tree of its
+// source.
 type childRef struct {
-	parent string
-	member string
-	depth  int
-	start  *branchStart
-	key    string
+	parent   string
+	member   string
+	depth    int
+	start    *branchStart
+	key      string
+	reserved int
+	branch   bool
 }
 
 // branchStart is the start of a branch or a child in another process
@@ -258,11 +276,15 @@ func NewRunRequest(input string, opts ...RunOption) RunRequest {
 func (a *Agent) Spawner() Spawner { return a.spawner }
 
 // SpawnChild starts a child of the run parent with req, in this process or
-// through the Spawner. It enforces spawn.maxDepth and spawn.maxChildren for
-// both. A remote child acts as the person of the parent, gets the budget
-// of the parent as its cap, and is recorded in the ledger of the parent
-// before the spawner creates its process, so a restart at any point of the
-// start finds it (see Planner). A request with an IdempotencyKey that an
+// through the Spawner. It enforces spawn.maxDepth, spawn.maxChildren, and
+// spawn.maxDescendants for both, and refuses a child with ErrTreeBudget
+// when the tree of the parent or of an ancestor used up a limit that the
+// tree shares. A remote child acts as the person of the parent, gets as
+// its cap the budget of the parent and what the tightest tree of the
+// lineage has left of each limit that a tree shares, takes a share of
+// spawn.maxDescendants in MetaMaxDescendants, and is recorded in the
+// ledger of the parent before the spawner creates its process, so a
+// restart at any point of the start finds it (see Planner). A request with an IdempotencyKey that an
 // earlier start of a child of the same parent used returns the child of
 // that start, in this process or in another one. spawn_task keys each
 // start by its tool call, so a rerun of the call after a restart reaches
@@ -313,6 +335,14 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		b = *req.Budget
 	}
 	b = b.Cap(a.budgetOf(p))
+	// The child spends from the tree of the parent and of every ancestor,
+	// so it alone can never spend more than the tightest one has left. The
+	// parent counts what the child reports, and siblings share what is
+	// left as they go.
+	if o, spent := a.limitSpent(p); spent {
+		return nil, o.refusal()
+	}
+	b = b.Cap(a.roomOf(p).budget())
 	if left, ok := a.timeLeft(ctx, p, a.now()); ok && (b.Deadline <= 0 || left < b.Deadline) {
 		if left < time.Second {
 			left = time.Second
@@ -367,6 +397,18 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		k.mu.Unlock()
 		return nil, fmt.Errorf("%w: run %s already started spawn.maxChildren (%d) child runs", ErrSpawnLimit, parent, max)
 	}
+	left, err := a.treeRoomLocked(p, 1)
+	if err != nil {
+		k.mu.Unlock()
+		return nil, err
+	}
+	// The child holds its share of the tree from now on, and its process
+	// holds the tree of the child to it.
+	ref.reserved = a.reserveLocked(p, left, depth)
+	if left >= 0 {
+		req.Metadata[MetaMaxDescendants] = strconv.Itoa(ref.reserved - 1)
+	}
+	intent.Reserved = ref.reserved
 	k.kids[parent]++
 	k.remote[req.ID] = ref
 	k.mu.Unlock()
@@ -423,6 +465,7 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	k.mu.Unlock()
 	a.log.Info("child started in another process", "run", parent, "child", req.ID, "member", got)
 	a.decorateChild(child, ref)
+	a.observe(req.ID, ref, child)
 	return child, nil
 }
 
@@ -529,6 +572,7 @@ func (a *Agent) spawnedBefore(ctx context.Context, parent, key string) (*Run, bo
 			return nil, true, fmt.Errorf("fw: the child %s of an earlier start under the same key runs in %s and does not answer: %w", id, ref.member, err)
 		}
 		a.decorateChild(r, ref)
+		a.observe(id, ref, r)
 		a.log.Info("child of an earlier start taken again", "run", parent, "child", id, "member", ref.member)
 		return r, true, nil
 	}
@@ -765,6 +809,7 @@ func (a *Agent) getRemote(ctx context.Context, id string, ref childRef) (*Run, e
 		if r, err = a.spawner.Get(ctx, ref.member, id); err != nil {
 			return nil, err
 		}
+		a.observe(id, ref, r)
 	}
 	a.decorateChild(r, ref)
 	if err := a.Authorize(ctx, ActionRunView, Target{Agent: r.Agent, Run: r}); err != nil {

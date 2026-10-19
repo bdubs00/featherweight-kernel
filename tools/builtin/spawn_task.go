@@ -73,7 +73,9 @@ const spawnTaskDescription = "Start a child run that works on a task by itself a
 	"Use it to hand off a subtask: a search, a review, a draft, or any piece of work that is better done in a fresh context. " +
 	"Give the child a complete, self-contained task, because it does not see this conversation: say what to do, what it needs to know, where to find things, and what to return. " +
 	"By default the tool waits for the child and returns its output. With wait false it returns the run id at once, and await_task collects the result later. " +
-	"You can start several children in one response, and they run at the same time. " +
+	"You can start several children in one response, and they run at the same time, up to the limit of this process. " +
+	"Children share the budget of this run: the tokens, the cost, and the tool calls of every child, and of the children it starts, count against what this run has left, and when that runs out, this run and its children stop. " +
+	"The number of runs under this run is limited too, so start a child only for work that needs one. " +
 	"A child gets at most the tools you have; tools, skills, model, effort, max_turns, and deadline narrow it further, and it runs at most as long as this run. " +
 	"When a child needs an approval or asks a question, the question goes to the caller of this run."
 
@@ -211,6 +213,8 @@ func spawnOptions(in spawnInput, parent string) ([]fw.RunOption, fw.ToolResult, 
 func startError(a *fw.Agent, in spawnInput, err error) fw.ToolResult {
 	msg := strings.TrimPrefix(err.Error(), "fw: ")
 	switch {
+	case errors.Is(err, fw.ErrTreeBudget):
+		return fw.ErrorResult(fmt.Sprintf("spawn_task: no child can start, because the budget that this run shares with the runs under it is used up: %s. This run and the runs under it stop.", strings.TrimPrefix(msg, "the budget of the run tree is used up: ")))
 	case errors.Is(err, fw.ErrSpawnLimit):
 		return fw.ErrorResult(fmt.Sprintf("spawn_task: the spawn limit stops this child: %s. Wait for the children you have, or do the work yourself.", msg))
 	case errors.Is(err, fw.ErrAgentNotFound):

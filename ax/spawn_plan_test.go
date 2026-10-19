@@ -164,7 +164,7 @@ func TestFindAChildTaskAfterARestart(t *testing.T) {
 	task, _ := Stashed()
 	atespace, name := Identity(task)
 	child, _ := childName(name, req.ID)
-	if _, err := ax.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: s.childTask(task, atespace, child, parent)}); err != nil {
+	if _, err := ax.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: s.childTask(task, atespace, child, parent, -1)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Find(ctx, member, req.ID); !errors.Is(err, fw.ErrRunNotFound) {
@@ -184,7 +184,7 @@ func TestFindAChildTaskAfterARestart(t *testing.T) {
 	}
 
 	// A Task that ax deletes.
-	if _, err := ax.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: s.childTask(task, atespace, child, parent)}); err != nil {
+	if _, err := ax.CreateTask(ctx, &v1alpha1.CreateTaskRequest{Task: s.childTask(task, atespace, child, parent, -1)}); err != nil {
 		t.Fatal(err)
 	}
 	ax.mu.Lock()

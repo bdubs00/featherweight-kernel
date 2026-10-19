@@ -349,16 +349,23 @@ type MemoryToolConfig struct {
 // SpawnConfig bounds the child runs that a run starts through spawn_task.
 // MaxDepth is the deepest child allowed: 1 lets a run start children, and 2
 // lets those children start children. MaxChildren is the number of child
-// runs that one run can start in its life. Driver names a registered
+// runs that one run can start in its life. MaxDescendants is the number of
+// runs that a tree can hold under its root in its life, at every depth and
+// in every process together. MaxRunning is the number of child runs of
+// this process that work at the same time; a run that waits for its
+// children gives its place up while it waits. Driver names a registered
 // Spawner, such as "ax", which runs each child in another process; empty
 // runs the children in this process (docs/ARCHITECTURE.md section 11.9).
+// Zero leaves a limit unbounded.
 type SpawnConfig struct {
 	// Disabled forbids children even when MaxDepth is zero (unlimited).
 	// AX uses it when a child has exhausted its inherited depth allowance.
-	Disabled    bool   `yaml:"disabled" json:"disabled"`
-	MaxDepth    int    `yaml:"maxDepth" json:"maxDepth"`
-	MaxChildren int    `yaml:"maxChildren" json:"maxChildren"`
-	Driver      string `yaml:"driver,omitempty" json:"driver,omitempty"`
+	Disabled       bool   `yaml:"disabled" json:"disabled"`
+	MaxDepth       int    `yaml:"maxDepth" json:"maxDepth"`
+	MaxChildren    int    `yaml:"maxChildren" json:"maxChildren"`
+	MaxDescendants int    `yaml:"maxDescendants" json:"maxDescendants"`
+	MaxRunning     int    `yaml:"maxRunning" json:"maxRunning"`
+	Driver         string `yaml:"driver,omitempty" json:"driver,omitempty"`
 }
 
 // MCPServerConfig is one MCP server that fw connects to. Title is the name
@@ -551,6 +558,14 @@ const (
 	DefaultSpawnDepth      = 3
 	DefaultCompactAt       = 150_000
 	DefaultSpawnChildren   = 16
+	// DefaultSpawnDescendants bounds a whole tree to 32 runs under its
+	// root: the 16 children that spawn.maxChildren gives one run, and as
+	// many again deeper. Without it, the depth and the children of one run
+	// let a root start 16 + 256 + 4,096 runs.
+	DefaultSpawnDescendants = 32
+	// DefaultSpawnRunning lets 8 child runs of a process work at the same
+	// time, so at most 8 model calls of children are in flight at once.
+	DefaultSpawnRunning = 8
 )
 
 // DefaultConfig returns the configuration that works with no file and no
@@ -593,11 +608,12 @@ func DefaultConfig() *Config {
 		},
 		Compaction: CompactionConfig{At: DefaultCompactAt},
 		Time:       TimeConfig{NoteAfter: DefaultNoteAfter},
-		Spawn:      SpawnConfig{MaxDepth: DefaultSpawnDepth, MaxChildren: DefaultSpawnChildren},
-		Tokens:     TokensConfig{Subject: DefaultTokensSubject},
-		Surfaces:   []string{"native", "a2a", "metrics"},
-		A2A:        A2AConfig{Name: "featherweight", Description: "A featherweight agent"},
-		MCP:        MCPSurfaceConfig{Path: "/mcp", Tasks: true, TaskTTL: 24 * time.Hour},
+		Spawn: SpawnConfig{MaxDepth: DefaultSpawnDepth, MaxChildren: DefaultSpawnChildren,
+			MaxDescendants: DefaultSpawnDescendants, MaxRunning: DefaultSpawnRunning},
+		Tokens:   TokensConfig{Subject: DefaultTokensSubject},
+		Surfaces: []string{"native", "a2a", "metrics"},
+		A2A:      A2AConfig{Name: "featherweight", Description: "A featherweight agent"},
+		MCP:      MCPSurfaceConfig{Path: "/mcp", Tasks: true, TaskTTL: 24 * time.Hour},
 		AX: AXConfig{
 			Server: "ax-server.ax-system.svc.cluster.local:8080",
 			Router: "atenet-router.ate-system.svc.cluster.local",

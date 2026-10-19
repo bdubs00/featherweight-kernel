@@ -34,9 +34,15 @@ var (
 	// ErrAgentNotFound is returned when a request names an unknown profile.
 	ErrAgentNotFound = errors.New("fw: agent profile not found")
 	// ErrSpawnLimit is returned when a child run would go deeper than
-	// Config.Spawn.MaxDepth, or when the parent already started
-	// Config.Spawn.MaxChildren children.
+	// Config.Spawn.MaxDepth, when the parent already started
+	// Config.Spawn.MaxChildren children, or when the tree of the parent
+	// already holds Config.Spawn.MaxDescendants runs.
 	ErrSpawnLimit = errors.New("fw: spawn limit reached")
+	// ErrTreeBudget is returned when a child run would start in a tree
+	// that used up a limit of the budget that holds for the whole tree:
+	// maxTokens, maxCostUSD, or maxToolCalls of the parent or of one of its
+	// ancestors (see Budget).
+	ErrTreeBudget = errors.New("fw: the budget of the run tree is used up")
 )
 
 // OriginKernel marks a message that the kernel adds itself, such as the
@@ -60,8 +66,12 @@ type kernel struct {
 	overrides map[string]*runOverride // per-run tools and policy, for replay
 	kids      map[string]int          // child runs started by each run, in its life
 	remote    map[string]childRef     // the children that a Spawner runs in other processes
+	children  map[string][]*runState  // the child runs in this process, by the id of the parent
+	reports   map[string]*childReport // what each child in another process last reported, see tree.go
+	spent     map[string]bool         // the runs whose tree used up a limit and whose runs below were canceled
 
-	sem chan struct{} // one slot per active run, Config.MaxRuns slots
+	sem      chan struct{} // one slot per active run, Config.MaxRuns slots
+	childSem chan struct{} // one slot per working child run, Config.Spawn.MaxRunning slots; nil for no limit
 
 	lifeMu   sync.Mutex
 	draining bool
@@ -96,6 +106,18 @@ type runState struct {
 	depth  int           // 0 for a top-level run
 	queued RunQueuedData // the request, as fw.run.queued recorded it
 	text   *runText      // the text of the run, in memory only (textOf)
+	// maxDesc is the most runs that the run can have under it, from
+	// MetaMaxDescendants, or -1 when the metadata sets no limit.
+	maxDesc int
+
+	// The slot of a child run in Config.Spawn.MaxRunning (tree.go). held
+	// is true while the driver holds a slot, parked counts the waits for
+	// other runs that are open now, and lent is true while those waits
+	// gave the slot up.
+	slotMu sync.Mutex
+	held   bool
+	lent   bool
+	parked int
 
 	emitMu    sync.Mutex
 	events    []Event // the full log while a driver holds a reference
@@ -108,6 +130,7 @@ type runState struct {
 	changed   chan struct{} // closed and replaced on every event
 	active    bool          // a driver goroutine owns the run
 	cancel    context.CancelFunc
+	drvCtx    context.Context // the context of the driver that owns the run
 	canceling bool
 	waiters   map[string]chan ApprovalDecidedData // questions from tools, by approval id
 }
@@ -124,6 +147,7 @@ func (k *kernel) newRunState(id, agent, trace string) *runState {
 		agent:   agent,
 		source:  fmt.Sprintf("fw://%s/%s/%s", k.atespace, agent, id),
 		trace:   trace,
+		maxDesc: -1,
 		changed: make(chan struct{}),
 		waiters: map[string]chan ApprovalDecidedData{},
 	}
@@ -145,11 +169,17 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		overrides: map[string]*runOverride{},
 		kids:      map[string]int{},
 		remote:    map[string]childRef{},
+		children:  map[string][]*runState{},
+		reports:   map[string]*childReport{},
+		spent:     map[string]bool{},
 		sem:       make(chan struct{}, maxRuns),
 		drainCh:   make(chan struct{}),
 		closedCh:  make(chan struct{}),
 		ctx:       kctx,
 		cancel:    cancel,
+	}
+	if n := a.cfg.Spawn.MaxRunning; n > 0 {
+		k.childSem = make(chan struct{}, n)
 	}
 	a.k = k
 	unfinished, err := a.rebuild(ctx)
@@ -157,6 +187,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		cancel()
 		return err
 	}
+	a.startFollow()
 	a.startEgress()
 	if !a.noResume {
 		a.resume(unfinished)
@@ -273,6 +304,20 @@ func (k *kernel) lookup(id string) (*runState, error) {
 	return rs, nil
 }
 
+// keyed returns the run that a start under the idempotency key of the
+// principal began, or nil.
+func (k *kernel) keyed(principal, key string) *runState {
+	if key == "" {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if id, ok := k.idem[idemKey(principal, key)]; ok {
+		return k.runs[id]
+	}
+	return nil
+}
+
 func (k *kernel) all() []*runState {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -369,6 +414,15 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			q := p.queuedData()
 			req.Principal, kind = q.Principal, q.PrincipalKind
 		}
+		// A retried start takes its child even when the tree has nothing
+		// left now. A new child starts only while the tree has some of
+		// every limit that the tree shares.
+		if prev := k.keyed(req.Principal, req.IdempotencyKey); prev != nil {
+			return prev.snapshot(), nil
+		}
+		if o, spent := a.limitSpent(p); spent {
+			return nil, o.refusal()
+		}
 	}
 	files, changes, err := a.keepFiles(req.Files)
 	if err != nil {
@@ -406,6 +460,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	rs := k.newRunState(req.ID, req.Agent, "")
 	rs.parent, rs.depth, rs.text = req.Parent, depth, text
 	_ = ev.Decode(&rs.queued)
+	rs.maxDesc = maxDescOf(rs.queued.Metadata)
 	if parent != nil {
 		// A child shares the trace of its parent, so one trace shows the tree.
 		rs.trace = parent.trace
@@ -430,7 +485,12 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			k.mu.Unlock()
 			return nil, fmt.Errorf("%w: run %s already started spawn.maxChildren (%d) child runs", ErrSpawnLimit, req.Parent, max)
 		}
+		if _, err := a.treeRoomLocked(parent, 1); err != nil {
+			k.mu.Unlock()
+			return nil, err
+		}
 		k.kids[req.Parent]++
+		k.children[req.Parent] = append(k.children[req.Parent], rs)
 	}
 	k.runs[req.ID] = rs
 	if req.IdempotencyKey != "" {
@@ -446,6 +506,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		delete(k.runs, req.ID)
 		if parent != nil {
 			k.kids[req.Parent]--
+			k.dropChildLocked(req.Parent, rs)
 		}
 		if req.IdempotencyKey != "" {
 			delete(k.idem, idemKey(req.Principal, req.IdempotencyKey))
@@ -482,8 +543,18 @@ func (a *Agent) Wait(ctx context.Context, id string) (*Run, error) {
 // WaitFor blocks until done reports true for the status of the run. It
 // checks the status now and after every event. When ctx ends first, WaitFor
 // returns the current status and the context error. A tool that waits for a
-// child run uses it to see the pending approval of the child.
+// child run uses it to see the pending approval of the child. A child run
+// of this process that waits gives up its place in spawn.maxRunning until
+// the wait ends, so the runs that it waits for can work.
 func (a *Agent) WaitFor(ctx context.Context, id string, done func(*Run) bool) (*Run, error) {
+	if self := a.waitingRun(ctx); self != nil {
+		defer a.park(self)()
+	}
+	return a.waitFor(ctx, id, done)
+}
+
+// waitFor is WaitFor without the slot of the caller.
+func (a *Agent) waitFor(ctx context.Context, id string, done func(*Run) bool) (*Run, error) {
 	rs, err := a.k.lookup(id)
 	if err != nil {
 		if ref, ok := a.remoteChild(id); ok {
@@ -496,16 +567,19 @@ func (a *Agent) WaitFor(ctx context.Context, id string, done func(*Run) bool) (*
 				}
 				select {
 				case <-ref.start.done:
-					return a.WaitFor(ctx, id, done)
+					return a.waitFor(ctx, id, done)
 				case <-ctx.Done():
 					return r, ctx.Err()
 				}
 			}
+			// Each read of the child counts its tree toward the parent.
 			r, err := a.spawner.WaitFor(ctx, ref.member, id, func(r *Run) bool {
 				a.decorateChild(r, ref)
+				a.observe(id, ref, r)
 				return done(r)
 			})
 			a.decorateChild(r, ref)
+			a.observe(id, ref, r)
 			return r, err
 		}
 		return nil, err
@@ -515,14 +589,14 @@ func (a *Agent) WaitFor(ctx context.Context, id string, done func(*Run) bool) (*
 		cur, ch := cloneRun(&rs.run), rs.changed
 		rs.mu.Unlock()
 		if done(cur) {
-			return cur, nil
+			return a.withTree(rs, cur), nil
 		}
 		select {
 		case <-ch:
 		case <-ctx.Done():
-			return rs.snapshot(), ctx.Err()
+			return a.report(rs), ctx.Err()
 		case <-a.k.closedCh:
-			return rs.snapshot(), ErrClosed
+			return a.report(rs), ErrClosed
 		}
 	}
 }
@@ -538,10 +612,8 @@ func (a *Agent) Children(ctx context.Context, id string) ([]*Run, error) {
 		return nil, err
 	}
 	var kids []*Run
-	for _, child := range a.k.all() {
-		if child.parent == id {
-			kids = append(kids, child.snapshot())
-		}
+	for _, child := range a.k.localChildren(id) {
+		kids = append(kids, a.report(child))
 	}
 	for cid, ref := range a.remoteChildren(id) {
 		r, ok := ref.starting()
@@ -551,6 +623,7 @@ func (a *Agent) Children(ctx context.Context, id string) ([]*Run, error) {
 				a.log.Warn("read a remote child", "run", cid, "member", ref.member, "error", err)
 				continue
 			}
+			a.observe(cid, ref, r)
 		}
 		a.decorateChild(r, ref)
 		kids = append(kids, r)
@@ -679,7 +752,7 @@ func (a *Agent) Get(ctx context.Context, id string) (*Run, error) {
 		}
 		return nil, err
 	}
-	r := rs.snapshot()
+	r := a.report(rs)
 	if err := a.Authorize(ctx, ActionRunView, Target{Agent: r.Agent, Run: r}); err != nil {
 		return nil, err
 	}
@@ -690,6 +763,9 @@ func (a *Agent) Get(ctx context.Context, id string) (*Run, error) {
 // with the budget of its profile and of the configuration as the kernel
 // resolved them when it queued the run, and capped by the budget of its
 // parent. It authorizes the caller as Get does. A zero field has no limit.
+// MaxTokens, MaxCostUSD, and MaxToolCalls hold for the run and every run
+// under it together, and the limits of each ancestor hold for its tree
+// too; Run.TreeUsage of a run tells what its tree used.
 func (a *Agent) RunBudget(ctx context.Context, id string) (Budget, error) {
 	rs, err := a.k.lookup(id)
 	if err != nil {
@@ -708,7 +784,7 @@ func (a *Agent) List(ctx context.Context) ([]*Run, error) {
 	all := a.k.all()
 	runs := make([]*Run, 0, len(all))
 	for _, rs := range all {
-		runs = append(runs, rs.snapshot())
+		runs = append(runs, a.report(rs))
 	}
 	out, err := a.viewable(ctx, runs)
 	if err != nil {
@@ -903,6 +979,12 @@ func normalizeDecision(d ApprovalDecision) (string, error) {
 // appends fw.run.finished with outcome canceled. Cancel on a finished run
 // does nothing.
 func (a *Agent) Cancel(ctx context.Context, id string) error {
+	return a.cancelRun(ctx, id, "canceled")
+}
+
+// cancelRun is Cancel with the error that fw.run.finished records for the
+// run and for each of its children in this process.
+func (a *Agent) cancelRun(ctx context.Context, id, reason string) error {
 	rs, err := a.k.lookup(id)
 	if err != nil {
 		if ref, ok := a.remoteChild(id); ok {
@@ -954,7 +1036,7 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 	if cancel != nil {
 		cancel()
 	}
-	_, err = a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: "canceled"})
+	_, err = a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: reason})
 	rs.mu.Lock()
 	rs.canceling = false
 	rs.mu.Unlock()
@@ -963,11 +1045,8 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 	}
 	// A canceled run takes its children with it, so no child works for a
 	// parent that is gone.
-	for _, child := range a.k.all() {
-		if child.parent != rs.id {
-			continue
-		}
-		if cerr := a.Cancel(context.Background(), child.id); cerr != nil {
+	for _, child := range a.k.localChildren(rs.id) {
+		if cerr := a.cancelRun(context.Background(), child.id, reason); cerr != nil {
 			a.log.Warn("cancel child run", "run", child.id, "parent", rs.id, "error", cerr)
 		}
 	}
@@ -1075,7 +1154,7 @@ func (a *Agent) launchLocked(rs *runState) {
 	k.lifeMu.Unlock()
 	ctx, cancel := context.WithCancel(k.ctx)
 	rs.active = true
-	rs.cancel = cancel
+	rs.cancel, rs.drvCtx = cancel, ctx
 	go a.runDriver(ctx, cancel, rs)
 }
 
@@ -1099,9 +1178,11 @@ func (a *Agent) runDriver(ctx context.Context, cancel context.CancelFunc, rs *ru
 }
 
 func (a *Agent) driverBody(ctx context.Context, rs *runState) exitReason {
-	// A child run takes no slot: its parent holds one while it waits, and
-	// the spawn limits bound the children. Otherwise parents that wait for
-	// children could fill every slot and no child could start.
+	// A child run takes no slot of maxRuns: its parent holds one while it
+	// waits, and the spawn limits bound the children. Otherwise parents
+	// that wait for children could fill every slot and no child could
+	// start. A child takes a slot of spawn.maxRunning instead, which a run
+	// gives up while it waits for another run (tree.go).
 	if rs.depth == 0 {
 		select {
 		case a.k.sem <- struct{}{}:
@@ -1111,6 +1192,17 @@ func (a *Agent) driverBody(ctx context.Context, rs *runState) exitReason {
 			return exitDrain
 		}
 		defer func() { <-a.k.sem }()
+	} else if a.k.childSem != nil {
+		if !a.takeSlot(ctx) {
+			if a.k.isDraining() {
+				return exitDrain
+			}
+			return exitCanceled
+		}
+		rs.slotMu.Lock()
+		rs.held = true
+		rs.slotMu.Unlock()
+		defer a.dropSlot(rs)
 	}
 	if err := a.holdEvents(rs); err != nil {
 		a.log.Error("load run", "run", rs.id, "error", err)
@@ -1208,6 +1300,10 @@ func cloneRun(r *Run) *Run {
 	if r.Pending != nil {
 		p := *r.Pending
 		cp.Pending = &p
+	}
+	if r.TreeUsage != nil {
+		u := *r.TreeUsage
+		cp.TreeUsage = &u
 	}
 	return &cp
 }

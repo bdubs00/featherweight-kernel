@@ -356,6 +356,12 @@ func validate(c *fw.Config, servers bool) error {
 	if c.Spawn.MaxChildren < 0 {
 		p = append(p, fmt.Sprintf("spawn.maxChildren %d is negative", c.Spawn.MaxChildren))
 	}
+	if c.Spawn.MaxDescendants < 0 {
+		p = append(p, fmt.Sprintf("spawn.maxDescendants %d is negative", c.Spawn.MaxDescendants))
+	}
+	if c.Spawn.MaxRunning < 0 {
+		p = append(p, fmt.Sprintf("spawn.maxRunning %d is negative", c.Spawn.MaxRunning))
+	}
 	for _, name := range sortedKeys(c.Agents) {
 		p = append(p, profileProblems(c, name, c.Agents[name])...)
 	}

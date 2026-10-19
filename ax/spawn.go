@@ -7,8 +7,10 @@ package ax
 // the workspaces of this Task, waits until the Task runs, starts the child
 // run through the atenet router with the static token of the fleet and the
 // person of the parent, and follows the run through the native API of the
-// child. The child Task gets FW_PARENT_RUN, FW_PARENT_MEMBER, and the depth
-// that spawn.maxDepth leaves it in FW_SPAWN_MAX_DEPTH. The name of a child
+// child. The child Task gets FW_PARENT_RUN, FW_PARENT_MEMBER, the depth
+// that spawn.maxDepth leaves it in FW_SPAWN_MAX_DEPTH, and the runs that
+// its share of spawn.maxDescendants leaves it in FW_SPAWN_MAX_DESCENDANTS.
+// The name of a child
 // Task ends with the id of its run, so the kernel records the name before
 // the Task exists, and a restart of this process finds the Task again.
 
@@ -23,6 +25,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,7 +47,11 @@ const (
 	EnvParentRun     = "FW_PARENT_RUN"      // the id of the parent run
 	EnvParentMember  = "FW_PARENT_MEMBER"   // the parent process, "ax:<atespace>/<task>"
 	EnvSpawnMaxDepth = "FW_SPAWN_MAX_DEPTH" // the levels below a child that spawn.maxDepth still allows
-	EnvSpawnDisabled = "FW_SPAWN_DISABLED"  // a leaf has no remaining delegation depth
+	EnvSpawnDisabled = "FW_SPAWN_DISABLED"  // a leaf has no remaining delegation depth or runs
+	// EnvSpawnMaxDescendants is the number of runs that a child can have
+	// under it: the share of spawn.maxDescendants that its parent reserved
+	// for it (fw.MetaMaxDescendants), less the child itself.
+	EnvSpawnMaxDescendants = "FW_SPAWN_MAX_DESCENDANTS"
 )
 
 // DefaultServer is the ax API server inside the cluster.
@@ -67,7 +74,7 @@ const (
 // so an inherited value of either name would name the remaining depth of
 // the parent, not of the child, and would be a lie.
 var droppedEnv = map[string]bool{
-	EnvParentRun: true, EnvParentMember: true, EnvSpawnMaxDepth: true, EnvSpawnDisabled: true,
+	EnvParentRun: true, EnvParentMember: true, EnvSpawnMaxDepth: true, EnvSpawnDisabled: true, EnvSpawnMaxDescendants: true,
 	"FW_SPAWN_MAXDEPTH":       true,
 	"FW_WORKBENCH_FLEET_NAME": true, "FW_WORKBENCH_FLEET_URL": true,
 }
@@ -174,7 +181,7 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 	if err != nil {
 		return nil, "", err
 	}
-	spec := s.childTask(task, atespace, child, parent)
+	spec := s.childTask(task, atespace, child, parent, maxDescendantsOf(req.Metadata))
 	if err := s.createTask(ctx, client, spec); err != nil {
 		return nil, "", err
 	}
@@ -273,7 +280,7 @@ func (s *Spawner) Place(ctx context.Context, parent *fw.Run) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	spec := s.childTask(task, atespace, child, parent)
+	spec := s.childTask(task, atespace, child, parent, -1)
 	if err := s.createTask(ctx, client, spec); err != nil {
 		return "", err
 	}
@@ -395,9 +402,25 @@ func childName(parent, id string) (string, error) {
 	return parent + "-" + suffix, nil
 }
 
+// maxDescendantsOf reads fw.MetaMaxDescendants from the metadata of a child
+// request, and returns -1 when the kernel set none.
+func maxDescendantsOf(meta map[string]string) int {
+	v, ok := meta[fw.MetaMaxDescendants]
+	if !ok {
+		return -1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return -1
+	}
+	return n
+}
+
 // childTask is the Task of a child: the parent Task with a new name, no
-// goals, no debug services, and the variables of a child.
-func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run) *v1alpha1.Task {
+// goals, no debug services, and the variables of a child. maxDesc is the
+// number of runs that the child can have under it, or -1 when its parent
+// set no share, as for a branch, which is a tree of its own.
+func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run, maxDesc int) *v1alpha1.Task {
 	spec := &v1alpha1.TaskSpec{Image: task.Spec.Image, Command: append([]string(nil), task.Spec.Command...)}
 	for _, e := range task.Spec.Env {
 		if !droppedEnv[e.Name] {
@@ -422,6 +445,19 @@ func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run) *
 		// Preserve an explicitly unlimited tree instead of picking up the
 		// child's default finite maxDepth from its configuration file.
 		spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: EnvSpawnMaxDepth, Value: "0"})
+	}
+	// The process of the child holds its tree to the share that its parent
+	// reserved, as the kernel there does for the run from its metadata. Zero
+	// means unlimited, so a share without room for more runs is the flag.
+	// Without a share, the child takes the limit of this process, and an
+	// explicitly unlimited tree stays unlimited.
+	switch {
+	case maxDesc == 0:
+		disabled = true
+	case maxDesc > 0:
+		spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: EnvSpawnMaxDescendants, Value: strconv.Itoa(maxDesc)})
+	default:
+		spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: EnvSpawnMaxDescendants, Value: strconv.Itoa(s.cfg.Spawn.MaxDescendants)})
 	}
 	spec.Env = append(spec.Env, &v1alpha1.EnvVar{Name: EnvSpawnDisabled, Value: fmt.Sprint(disabled)})
 	r := task.Spec.Resources
