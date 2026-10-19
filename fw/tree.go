@@ -44,7 +44,7 @@ type childReport struct {
 	recAt    time.Time         // when the kernel appended it
 	failedAt time.Time         // the first read that failed since the latest read that worked
 	// lost is true once this process no longer reaches the child: its
-	// process does not know it, or it did not answer a read or a cancel for
+	// process does not know it, or it did not answer a read for
 	// followGiveUp. A lost child is never read or canceled again, and it
 	// counts in its tree with its last usage alone.
 	lost   bool
@@ -53,12 +53,11 @@ type childReport struct {
 	// The cancel of the child by a stop or a cancel of a run above it:
 	// canceled is true once a cancel reached the child, and a cancel that
 	// failed is tried again from nextCancel on, with a wait that doubles
-	// with each failure. cancelFailedAt is the first cancel that failed
+	// with each failure.
 	// since the latest that worked.
-	canceled       bool
-	cancelWait     time.Duration
-	nextCancel     time.Time
-	cancelFailedAt time.Time
+	canceled   bool
+	cancelWait time.Duration
+	nextCancel time.Time
 }
 
 // ended reports whether the child and every run under it finished, or
@@ -81,20 +80,16 @@ func (r *childReport) grace() time.Duration {
 	return followGiveUp
 }
 
-// giveUpLocked marks a child lost when its reads or its cancels have failed
-// for followGiveUp, and reports whether it did so now. The caller holds
-// k.mu.
+// giveUpLocked marks a child lost when its reads have failed for
+// followGiveUp, and reports whether it did so now. Only reads count: a
+// child that answers reads stays reachable however its cancels fare, so
+// its spend keeps counting. The caller holds k.mu.
 func (r *childReport) giveUpLocked(now time.Time) bool {
-	if r.lost {
+	if r.lost || r.failedAt.IsZero() || now.Sub(r.failedAt) < r.grace() {
 		return false
 	}
-	for _, at := range []time.Time{r.failedAt, r.cancelFailedAt} {
-		if !at.IsZero() && now.Sub(at) >= r.grace() {
-			r.lost = true
-			return true
-		}
-	}
-	return false
+	r.lost = true
+	return true
 }
 
 // works reports whether a child in the state st, with work runs under it
@@ -778,9 +773,13 @@ func (a *Agent) cancelLocalBelow(rs *runState, reason string) []remoteKid {
 // cancelRemote cancels the children in other processes that a walk found,
 // up to followReads at a time, each within followTimeout and at most until
 // the shutdown begins. A child that is canceled, whose tree ended, or that
-// counts as lost is not canceled again. A child whose cancels failed for
-// followGiveUp counts as lost from then on, and the parent records so. It
-// reports whether a cancel failed and waits to be tried again.
+// counts as lost is not canceled again. After a cancel, the kernel reads
+// the child once, so the parent records that the child ended. A child that refuses a
+// cancel is read too: a child that answers stays reachable and counted, and
+// its cancel is tried again with a wait that doubles up to a minute; only
+// reads that fail count toward its grace (followGiveUp), and a child that
+// its process does not know is lost. It reports whether a cancel failed
+// and waits to be tried again.
 func (a *Agent) cancelRemote(remote []remoteKid) bool {
 	if len(remote) == 0 || a.spawner == nil {
 		return false
@@ -808,8 +807,6 @@ func (a *Agent) cancelRemote(remote []remoteKid) bool {
 	}
 	k.mu.Unlock()
 	var mu sync.Mutex
-	var lost []ChildReportedData
-	var parents []string
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, followReads)
 	for _, c := range due {
@@ -818,50 +815,72 @@ func (a *Agent) cancelRemote(remote []remoteKid) bool {
 		go func(c remoteKid) {
 			defer wg.Done()
 			defer func() { <-slots }()
-			ctx, cancel := context.WithTimeout(context.Background(), followTimeout)
-			defer cancel()
-			go func() {
-				select {
-				case <-k.drainCh:
-					cancel()
-				case <-ctx.Done():
-				}
-			}()
-			err := a.spawner.Cancel(ctx, c.ref.member, c.id)
-			k.mu.Lock()
-			defer k.mu.Unlock()
-			rep := k.reportLocked(c.id)
-			// A child that its process does not know cannot spend more.
-			if err == nil || errors.Is(err, ErrRunNotFound) {
-				rep.canceled, rep.cancelWait, rep.cancelFailedAt = true, 0, time.Time{}
-				return
+			if a.cancelOneRemote(c) {
+				mu.Lock()
+				pending = true
+				mu.Unlock()
 			}
-			at := time.Now()
-			if rep.cancelFailedAt.IsZero() {
-				rep.cancelFailedAt = at
-			}
-			if rep.giveUpLocked(at) {
-				a.log.Warn("a child in another process did not take a cancel for a while and counts as lost", "run", c.ref.parent, "child", c.id, "member", c.ref.member, "error", err)
-				if d, ok := rep.recordLocked(c.id, c.ref.member, at, a.recordEvery); ok {
-					mu.Lock()
-					lost, parents = append(lost, d), append(parents, c.ref.parent)
-					mu.Unlock()
-				}
-				return
-			}
-			rep.cancelWait = min(max(2*rep.cancelWait, cancelRetryFirst), cancelRetryMax)
-			rep.nextCancel = at.Add(rep.cancelWait)
-			mu.Lock()
-			pending = true
-			mu.Unlock()
-			a.log.Warn("cancel a child in another process under a canceled or spent run", "run", c.ref.parent, "child", c.id, "member", c.ref.member, "retryIn", rep.cancelWait, "error", err)
 		}(c)
 	}
 	wg.Wait()
-	for i, d := range lost {
-		a.record(parents[i], d)
-	}
 	return pending
+}
+
+// cancelOneRemote cancels one child in another process, then reads it, and
+// reports whether the cancel failed and waits to be tried again.
+func (a *Agent) cancelOneRemote(c remoteKid) bool {
+	k := a.k
+	ctx, cancel := context.WithTimeout(context.Background(), 2*followTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-k.drainCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	cctx, ccancel := context.WithTimeout(ctx, followTimeout)
+	err := a.spawner.Cancel(cctx, c.ref.member, c.id)
+	ccancel()
+	done := err == nil || errors.Is(err, ErrRunNotFound) // a child that its process does not know cannot spend more
+	rctx, rcancel := context.WithTimeout(ctx, followTimeout)
+	r, rerr := a.spawner.Get(rctx, c.ref.member, c.id)
+	rcancel()
+	if rerr == nil {
+		a.decorateChild(r, c.ref)
+		a.observe(c.id, c.ref, r)
+	}
+	now := time.Now()
+	k.mu.Lock()
+	rep := k.reportLocked(c.id)
+	var lost ChildReportedData
+	recordLost := false
+	switch {
+	case rerr == nil:
+	case errors.Is(rerr, ErrRunNotFound):
+		if !rep.lost {
+			rep.lost = true
+			lost, recordLost = rep.recordLocked(c.id, c.ref.member, now, a.recordEvery)
+		}
+	case rep.failedAt.IsZero():
+		rep.failedAt = now
+	}
+	if done {
+		rep.canceled, rep.cancelWait = true, 0
+	} else {
+		rep.cancelWait = min(max(2*rep.cancelWait, cancelRetryFirst), cancelRetryMax)
+		rep.nextCancel = now.Add(rep.cancelWait)
+	}
+	wait, retry := rep.cancelWait, !done && !rep.ended()
+	k.mu.Unlock()
+	if recordLost {
+		a.log.Warn("a child in another process is lost: its process does not know it", "run", c.ref.parent, "child", c.id, "member", c.ref.member)
+		a.record(c.ref.parent, lost)
+	}
+	if retry {
+		a.log.Warn("cancel a child in another process under a canceled or spent run", "run", c.ref.parent, "child", c.id, "member", c.ref.member, "retryIn", wait, "error", err)
+	}
+	return retry
 }
 
 // warnNoSpawner says once that this process holds children in other
