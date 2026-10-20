@@ -1958,3 +1958,129 @@ The safeguards revision of 2026-10-13 came on top of the milestones. It added th
 - The A2A version is 1.0. The MCP revision is 2026-07-28. The Go MCP SDK from v1.7.0 targets that revision. It states that it keeps the deprecated features for at least twelve months, and the dual-era behavior depends on that.
 - `fw` implements the ax runner contract itself instead of embedding the ax `runner` package (section 11.2).
 - NATS is the recommended bus. Redis is the zero-new-infrastructure choice on an ax cluster.
+
+## 20. Outcomes
+
+A run can claim work that nobody checked. Batch scenario1-a found pull request bodies with claims that no command showed. An outcome asks a second model context, the grader, to check the answer of a run against a rubric before the run finishes. When the grader finds a gap, the run gets one more turn to fix it. The kernel code is `fw/outcome.go`, and one call at the end of a successful run in `endTurn` (`fw/turn.go`) starts it.
+
+### 20.1 Configuration
+
+An agent profile and a run request can carry an `outcome` block with three keys:
+
+| Key | Default | What it does |
+|---|---|---|
+| `rubric` | empty | Plain text that the grader applies. A block without a rubric is off. |
+| `grader` | empty | The model of the grader, as a `provider/model` selector or a name from `models`. Empty means the model of the run. There is no other default, so an outcome never picks a paid model by itself. |
+| `iterations` | 1 | The most grader passes. 1 grades once and never asks for a revision. 2 or more give the run one more turn with the notes of the grader after each `needs_revision`, up to this number of passes. 0 means 1. The most is 10. |
+
+```yaml
+agents:
+  migrator:
+    outcome:
+      rubric: |
+        Every claim of the pull request body names the command that shows it.
+        The playbook runs twice without a change.
+      grader: ""        # the model of the run
+      iterations: 2
+```
+
+The block of a request replaces the block of the profile as a whole, so a request with `outcome: {}` turns the outcome of its profile off. An inline profile can carry the block too, below the block of the request. A child run never takes the outcome of its profile, neither a child of `spawn_task` nor a child in another process (`fw.parent`); only a block in its own request turns grading on for it. This rule keeps each child of a graded profile from paying for a grader of its own.
+
+The kernel resolves the outcome once, when it queues the run, and records it in the field `outcome` of `fw.run.queued`, with the grader resolved through `models`. A run therefore keeps its outcome for its life, as it keeps its resolved profile (section 12.5). A run without a rubric records no field, and its ledger is the same as before.
+
+The kernel refuses a block with more than 10 iterations or fewer than 0, a grader or a number of iterations without a rubric, a grader that is neither a selector nor a name from `models`, and a rubric longer than 256 KiB. A request gets `fw.ErrInvalidRequest`, which the native API answers with 400. A profile in `fw.yaml` stops the process at load with the key, such as `agents.migrator.outcome.iterations`. `Agent.CheckProfile` refuses such a profile from a linked package. The keys follow the rule of the variables (section 12.1), so `FW_AGENTS_MIGRATOR_OUTCOME_ITERATIONS=3` sets one.
+
+A Go caller passes `fw.WithOutcome(fw.Outcome{...})` or sets `RunRequest.Outcome`. The body of `POST /v1/runs` takes the field `outcome` with the same keys.
+
+### 20.2 The grader run
+
+The grade happens at the end of a successful run only: the last turn ended with an answer, and the run is about to finish as `completed`. A run that fails, stops at a limit with its final report, ends with a refusal, or is canceled gets no grade. A follow-up that arrives before the grade starts goes first, and the grade comes at the end of the turn that it starts.
+
+One pass takes these steps, each one from the ledger:
+
+1. The kernel closes the turn with `fw.turn.finished`.
+2. It checks the budget (section 20.4).
+3. It starts the grader run as a child of the run, in this process, through the same path as a child of `spawn_task` in this process. The grader never runs through `spawn.driver`, because it reads the files of the run, which only this process holds.
+4. It waits for the grader run and reads its verdict.
+5. It records `fw.outcome.evaluated` on the run, and for a revision the notes in the same step (section 20.3).
+
+The grader run is a run of the same agent profile with an inline profile on top:
+
+- The system prompt of the grader below replaces the system prompt of the profile. The instructions of the profile still follow it, as for any inline profile (section 12.5).
+- The model is `outcome.grader`, else the model of the run.
+- The only tool is `files`, and only when the profile and every ancestor allow it. Its rules deny the commands `create`, `str_replace`, and `insert`, so the grader can only view.
+- It has no skill and no outcome of its own, so a grader is never graded.
+- Its budget is 6 turns, 24 tool calls, 10 minutes of working time, and no final report. The budget of the run caps it, and its deadline never passes the deadline of the run, because a child counts the working time of each ancestor (section 5.2).
+- Its origin is `kernel`, its title is `Grade <n> of <title of the run>`, and its idempotency key is `outcome:<run>:<seq>`, where `<seq>` is the sequence number of the answer that it grades. A restart during a pass therefore takes the same grader run instead of a second one.
+- The grader works alone. The kernel denies every approval and every question of the grader run.
+
+`spawn.maxDepth`, `spawn.maxChildren`, `spawn.maxDescendants`, and `spawn.disabled` hold for the grader as for any child, and each pass counts as one child. A grader run shows among the children of the run on every surface.
+
+The input of the grader run is one message with these parts, each with a bound:
+
+- The rubric.
+- The task: the input of the run and every follow-up message that did not come from the kernel, up to 16 KiB together.
+- The final answer of the run, up to 32 KiB, and the number of the pass.
+- The notes of the earlier passes of the same task.
+- The files that the run changed, from its `fw.file.changed` events, with the content of each text file, up to 64 KiB for all files together and 200 files. A path is relative to the directory of the run (section 7.9), where the files tool of the grader works. A file that does not fit gets the start that fits or a line that says that it is not shown, and the input then tells the grader to read such a file with the files tool. A change that a shell command made has no `fw.file.changed` event and does not show.
+
+The text says what it cut, with the size before the cut. The system prompt of the grader is this text:
+
+```
+You are the grader of a run of an agent. You did not do the work of the run, and you do not do it now. You check it.
+
+The message holds the rubric of the run, the task that the run got, the final answer of the run, and the files that the run changed. Apply each criterion of the rubric to the work. Check each claim of the answer against the files and the facts in the message. A claim that nothing in front of you supports counts as not done. If you have the files tool, you can read a file of the run with its view command. Do not change a file.
+
+Write your notes for the agent that did the work. Name each criterion that the work does not meet, and say what must change. Keep the notes short and specific.
+
+The last line of your answer must hold one JSON object and nothing else, without a code fence:
+{"verdict": "satisfied", "notes": "..."} when the work meets every criterion of the rubric, or
+{"verdict": "needs_revision", "notes": "..."} when it does not.
+```
+
+The kernel reads the last line of the answer that is not empty. The line must hold one JSON object with exactly the keys `verdict` and `notes`, both strings, and nothing after it, and the verdict must be `satisfied` or `needs_revision`. A code fence, another key, or another verdict does not parse. The kernel keeps up to 8 KiB of the notes.
+
+### 20.3 The event and the loop
+
+`fw.outcome.evaluated` records one pass on the run:
+
+| Field | Value |
+|---|---|
+| `verdict` | One of the verdicts below |
+| `notes` | The notes of the grader |
+| `iteration` | The number of the pass, from 1 |
+| `iterations` | The most passes of the outcome |
+| `grader` | The id of the grader run, empty when none started |
+| `continue` | `true` when the run gets one more turn with the notes |
+| `reason` | Why the kernel recorded `max_iterations`, `unparsed`, or `skipped`, or why a `needs_revision` does not go on |
+| `answer` | The sequence number of the `fw.model.responded` whose answer the pass graded |
+
+| Verdict | Who says it | What follows |
+|---|---|---|
+| `satisfied` | the grader | The run finishes with its answer. |
+| `needs_revision` | the grader | Before the last pass, the run gets one more turn. When the budget leaves no room for that turn, the verdict stays, the reason says why, and the run finishes. |
+| `max_iterations` | the kernel | The grader asked for a revision at the last pass. The event keeps its notes, and the run finishes. |
+| `unparsed` | the kernel | The answer of the grader does not parse, or the grader run failed or was canceled. The loop ends, and the run finishes. |
+| `skipped` | the kernel | No grader run started (section 20.4). The run finishes. |
+
+For a revision, the kernel appends a `fw.message.received` with the role `user`, the origin `kernel`, and the note kind `outcome` in the same step as the verdict. It holds the notes, the number of the pass, and the instruction to fix what the notes name and to end the turn with the complete final answer. The next turn starts from it, as from a follow-up (section 5.5), and the end of that turn starts the next pass. A restart between the verdict and the notes gives the notes at the next step, so each verdict is recorded once and each revision gets its notes.
+
+The passes of a task count from the latest message that did not come from the kernel. A follow-up of a person to a finished run therefore starts again at pass 1, and the grader grades the new answer.
+
+The run finishes with its last answer as `completed`, whatever the verdict. The verdict is a grade next to the answer, not a failure of the run. The output is the answer of the last turn, so after a revision it is the revised answer.
+
+### 20.4 Budget
+
+A grader run is a child, so its tokens, its cost, and its tool calls count in the tree of the run and of every ancestor (section 5.2). Before a pass, the kernel checks the run: when the run or a tree of its lineage used up `maxTokens`, `maxCostUSD`, or `maxToolCalls`, or the lineage used up its working time, no grader starts. The kernel records `skipped` with the limit in the reason, and the run finishes with its answer. A grader run that `Start` refuses, for example at a spawn limit, gives `skipped` with the error as the reason. Before a revision turn, the kernel checks the turn as the check before the next model call does, `maxTurns` included, so a revision never starts a turn that the budget stops at once.
+
+### 20.5 The run object
+
+The run object has the field `outcome` with the latest pass: `verdict`, `notes`, `iterations` (the passes so far), `grader` (the id of the latest grader run), and `reason`. It is absent for a run without a rubric. During a revision turn it shows the `needs_revision` of the pass before. A follow-up to a finished run clears it together with the output. Every surface that returns the run object therefore shows the verdict next to the answer. The event lines of the native API and of `run_events` read `graded <verdict> in pass <n> of <m>` with the notes, and the event summary of `fw` gives the verdict, the pass, and the grader run without the notes.
+
+A front that builds the run object from the lifecycle events of its workers, as the fleet of the workbench does, sees the field only when `bus.egressTypes` of the workers includes `fw.outcome.evaluated`.
+
+### 20.6 What the ledger holds
+
+Unlike the system prompt of a profile, the rubric of a profile enters the ledger: `fw.run.queued` of the run holds the resolved outcome, and the input of each grader run holds the rubric, because the grader reads it from there. The content of the files in the input, up to 64 KiB for each pass, enters the ledger of the grader run too. The kernel replaces every secret in both, as in every event (section 4.2). A rubric therefore must hold nothing that a viewer of the run must not read.
+
+A replay (section 4.6) is a new run and resolves its outcome again: it takes the outcome of the named profile now, and the outcome of the request of the recorded run does not travel to it. Its grader runs call the model live, because a replay answers only the tool calls of the recorded run.

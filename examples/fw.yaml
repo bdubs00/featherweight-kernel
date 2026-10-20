@@ -320,3 +320,17 @@ maxRuns: 16                     # runs in flight at once; more wait in the queue
 # A package that a program links in can own one top-level block, which it
 # claims with fw.RegisterExtension (docs/ARCHITECTURE.md section 12.1). The
 # workbench claims the block "workbench". Any other unknown key is an error.
+
+# outcome (section 20)
+# A profile, and a request, can carry an outcome block. A grader run, a child
+# of the run with the same profile, checks the answer of each run of the
+# profile against the rubric before the run finishes, and records
+# fw.outcome.evaluated. A child run never takes the outcome of its profile.
+#
+# agents:
+#   migrator:
+#     outcome:
+#       rubric: |                 # required to turn grading on; plain text that the grader applies
+#         Every claim of the pull request body names the command that shows it.
+#       grader: ""                # a provider/model selector or a name from models; empty is the model of the run
+#       iterations: 1             # the most grader passes: 1 grades once, 2 or more give the run a turn to revise; 0 is 1, the most is 10
