@@ -96,7 +96,7 @@ providers:                      # one connection per provider; FW_PROVIDERS_<NAM
       key: ""
       insecure: false           # development only
     options:                    # read by the OpenAI adapter; FW_PROVIDERS_OPENAI_OPTIONS_<NAME>
-      reasoning: auto           # auto | on | off: send the reasoning effort
+      reasoning: auto           # auto | on | off: send the reasoning effort; auto also sends a set effort other than high to a server that is not OpenAI
       maxTokensField: auto      # auto | max_tokens | max_completion_tokens
       authHeader: ""            # empty sends Authorization: Bearer; a name such as api-key sends the key in that header
       organization: ""          # the OpenAI-Organization header

@@ -382,7 +382,7 @@ The adapter speaks the chat completions API over `net/http` with no SDK, so one 
 
 | Option | Values | Default |
 |---|---|---|
-| `reasoning` | `auto`, `on`, `off`: send the effort as `reasoning_effort` | `auto`: on for o-series and GPT-5 names |
+| `reasoning` | `auto`, `on`, `off`: send the effort as `reasoning_effort` | `auto`: on for o-series and GPT-5 names. For another model on a server that is not OpenAI or Azure OpenAI, such as vLLM, llama.cpp, or Strata, `auto` sends an effort of the configuration or the profile other than `high`, the default, and keeps `max_tokens`. |
 | `maxTokensField` | `auto`, `max_tokens`, `max_completion_tokens` | `auto`: follows `reasoning` |
 | `authHeader` | A header name. `Authorization` sends a Bearer token. Any other name sends the bare key, which Azure wants in `api-key`. | `Authorization` |
 | `organization`, `project` | The `OpenAI-Organization` and `OpenAI-Project` headers | `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` |
