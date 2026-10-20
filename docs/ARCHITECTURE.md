@@ -756,6 +756,22 @@ The walk costs one `lstat` for each entry and one `lchown` for each entry that c
 - A process that `fw` starts for the operator still runs as the user of `fw`: `spec.command` of a Task (section 11.3) and the processes of the guest services of `ax ssh` (section 11.12). A Task with `spec.debug: true` lets any caller that reaches port 80, a tool process included, start a process as the user of `fw`, which undoes the tool user.
 - With FW_HOME under the root of the files tool, as with `tools.files.root: /workspace` under ax, and without `tools.files.perRun`, the `files` tool checks the real path of each name before it opens it. A shell that changes a directory into a link between the check and the open can lead the tool into FW_HOME. `fw` logs a warning at start for this layout. Put FW_HOME outside the root of the files tool for untrusted input.
 - Every tool process of one Task runs as the same user. A shell of one run reads and changes the files of another run of the Task, also with `tools.files.perRun`. The boundary is the Task and the tool user.
+- A credential that the egress gateway of the platform adds to a request reaches every process of the sandbox (below).
+
+#### Credentials that the egress gateway adds
+
+This is a known limit, and the kernel cannot remove it alone. The egress policy of an ax Task can tell the egress gateway of the platform to add a credential to each request to a host, such as a GitHub token in the `Authorization` header of every request to an MCP server. The gateway sees the sandbox, not the process that sends the request. It therefore adds the credential to a request from any process of the sandbox, a tool process of the tool user included. A shell can then call the credentialed service with `curl`, and no rule of the policy of `fw` asks a person first. A rule such as `ask: [github.create_pull_request]` guards the MCP tool that the model calls through `fw`. It does not guard the service against a shell in the same sandbox. A prompt injection in a file that a run reads is enough to start such a call. The sandbox has one network identity, so the kernel cannot tell the gateway which process sent a request. Until the platform tells the processes of a sandbox apart, treat every host with an injected credential as reachable by every tool process of the Task.
+
+#### A Task for untrusted input
+
+Input is untrusted when a run reads text that nobody checked: an upstream repository, an issue, a web page, a reply of a tool, or a file that a person attached. Such text can carry a prompt injection. For a Task that reads untrusted input, use this pattern:
+
+1. Give the profile no shell tool. Leave out `bash` and every stdio MCP server whose tools run commands. With `tools.files.perRun`, the `files` tool works in the directory of the run alone.
+2. Put the write tools on `ask`, so a person allows each change: the writes of the `files` tool, such as `ask: ["files: command=create", "files: command=str_replace", "files: command=insert"]`, and every MCP tool that changes a remote system, such as `ask: ["github.create_*", "github.merge_*", "github.push_*"]`.
+3. Give credentials only to MCP servers that the kernel calls: an entry with `auth.bearer`, `auth.oauth`, or `auth.spiffe`. Its credential stays in the memory of `fw`, and every call through it meets the policy of `fw`. Do not let the egress gateway add a credential for such a Task, because then every process of the sandbox carries it.
+4. Keep the tool user on, which is the default under ax, keep `spec.debug` off, and keep FW_HOME outside the root of the files tool.
+
+A profile with `bash` and a credential that the gateway adds is the opposite of this pattern: a shell reaches every credentialed host without a question.
 
 #### The environment
 
@@ -1187,6 +1203,7 @@ These gaps exist in ax at commit 8d2ccf3, read on 2026-10-17. Each one maps to a
 - A Task has no address of its own. External A2A clients need a header-adding proxy (section 11.4).
 - The stock marker directory `/ax` is not durable. `fw` writes its marker under `/workspace` (section 11.3).
 - Agent Substrate v0.4.0, read on 2026-10-14, suspends a Task with `SIGKILL` after it saves `/workspace`. No `SIGTERM` comes first. `fw` writes no `fw.run.suspended` event, and the working time of a run handles the missing event (section 11.5).
+- The egress gateway adds a credential of the egress policy to a request from any process of the sandbox, so a tool process reaches a credentialed host as `fw` does. The policy of `fw` does not bind such a call. Section 7.12 gives the pattern for untrusted input.
 
 ### 11.12 Guest services and `ax ssh`
 
@@ -1397,7 +1414,9 @@ func (a *Agent) Following() int
 func TitleFrom(input string) string
 
 // Run options: AsAgent, WithInstructions, WithRunProfile, WithRunBudget,
-// WithParent, WithMetadata, WithIdempotencyKey, WithOrigin.
+// WithParent, WithMetadata, WithIdempotencyKey, WithOrigin, and
+// InFilesRoot, which keeps the tools of a run in the root of the files
+// tool with tools.files.perRun (section 7.9).
 
 // Serve mounts every enabled surface on one listener and blocks.
 func (a *Agent) Serve(ctx context.Context) error
@@ -1405,6 +1424,13 @@ func (a *Agent) Serve(ctx context.Context) error
 
 // Files returns the workspace with the rules of tools.files (section 7.9).
 func (a *Agent) Files() Files
+
+// ToolUser returns the user of the tool processes (tools.user), or nil
+// when they run as the user of fw (section 7.12). Apply starts an
+// exec.Cmd as that user, and ToolEnv builds the environment of such a
+// process.
+func (a *Agent) ToolUser() *ToolUser
+func ToolEnv(ctx context.Context, cfg *Config, inherited, configured []string) []string
 
 // PersonTokens returns the tokens of people that a linked package set with
 // SetPersonTokens, and Connected lets every paused call of a person go on
@@ -1559,6 +1585,7 @@ The actions `agent.create`, `agent.edit`, and `agent.delete` stay in the kernel,
 - Tool results are data, not instructions. The kernel passes them to the model as tool result blocks only.
 - Operator instructions use system messages. User and tool content never reach the system prompt.
 - Destructive tools ask by default. A deployment that wants no prompts sets the policy to allow, in writing, in `fw.yaml`.
+- An approval binds the tools that `fw` runs, not a shell that calls a host with a credential that the egress gateway adds (section 7.12). For untrusted input, give the profile no shell and give credentials only to MCP servers that the kernel calls.
 - The `files` tool is jailed to its root path and never opens the home directory of `fw`, the file ledger, or the configuration file. The `http` tool uses an allowlist. The sandbox of the Task, which is ax under ax, keeps `bash` inside the Task. Inside the Task, the tool user keeps `bash` and the stdio MCP servers away from the state, the memory, and the secrets of `fw` (section 7.12). Under ax the tool user is on by default.
 - Annotations from an MCP server are hints. The policy trusts only the servers that `fw.yaml` lists as trusted.
 - Budgets cap every run. A run with no budget gets the profile budget. A profile with no budget gets the default: 200 turns, 2 hours of working time, 1000 tool calls, 32 calls per turn, and 5 repeats of one call.
@@ -1746,6 +1773,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The sandbox revision of 2026-10-20 made the tools of a Task safe for untrusted input as far as one sandbox allows (section 7.12). A tool process gets the environment of `fw.ToolEnv`, without the manifests of ax and without any variable that holds a secret. `tools.user` runs the shell and the stdio MCP servers as another user, 65532 by default under ax, and `fw` keeps FW_HOME to itself with mode `0700` and makes its process non-dumpable. `tools.files.perRun`, on by default under ax, gives each run a directory of its own (section 7.9), and `fw.InFilesRoot` keeps the bootstrap goal in the root. The kernel gained `fw.ToolUser`, `fw.LookupToolUser`, `Agent.ToolUser`, `fw.ToolEnv`, `fw.IsSecretName`, `fw.ToolTreeMarker`, `RunInfo.Dir`, and `RunQueuedData.FilesRoot`, and `fw doctor` the line `tools user`. The credentials that the egress gateway adds remain a known limit.
 
 The export revision of 2026-10-17 added the service `Export` of the package `telemetry` (section 10.5): with the standard `OTEL_EXPORTER_OTLP_*` variables, a process pushes its Prometheus series over OTLP, sends every ledger event as a log record with the trace of its run, and starts the trace projection, which no verb started before. The run counters gained the label `batch`, and `fw doctor` gained the line `telemetry`. The fleet gauges of the workbench and the Operator view of the page go, because Grafana reads the fleet from the collector.
 
