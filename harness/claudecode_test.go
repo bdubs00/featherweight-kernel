@@ -291,3 +291,51 @@ func TestClaudeCodeBlankFollowUp(t *testing.T) {
 		t.Fatalf("%d processes of claude", len(calls))
 	}
 }
+
+// TestClaudeCodeKillWithFullChannel stops a process at the budget while
+// it wrote more lines than the driver holds: the driver drains them, the
+// process ends, and the agent closes.
+func TestClaudeCodeKillWithFullChannel(t *testing.T) {
+	bin := t.TempDir()
+	p := filepath.Join(bin, "claude")
+	script := `#!/bin/sh
+i=0
+while [ $i -lt 3000 ]; do
+  echo '{"type":"assistant","parent_tool_use_id":null,"message":{"id":"msg_'$i'","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":1,"output_tokens":1}}}'
+  i=$((i+1))
+done
+exec sleep 30
+`
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := json.Marshal([]string{p})
+	d := newDirs(t)
+	cfg := testConfig(t, d, "kind: claude-code\ncommand: "+string(cmd)+"\n")
+	cfg.Model = "anthropic/claude-test"
+	cfg.Budget.MaxTurns = 1
+	a := newAgent(t, cfg, fw.NewMemLedger())
+	h := a.Runner().(*host)
+	h.mounts = 1
+	r, err := a.Start(testCtx(t), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateFailed || !strings.Contains(r.Error, "maxTurns") {
+		t.Fatalf("run = %+v", r)
+	}
+	c := h.drv.(*claude)
+	waitFor(t, func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.procs) == 0
+	})
+	done := make(chan struct{})
+	go func() { closeAgent(a); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the agent did not close within 15 seconds")
+	}
+}

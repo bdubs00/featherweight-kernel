@@ -287,6 +287,13 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		c.mu.Unlock()
 	}()
 	kill := func() {
+		// Nothing reads the lines after a kill, and readLines blocks on a
+		// full out, while exited comes only after readLines returns. The
+		// rest of the lines therefore go nowhere.
+		go func() {
+			for range out {
+			}
+		}()
 		_ = stdin.Close()
 		stop(cmd, syscall.SIGINT)
 		select {
