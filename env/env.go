@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 
+	"github.com/bdubs00/featherweight-kernel/cli"
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
@@ -13,6 +14,8 @@ func init() {
 	fw.RegisterTool(Name, newTool)
 	fw.RegisterToolEnv(toolEnv)
 	fw.RegisterPromptSection(section)
+	cli.RegisterDoctorCheck(doctor)
+	cli.EnvDockerfile = writeDockerfile
 	fw.RegisterDefaults(func(c *fw.Config) {
 		c.Tools.Builtin = append(c.Tools.Builtin, Name)
 		// A change of the packages asks a person first. A profile that
