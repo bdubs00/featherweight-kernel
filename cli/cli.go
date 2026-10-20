@@ -133,6 +133,7 @@ func verbs() []verb {
 		{"card", "print the A2A agent card", cmdCard},
 		{"config", "print the resolved configuration with secrets masked", cmdConfig},
 		{"env", "print every configuration variable, with its value when it is set", cmdEnv},
+		{"ax", "render, start, inspect, and delete one ax Task for a profile file", cmdAX},
 		{"version", "print the version", cmdVersion},
 	}
 }
