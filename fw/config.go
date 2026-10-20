@@ -206,6 +206,18 @@ type BusConfig struct {
 	Options     map[string]string `yaml:"options,omitempty" json:"options,omitempty"`
 }
 
+// RunSlots returns the number of top-level runs that work at a time:
+// MaxRuns, or 16 when MaxRuns is 0. Under ax, the package ax sets MaxRuns
+// to 1 before the agent starts. The bus drivers take it as the default of
+// the option concurrency, so a process handles no more messages of a
+// queue at a time than it has runs.
+func (c *Config) RunSlots() int {
+	if c == nil || c.MaxRuns <= 0 {
+		return defaultMaxRuns
+	}
+	return c.MaxRuns
+}
+
 // ToolsConfig configures built-in tools and tool sources.
 //
 // Limits apply to every tool call of every tool, from the built-in tools,

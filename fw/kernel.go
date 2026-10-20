@@ -169,10 +169,7 @@ func (k *kernel) newRunState(id, agent, trace string) *runState {
 // startKernel opens the runtime, rebuilds projections from the ledger, and
 // resumes unfinished runs.
 func (a *Agent) startKernel(ctx context.Context) error {
-	maxRuns := a.cfg.MaxRuns
-	if maxRuns <= 0 {
-		maxRuns = defaultMaxRuns
-	}
+	maxRuns := a.cfg.RunSlots()
 	kctx, cancel := context.WithCancel(context.Background())
 	k := &kernel{
 		atespace:  atespaceFromEnv(),
