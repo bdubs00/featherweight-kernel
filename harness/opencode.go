@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -710,6 +711,10 @@ func (o *opencode) exchange(ctx context.Context, r *run, s *ocSession, fresh boo
 			return ocWaiting, nil
 		}
 		answered, restart := false, false
+		// A decision that goes in the note of a restart is marked as
+		// answered once the prompt with the note reached the session, so a
+		// stop of the process before then carries it again.
+		var noted []decision
 		for _, d := range st.decided {
 			p, live := s.perms[d.req.ApprovalID]
 			if live {
@@ -721,13 +726,17 @@ func (o *opencode) exchange(ctx context.Context, r *run, s *ocSession, fresh boo
 				delete(s.perms, d.req.ApprovalID)
 			}
 			if !live {
-				s.carried = append(s.carried, d)
+				if !slices.ContainsFunc(s.carried, func(c decision) bool { return c.req.ApprovalID == d.req.ApprovalID }) {
+					s.carried = append(s.carried, d)
+				}
+				noted = append(noted, d)
 				restart = true
+				continue
 			}
 			if err := r.mark(ctx, EventData{Kind: KindAnswer, Approval: d.req.ApprovalID}); err != nil {
 				return 0, err
 			}
-			answered = answered || live
+			answered = true
 		}
 		st = r.rescan()
 		text, through := st.prompt()
@@ -743,6 +752,11 @@ func (o *opencode) exchange(ctx context.Context, r *run, s *ocSession, fresh boo
 		case text != "":
 			if err := o.prompt(ctx, r, s, text); err != nil {
 				return 0, err
+			}
+			for _, d := range noted {
+				if err := r.mark(ctx, EventData{Kind: KindAnswer, Approval: d.req.ApprovalID}); err != nil {
+					return 0, err
+				}
 			}
 			if err := r.mark(ctx, EventData{Kind: KindPrompt, Seq: through}); err != nil {
 				return 0, err

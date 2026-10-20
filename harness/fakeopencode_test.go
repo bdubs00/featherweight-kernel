@@ -30,6 +30,7 @@ type fakeOC struct {
 	noAuth   bool // a request came without basic authentication
 	calls    int
 	oldRoute bool // the server answers 404 on /permission/{id}/reply
+	failNext int  // the server answers 500 on this many prompts
 	script   func(f *fakeOC, p fakePrompt)
 	started  chan fakePrompt
 }
@@ -76,6 +77,12 @@ func newFakeOC(t *testing.T, script func(f *fakeOC, p fakePrompt)) *fakeOC {
 			p.Text = body.Parts[0].Text
 		}
 		f.mu.Lock()
+		if f.failNext > 0 {
+			f.failNext--
+			f.mu.Unlock()
+			http.Error(w, `{"name":"UnknownError"}`, http.StatusInternalServerError)
+			return
+		}
 		f.prompts = append(f.prompts, p)
 		f.mu.Unlock()
 		f.started <- p

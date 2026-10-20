@@ -556,3 +556,59 @@ func TestOpencodeEnvironmentChange(t *testing.T) {
 		return strings.Contains(string(b), "FW_TEST_ENV_MARK=b\n")
 	})
 }
+
+// TestOpencodeDecisionSurvivesALostNote decides after a cold boot, and the
+// prompt with the note of the decision fails, as when the process stops
+// before it. The decision stays unanswered in the ledger, so the next cold
+// boot gives the session the note with the decision, and the session gets
+// no second approval.
+func TestOpencodeDecisionSurvivesALostNote(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, writeHello)
+	block := ocBlock(d, f)
+	rules := fw.Rules{Default: "allow", Ask: []string{"write"}}
+	cfg := testConfig(t, d, block)
+	cfg.Policy.Rules = rules
+	l := fw.NewMemLedger()
+	a := newAgent(t, cfg, l)
+	r, err := a.Start(testCtx(t), "Create hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, inputRequired)
+	closeAgent(a)
+	f.restart()
+
+	f.mu.Lock()
+	f.failNext = 1
+	f.mu.Unlock()
+	cfg = testConfig(t, d, block)
+	cfg.Policy.Rules = rules
+	b := newAgent(t, cfg, l)
+	if err := b.Decide(testCtx(t), r.ID, fw.ApprovalDecision{ApprovalID: r.Pending.ID, Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.failNext == 0
+	})
+	closeAgent(b)
+	f.restart()
+
+	cfg = testConfig(t, d, block)
+	cfg.Policy.Rules = rules
+	c := newAgent(t, cfg, l)
+	r = waitState(t, c, r.ID, terminal)
+	if r.State != fw.StateCompleted || r.Output != "Done." {
+		t.Fatalf("run = %+v", r)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.prompts) != 2 || !strings.Contains(f.prompts[1].Text, "A person allowed the call write") {
+		t.Fatalf("prompts = %+v", f.prompts)
+	}
+	if n := len(ofType(events(t, l, r.ID), fw.EvApprovalRequested)); n != 1 {
+		t.Fatalf("%d approvals", n)
+	}
+}
