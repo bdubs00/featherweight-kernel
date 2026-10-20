@@ -328,14 +328,18 @@ func (o *opencode) server(ctx context.Context, m modelConf) (*ocServer, error) {
 func (s *ocServer) ready(ctx context.Context) error {
 	deadline := time.Now().Add(90 * time.Second)
 	for {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.base+"/global/health", nil)
+		// A server that starts can take a connection and answer nothing,
+		// so each probe has a time limit of its own.
+		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		req, _ := http.NewRequestWithContext(pctx, http.MethodGet, s.base+"/global/health", nil)
 		req.SetBasicAuth("opencode", s.pass)
 		resp, err := s.client.Do(req)
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return nil
-			}
+		}
+		cancel()
+		if err == nil && resp.StatusCode == http.StatusOK {
+			return nil
 		}
 		select {
 		case <-s.done:
@@ -571,8 +575,9 @@ func (o *opencode) session(ctx context.Context, r *run, srv *ocServer, m modelCo
 	}
 	s = &ocSession{srv: srv, id: sid, dir: dir, queue: queue, stop: cancel, model: m,
 		family: map[string]bool{sid: true}, assistants: map[string]bool{}, tools: map[string]*ocTool{}, perms: map[string]ocPerm{}}
-	pid, _, _, _ := ocProvider(m)
-	s.rec = newRecorder(r, pid, m.name, newTracker(o.h, dir, rel))
+	// The events name the provider of the kernel, so the price table of
+	// the kernel prices the calls.
+	s.rec = newRecorder(r, m.provider, m.name, newTracker(o.h, dir, rel))
 	o.mu.Lock()
 	o.sessions[r.hr.ID()] = s
 	o.mu.Unlock()

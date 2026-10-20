@@ -15,7 +15,7 @@ import (
 // that records its arguments and its environment and then sleeps, and the
 // port of the fake server.
 func ocBlock(d testDirs, f *fakeOC) string {
-	script := fmt.Sprintf(`printf '%%s\n' "$@" > %s/oc-args; env > %s/oc-env; exec sleep 600`, d.root, d.root)
+	script := fmt.Sprintf(`printf '%%s\n' "$@" > %[1]s/oc-args; env > %[1]s/oc-env.tmp; mv %[1]s/oc-env.tmp %[1]s/oc-env; exec sleep 600`, d.root)
 	cmd, _ := json.Marshal([]string{"sh", "-c", script, "fake-opencode"})
 	return fmt.Sprintf("kind: opencode\nport: %d\ncommand: %s\n", f.port(), cmd)
 }
@@ -54,7 +54,7 @@ func TestOpencodeRun(t *testing.T) {
 	resp := ofType(evs, fw.EvModelResponded)
 	var first fw.ModelRespondedData
 	resp[0].Decode(&first)
-	if len(resp) != 2 || first.StopReason != fw.StopToolUse || len(first.Content) != 2 || first.Content[1].Name != "write" {
+	if len(resp) != 2 || first.StopReason != fw.StopToolUse || len(first.Content) != 2 || first.Content[1].Name != "write" || first.Provider != "openai" || first.Model != "test-model" {
 		t.Fatalf("responses = %d, first = %+v", len(resp), first)
 	}
 	var req fw.ToolRequestedData
@@ -91,6 +91,8 @@ func TestOpencodeRun(t *testing.T) {
 	}
 	// The process got the home, the key, and a configuration that names
 	// the variable of the key, never the key.
+	// The fake server answers before the command wrote its files.
+	waitFor(t, func() bool { _, err := os.Stat(filepath.Join(d.root, "oc-env")); return err == nil })
 	env := readFile(t, filepath.Join(d.root, "oc-env"))
 	for _, want := range []string{"HOME=" + d.home + "\n", "FW_TEST_MODEL_KEY=" + testKey + "\n", "OPENCODE_DISABLE_MODELS_FETCH=1", `"baseURL":"http://127.0.0.1:9/v1"`, `"apiKey":"{env:FW_TEST_MODEL_KEY}"`, `OPENCODE_PERMISSION={"*":"ask"`} {
 		if !strings.Contains(env, want) {
