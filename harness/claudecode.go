@@ -284,7 +284,6 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		c.h.mu.Lock()
 		delete(c.h.hooks, key)
 		c.h.mu.Unlock()
-		c.h.a.RemoveSecret(key)
 	}()
 	settings := mustJSON(hookSettings(hook, key))
 	argv := append([]string(nil), c.h.cfg.Command...)
@@ -339,6 +338,7 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		return 0, err
 	}
 	if err := cmd.Start(); err != nil {
+		c.h.a.RemoveSecret(key)
 		return ccFailed, r.fail(ctx, fmt.Sprintf("harness: start %s: %v", argv[0], err))
 	}
 	c.mu.Lock()
@@ -348,7 +348,19 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 	c.procs[cmd] = true
 	c.mu.Unlock()
 	exited := make(chan error, 1)
-	go c.h.logLines(stderr, "stderr")
+	logged := make(chan struct{})
+	go func() {
+		c.h.logLines(stderr, "stderr")
+		close(logged)
+	}()
+	defer func() {
+		// The secret of the hook leaves the redactor once the process
+		// ended and the log of its output is written.
+		go func() {
+			<-logged
+			c.h.a.RemoveSecret(key)
+		}()
+	}()
 	out := make(chan []byte, 64)
 	go func() {
 		// Wait closes the pipe of stdout, so it comes after the last line.
