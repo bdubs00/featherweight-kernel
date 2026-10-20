@@ -206,7 +206,11 @@ func (h *host) Drive(ctx context.Context, hr *fw.Hosted) (bool, error) {
 		}
 		r.rescan()
 	}
-	if r.st.pending != nil || (r.st.terminal && len(r.st.unseen) == 0 && len(r.st.decided) == 0) {
+	// A run that waits has nothing to do before the decision. A finished
+	// run has nothing left: a follow-up reopens it, so the run is then no
+	// longer terminal. A run that failed before the harness got its input
+	// stays finished.
+	if r.st.pending != nil || r.st.terminal {
 		return true, nil
 	}
 	if err := h.prepare(); err != nil {

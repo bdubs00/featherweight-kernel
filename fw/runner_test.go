@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // hostRunner drives a run the way a hosted harness does: one turn per
@@ -126,6 +127,40 @@ func TestRunnerThatDeclinesLeavesTheTurnLoop(t *testing.T) {
 	r, err := a.Run(ctx, "hello")
 	if err != nil || r.Output != "native" {
 		t.Fatalf("run = %+v, %v", r, err)
+	}
+}
+
+// TestRunnerStopsAtTheEnd drives a run with a runner that fails the run
+// at each call and never checks the state, so it records events after the
+// end: the kernel calls it once and releases the finished run.
+func TestRunnerStopsAtTheEnd(t *testing.T) {
+	ctx := testCtx(t)
+	var calls atomic.Int32
+	a := newTestAgent(t, newScript().Model(), WithRunner(runnerFunc(func(ctx context.Context, h *Hosted) (bool, error) {
+		calls.Add(1)
+		if _, err := h.Emit(ctx, EvError, ErrorData{Message: "no harness"}); err != nil {
+			return true, err
+		}
+		_, err := h.Emit(ctx, EvRunFinished, RunFinishedData{Outcome: OutcomeFailed, Error: "no harness"})
+		return true, err
+	})))
+	r, err := a.Run(ctx, "hello")
+	if err != nil || r.State != StateFailed {
+		t.Fatalf("run = %+v, %v", r, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	evs, err := readAll(ctx, a.ledger, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := 0
+	for _, e := range evs {
+		if e.Type == EvRunFinished {
+			finished++
+		}
+	}
+	if n := calls.Load(); n != 1 || finished != 1 {
+		t.Fatalf("the runner ran %d times and recorded %d ends", n, finished)
 	}
 }
 

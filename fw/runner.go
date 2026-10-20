@@ -75,7 +75,9 @@ func (a *Agent) Runner() Runner { return a.runner }
 // does not drive it. The caller holds the events of the run (holdEvents).
 // Like the turn loop, it releases the run only when no event arrived since
 // the latest call of Drive began, so a message or a decision that arrives
-// meanwhile is never lost.
+// meanwhile is never lost. It also releases a run that is finished or
+// waits for a decision, as the turn loop does, so a Runner that recorded
+// the end of the run is not called again for it.
 func (a *Agent) host(ctx context.Context, rs *runState) (exitReason, bool) {
 	// A shutdown ends the work of the runner at once, as it stops a model
 	// call in flight; the next start resumes the run from its events.
@@ -111,10 +113,24 @@ func (a *Agent) host(ctx context.Context, rs *runState) (exitReason, bool) {
 			a.log.Error("runner stopped", "run", rs.id, "error", err)
 			return exitError, true
 		}
-		if a.idleExit(rs, seen) {
+		if a.idleExit(rs, seen) || a.settledExit(rs) {
 			return exitIdle, true
 		}
 	}
+}
+
+// settledExit releases the run when it is finished or waits for a
+// decision. The check and the release are one step under the lock of the
+// status: a follow-up or a decision that came before it reopened the run,
+// and one that comes after it finds no driver and starts a new one.
+func (a *Agent) settledExit(rs *runState) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if !rs.run.State.Terminal() && rs.run.Pending == nil {
+		return false
+	}
+	rs.active = false
+	return true
 }
 
 // Hosted is a run that a Runner drives. Its methods give the Runner what

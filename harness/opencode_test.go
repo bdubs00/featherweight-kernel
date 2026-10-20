@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
@@ -325,5 +326,33 @@ func TestHarnessMissing(t *testing.T) {
 		if r.State != fw.StateFailed || !strings.Contains(r.Error, "/nonexistent/harness") {
 			t.Fatalf("%s: run = %+v", kind, r)
 		}
+	}
+}
+
+// TestFailedRunEndsOnce fails a run before the harness got its input: the
+// run stays finished, and the driver does not start it again.
+func TestFailedRunEndsOnce(t *testing.T) {
+	for _, kind := range []string{KindOpencode, KindClaudeCode} {
+		d := newDirs(t)
+		cfg := testConfig(t, d, "kind: "+kind+"\ncommand: [/nonexistent/harness]\n")
+		if kind == KindClaudeCode {
+			cfg.Model = "anthropic/claude-test"
+		}
+		l := fw.NewMemLedger()
+		a := newAgent(t, cfg, l)
+		if kind == KindClaudeCode {
+			a.Runner().(*host).mounts = 1
+		}
+		r, err := a.Start(testCtx(t), "hello")
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, a, r.ID, terminal)
+		time.Sleep(300 * time.Millisecond)
+		evs := events(t, l, r.ID)
+		if f, e := len(ofType(evs, fw.EvRunFinished)), len(ofType(evs, fw.EvError)); f != 1 || e != 1 {
+			t.Fatalf("%s: %d events, %d fw.run.finished, %d fw.error", kind, len(evs), f, e)
+		}
+		closeAgent(a)
 	}
 }
