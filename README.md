@@ -116,6 +116,18 @@ ax ssh reviewer -- fw events <run-id>
 
 Do not set `spec.debug` on a Task whose environment or workspace holds keys that other callers must not read. The guest services carry no authentication, and any caller that reaches port 80 can run a process in the sandbox.
 
+One Task from one profile file, without a front, takes one verb each. The verbs dial `--server` and `--router`, so outside the cluster, forward the ports of `svc/ax-server` and `svc/atenet-router` first:
+
+```
+fw ax render -f agents/reviewer.yaml --name reviewer --image <image@sha256:...>   # print the Workspace and the Task, with placeholders for secrets
+fw ax up -f agents/reviewer.yaml --name reviewer --image <image@sha256:...>       # apply, resume, and wait for /readyz through the router
+fw ax status --name reviewer                                                       # the phase, the egress rules, and GET /v1/status of the kernel
+fw ax events --name reviewer <run-id>                                              # the ledger of a run through the router
+fw ax down --name reviewer                                                         # delete the Task and its Workspace
+```
+
+`render` and `up` derive one egress rule for each endpoint of the configuration. Inside a Task, `fw doctor` adds the lines `ax reach`, `ax trust bundle`, `ax tools user`, and `ax durable` (section 21 of the architecture).
+
 See section 11 of the architecture for the boot sequence, suspend and resume, `ax ssh`, and the gaps in ax today.
 
 ## Configuration
