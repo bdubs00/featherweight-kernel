@@ -318,6 +318,7 @@ type ToolRespondedData struct {
 	Tool      string  `json:"tool,omitempty"`
 	Content   []Block `json:"content"`
 	IsError   bool    `json:"isError"`
+	ExitCode  *int    `json:"exitCode,omitempty"` // the exit code of a command (ToolResult.ExitCode)
 	LatencyMS int64   `json:"latencyMs"`
 }
 

@@ -346,7 +346,11 @@ func (t *bashTool) run(ctx context.Context, s *bashSession, command string) (fw.
 	if err != nil {
 		code = -1
 	}
-	return fw.TextResult(bashText(out, errs, fmt.Sprintf("exit code %d", code))), nil
+	res := fw.TextResult(bashText(out, errs, fmt.Sprintf("exit code %d", code)))
+	if err == nil {
+		res.ExitCode = &code
+	}
+	return res, nil
 }
 
 // exited handles a shell that closed its output before the end mark, for
@@ -364,11 +368,14 @@ func (t *bashTool) exited(ctx context.Context, s *bashSession, out, errs *collec
 		errs.add(b)
 	}
 	msg := "The shell closed its standard output, so it was stopped. The next call starts a new shell."
+	var code *int
 	if ps := sh.cmd.ProcessState; ps != nil && ps.Exited() {
 		msg = fmt.Sprintf("The shell exited (exit status %d). The next call starts a new shell.", ps.ExitCode())
+		c := ps.ExitCode()
+		code = &c
 	}
 	logger(ctx).Warn("bash: shell ended", "status", fmt.Sprint(status))
-	return fw.ToolResult{Content: []fw.Block{fw.Text(bashText(out, errs, msg))}, IsError: true}
+	return fw.ToolResult{Content: []fw.Block{fw.Text(bashText(out, errs, msg))}, IsError: true, ExitCode: code}
 }
 
 // bashText builds "<stdout>\n<stderr>\n<footer>" and leaves out empty parts.

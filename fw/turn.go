@@ -1296,6 +1296,7 @@ func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall)
 			Tool:      p.use.Name,
 			Content:   validJSONBlocks(content),
 			IsError:   res.IsError,
+			ExitCode:  res.ExitCode,
 			LatencyMS: outs[i].ms,
 		}); err != nil {
 			return err

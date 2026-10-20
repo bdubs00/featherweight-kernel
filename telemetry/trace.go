@@ -228,6 +228,9 @@ func (t *Tracer) Observe(e fw.Event) {
 		}
 		delete(rt.tools, d.CallID)
 		span.SetAttributes(attribute.Bool("fw.tool.is_error", d.IsError), attribute.Int64("fw.latency_ms", d.LatencyMS))
+		if d.ExitCode != nil {
+			span.SetAttributes(attribute.Int("process.exit.code", *d.ExitCode))
+		}
 		if d.IsError {
 			span.SetStatus(codes.Error, "the tool returned an error result")
 		}

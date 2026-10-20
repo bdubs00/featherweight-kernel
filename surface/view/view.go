@@ -474,6 +474,9 @@ func describe(e fw.Event) string {
 			if d.IsError {
 				return "the tool " + tool + " failed: " + oneLine(fw.TextOf(d.Content), 120)
 			}
+			if d.ExitCode != nil && *d.ExitCode != 0 {
+				return fmt.Sprintf("the tool %s exited %d in %d ms", tool, *d.ExitCode, d.LatencyMS)
+			}
 			return fmt.Sprintf("the tool %s answered in %d ms", tool, d.LatencyMS)
 		}
 	case fw.EvToolProgress:

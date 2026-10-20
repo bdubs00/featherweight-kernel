@@ -37,3 +37,20 @@ func TestEventsPage(t *testing.T) {
 		t.Errorf("unknown run = %v", events)
 	}
 }
+
+func TestLineNamesANonZeroExitCode(t *testing.T) {
+	code, zero := 1, 0
+	cases := []struct {
+		data fw.ToolRespondedData
+		want string
+	}{
+		{fw.ToolRespondedData{Tool: "bash", ExitCode: &code, LatencyMS: 6952}, "the tool bash exited 1 in 6952 ms"},
+		{fw.ToolRespondedData{Tool: "bash", ExitCode: &zero, LatencyMS: 12}, "the tool bash answered in 12 ms"},
+		{fw.ToolRespondedData{Tool: "echo", LatencyMS: 3}, "the tool echo answered in 3 ms"},
+	}
+	for _, c := range cases {
+		if got := describe(fw.MustEvent("r1", fw.EvToolResponded, c.data)); got != c.want {
+			t.Errorf("line = %q, want %q", got, c.want)
+		}
+	}
+}

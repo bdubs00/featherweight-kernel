@@ -441,6 +441,8 @@ type ToolSource interface {
 
 The workbench adds the built-in tool `propose_agent` (the workbench architecture, section 6.4).
 
+`bash` answers a non-zero exit code with a normal result, not an error result. `fw.tool.responded` records the exit code in the field `exitCode`, which a tool sets through `ToolResult.ExitCode`, and the event line reads "the tool bash exited 1 in 6952 ms".
+
 Four built-in tools set `Action`:
 
 | Tool | Action |
