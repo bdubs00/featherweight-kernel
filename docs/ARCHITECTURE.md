@@ -2119,3 +2119,11 @@ A block with `placement: image` keeps its `dir`. A durable block gives `/opt/env
 ### 18.11 What this is not
 
 It is not a container inside the container: gVisor does not nest. It is not a root shell: apt and system services stay out of a run. It does not replace the goal of a Workspace (section 11.3), which stays the fallback for an environment that nobody wrote down. No GPU reaches a Task, so a GPU package is not a reason for an environment.
+
+### 18.12 Limits
+
+- The `files` tool writes as the user of fw. With its root at `/workspace` and without `tools.files.perRun`, a run can therefore write the state files under `dir`. The brief takes only names and versions from them, in the characters of a package name.
+- A tool process of the tool user can change the environment, as `pip install` into the virtual environment does. The marker then no longer describes it, until the next install of a new digest.
+- The time of a long install in `fw run` counts against the time limit of the first tool call of the run.
+- On a system without `flock(2)`, two processes can install one environment at the same time.
+- No measurement of a heavy environment exists yet. Section 18.2 names the three numbers to take on the homelab before a default moves between `durable` and `image`.
