@@ -925,8 +925,8 @@ func (r *run) info(dir string) fw.RunInfo {
 // (fw.ToolEnv) and the variables of tools.bash.env, HOME, the home of the
 // harness, and FW_RUN_DIR, then the changes of the linked packages
 // (fw.ExtendToolEnv), such as the PATH of the environment of section 18,
-// whose error stops the process. name names the program in the error.
-func (h *host) environ(ctx context.Context, info fw.RunInfo, dir, name string) ([]string, error) {
+// whose error stops the process. prog names the program in the error.
+func (h *host) environ(ctx context.Context, info fw.RunInfo, dir, prog string) ([]string, error) {
 	cfg := h.a.Config()
 	var configured []string
 	for name, v := range cfg.Tools.Bash.Env {
@@ -939,7 +939,7 @@ func (h *host) environ(ctx context.Context, info fw.RunInfo, dir, name string) (
 	env := fw.ToolEnv(actx, cfg, os.Environ(), configured)
 	env, err := fw.ExtendToolEnv(actx, cfg, append(env, "HOME="+h.home, "FW_RUN_DIR="+dir))
 	if err != nil {
-		return nil, fmt.Errorf("harness: the environment of %s: %w", name, err)
+		return nil, fmt.Errorf("harness: the environment of %s: %w", prog, err)
 	}
 	return env, nil
 }
