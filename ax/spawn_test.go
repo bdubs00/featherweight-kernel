@@ -735,3 +735,38 @@ func TestForkCreatesAChildTaskAndStartsTheBranch(t *testing.T) {
 		t.Fatalf("the child got body %v with keys %v", router.body, router.keys)
 	}
 }
+
+// TestSpawnWithoutTheTokenFailsBeforeTheTask checks that a parent without
+// the static token of the fleet fails at once, names the variable, and
+// creates no child Task (scenario1 D8).
+func TestSpawnWithoutTheTokenFailsBeforeTheTask(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	s := newSpawnerUnderTest(t, ax, router)
+	t.Setenv("FW_TEST_FLEET_TOKEN", "")
+	start := time.Now()
+	if _, err := s.Plan(&fw.Run{ID: "01PARENT"}, fw.RunRequest{ID: fw.NewID()}); err == nil || !strings.Contains(err.Error(), "FW_TEST_FLEET_TOKEN is not set") {
+		t.Fatalf("Plan = %v", err)
+	}
+	_, _, err := s.Spawn(ctx, &fw.Run{ID: "01PARENT"}, fw.RunRequest{ID: fw.NewID(), Input: "x"})
+	if err == nil || !strings.Contains(err.Error(), "FW_TEST_FLEET_TOKEN is not set") {
+		t.Fatalf("Spawn = %v", err)
+	}
+	if _, err := s.Place(ctx, &fw.Run{ID: "01PARENT"}); err == nil || !strings.Contains(err.Error(), "FW_TEST_FLEET_TOKEN is not set") {
+		t.Fatalf("Place = %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("the refusal took %s", d)
+	}
+	if tasks := ax.created(); len(tasks) != 0 {
+		t.Fatalf("created %d child Tasks", len(tasks))
+	}
+	// A token that goes away after the Task exists ends the start at once.
+	_, err = s.startOn(ctx, "team/migrator-x", "/v1/runs", []byte(`{}`), "k")
+	var noToken *noTokenError
+	if !errors.As(err, &noToken) {
+		t.Fatalf("startOn = %v", err)
+	}
+}

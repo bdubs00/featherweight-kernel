@@ -35,6 +35,10 @@ type BodyOptions struct {
 	// reasoning models take and other servers reject.
 	Reasoning bool
 
+	// Effort sends the effort as reasoning_effort too, but leaves the token
+	// limit in max_tokens, for a server that is not OpenAI.
+	Effort bool
+
 	// MaxTokensField names the field that carries the token limit:
 	// "max_tokens" or "max_completion_tokens". Empty or "auto" follows
 	// Reasoning: max_completion_tokens with it, max_tokens without it.
@@ -162,7 +166,7 @@ func BuildBody(req *fw.Request, model string, o BodyOptions) ([]byte, map[string
 		PromptCacheKey:    o.PromptCacheKey,
 		ParallelToolCalls: o.ParallelToolCalls,
 	}
-	if o.Reasoning {
+	if o.Reasoning || o.Effort {
 		body.ReasoningEffort = effort
 	}
 	field := o.MaxTokensField

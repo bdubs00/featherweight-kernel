@@ -39,18 +39,27 @@ const bashSchema = `{
 
 const bashDescription = "Run a command in the persistent bash shell of this run. " +
 	"The working directory and exported variables carry over between the calls of the run, and another run never sees them. " +
+	"Each call starts with set -e, set -u, and pipefail off, and a failure under set -e ends that call, not the shell. " +
 	"The result holds stdout, then stderr, then the exit code. " +
 	"A non-zero exit code is a normal result. " +
-	"The output is cut at the output limit of the configuration. " +
+	"An output over the limit of the configuration keeps its head and its tail, and the result names a file with the full output. " +
 	"The command reads no input, so do not run interactive programs."
 
 // bashTimeout is the time limit of one call when tools.bash.timeout is not
 // set.
 const bashTimeout = 120 * time.Second
 
-// markKeep is the room that the output buffer keeps after the cap, so the
-// end mark is still found when a command prints more than maxOutput.
-const markKeep = 4 << 10
+// tailKeep is the end of a stream that bash keeps past the cap, so the
+// last lines of a long output, such as the verdict of a check, survive,
+// and the end mark is still found.
+const tailKeep = 32 << 10
+
+// bashKeep is the head of a stream that bash keeps when the output limit
+// of the configuration cuts the results of bash (fw.LimitTools). The limit
+// then keeps the head and the tail of the result for the model and the
+// full text in a file of the run. Without that limit, bash keeps
+// maxOutput.
+const bashKeep = 1 << 20
 
 // sessionIdle is how long the shell of a run stays after its last call
 // when no CloseRun came, for example for a call outside a run.
@@ -70,6 +79,7 @@ type bashTool struct {
 	env     []string     // the variables of tools.bash.env, as NAME=value
 	user    *fw.ToolUser // the user of the shell (tools.user), or nil for the user of fw
 	timeout time.Duration
+	keep    int // the head of a stream that a call keeps: maxOutput or bashKeep
 
 	mu       sync.Mutex
 	sessions map[string]*bashSession // by run id
@@ -86,8 +96,11 @@ type bashSession struct {
 }
 
 func newBash(cfg *fw.Config) (fw.Tool, error) {
-	t := &bashTool{cfg: cfg, timeout: bashTimeout, home: fw.DefaultHome(), sessions: map[string]*bashSession{}, done: make(chan struct{})}
+	t := &bashTool{cfg: cfg, timeout: bashTimeout, keep: maxOutput, home: fw.DefaultHome(), sessions: map[string]*bashSession{}, done: make(chan struct{})}
 	if cfg != nil {
+		if n := cfg.Tools.Limits.For("bash").MaxOutputBytes; n > 0 {
+			t.keep = max(bashKeep, n)
+		}
 		dir, err := filepath.Abs(cfg.WorkspaceRoot())
 		if err != nil {
 			return nil, fmt.Errorf("builtin: bash: root %s: %w", cfg.WorkspaceRoot(), err)
@@ -291,16 +304,29 @@ func (t *bashTool) run(ctx context.Context, s *bashSession, command string) (fw.
 	// fails the command and leaves the shell running. The end mark is
 	// printed in two parts, so a trace with set -x or set -v does not
 	// contain it.
-	script := fmt.Sprintf("IFS= read -r -d '' __fw_cmd <<'%[1]s'\n%[2]s\n%[1]s\n"+
-		"eval \"$__fw_cmd\" </dev/null\n"+
-		"__fw_ec=$?\n"+
+	//
+	// Each call starts with set -e, set -u, and pipefail off, so an option
+	// of one call never stops the wrapper of the next. A failure under a
+	// set -e of the call ends the command, not the shell: the ERR trap
+	// returns from each function of the shell, and at the top it turns
+	// set -e off and leaves the loop around eval. The command keeps its
+	// exit code. A subshell exits as bash makes it exit. A command that
+	// sets its own ERR trap, or that reads an unset variable under set -u,
+	// can still end the shell, as it ends a script.
+	script := fmt.Sprintf("set +euo pipefail\n"+
+		"__fw_pid=$BASHPID __fw_fail=\n"+
+		"set -E\n"+
+		"trap '__fw_s=$?; if [[ $- == *e* && $BASHPID == \"$__fw_pid\" ]]; then if (( ${#FUNCNAME[@]} )); then return $__fw_s; fi; set +e; __fw_fail=$__fw_s; break 1000; fi' ERR\n"+
+		"IFS= read -r -d '' __fw_cmd <<'%[1]s' || true\n%[2]s\n%[1]s\n"+
+		"for __fw_once in 1; do eval \"$__fw_cmd\" </dev/null; done\n"+
+		"__fw_ec=${__fw_fail:-$?}\n"+
 		"printf '%%s%%s %%d\\n' __FW_END_ '%[3]s' \"$__fw_ec\"\n"+
 		"printf '%%s%%s\\n' __FW_END_ '%[3]s' >&2\n",
 		eof, command, mark)
 	go func() { _, _ = io.WriteString(sh.stdin, script) }()
 
-	out := newCollector("__FW_END_"+mark, sh.outLeft)
-	errs := newCollector("__FW_END_"+mark, sh.errLeft)
+	out := newCollector("__FW_END_"+mark, sh.outLeft, t.keep)
+	errs := newCollector("__FW_END_"+mark, sh.errLeft, t.keep)
 	errCh := sh.stderr
 	if sh.errClosed {
 		// A command such as "exec 2>&1" closed the stderr pipe earlier.
@@ -336,7 +362,11 @@ func (t *bashTool) run(ctx context.Context, s *bashSession, command string) (fw.
 	if err != nil {
 		code = -1
 	}
-	return fw.TextResult(bashText(out, errs, fmt.Sprintf("exit code %d", code))), nil
+	res := fw.TextResult(bashText(out, errs, fmt.Sprintf("exit code %d", code)))
+	if err == nil {
+		res.ExitCode = &code
+	}
+	return res, nil
 }
 
 // exited handles a shell that closed its output before the end mark, for
@@ -354,14 +384,18 @@ func (t *bashTool) exited(ctx context.Context, s *bashSession, out, errs *collec
 		errs.add(b)
 	}
 	msg := "The shell closed its standard output, so it was stopped. The next call starts a new shell."
+	var code *int
 	if ps := sh.cmd.ProcessState; ps != nil && ps.Exited() {
 		msg = fmt.Sprintf("The shell exited (exit status %d). The next call starts a new shell.", ps.ExitCode())
+		c := ps.ExitCode()
+		code = &c
 	}
 	logger(ctx).Warn("bash: shell ended", "status", fmt.Sprint(status))
-	return fw.ToolResult{Content: []fw.Block{fw.Text(bashText(out, errs, msg))}, IsError: true}
+	return fw.ToolResult{Content: []fw.Block{fw.Text(bashText(out, errs, msg))}, IsError: true, ExitCode: code}
 }
 
 // bashText builds "<stdout>\n<stderr>\n<footer>" and leaves out empty parts.
+// A body longer than the head that the collectors keep loses its middle.
 func bashText(out, errs *collector, footer string) string {
 	var parts []string
 	total, cut := 0, false
@@ -374,10 +408,12 @@ func bashText(out, errs *collector, footer string) string {
 		}
 	}
 	body := strings.Join(parts, "\n")
-	var over bool
-	body, over = truncate(body, maxOutput)
+	over := len(body) > out.limit
+	if over {
+		body = fw.CutMiddle(body, out.limit, out.limit)
+	}
 	if cut || over {
-		body += fmt.Sprintf("\n[output truncated: %d bytes in total, the first 100 KB are shown]", total)
+		body += fmt.Sprintf("\n[output truncated: %d bytes in total; the head and the tail are shown]", total)
 	}
 	if body == "" {
 		return footer
@@ -461,13 +497,14 @@ type collector struct {
 	buf     []byte
 	at      int // index of the mark in buf, or -1
 	dropped int // bytes dropped from the middle to respect the cap
+	limit   int // the head that the cap keeps, before a tail of tailKeep
 	done    bool
 	tail    string // text between the mark and the line end
 	left    []byte // bytes after the line end
 }
 
-func newCollector(mark string, left []byte) *collector {
-	c := &collector{mark: []byte(mark), at: -1}
+func newCollector(mark string, left []byte, limit int) *collector {
+	c := &collector{mark: []byte(mark), at: -1, limit: limit}
 	if len(left) > 0 {
 		c.add(left)
 	}
@@ -498,9 +535,9 @@ func (c *collector) add(b []byte) {
 		}
 		return
 	}
-	if extra := len(c.buf) - maxOutput - markKeep; extra > 0 {
-		n := copy(c.buf[maxOutput:], c.buf[maxOutput+extra:])
-		c.buf = c.buf[:maxOutput+n]
+	if extra := len(c.buf) - c.limit - tailKeep; extra > 0 {
+		n := copy(c.buf[c.limit:], c.buf[c.limit+extra:])
+		c.buf = c.buf[:c.limit+n]
 		c.dropped += extra
 	}
 }
@@ -510,11 +547,13 @@ func (c *collector) add(b []byte) {
 var staleMark = regexp.MustCompile(`__FW_END_[0-9a-f]{32}(?: -?[0-9]+)?\n?`)
 
 // output returns the collected text before the mark, without stale marks.
-// After a drop, it returns only the first maxOutput bytes.
+// After a drop, a note between the head and the tail says how many bytes
+// are gone.
 func (c *collector) output() []byte {
 	b := c.buf
-	if c.dropped > 0 && len(b) > maxOutput {
-		b = b[:maxOutput]
+	if c.dropped > 0 && len(b) > c.limit {
+		gap := fmt.Sprintf("\n[... %d bytes dropped here ...]\n", c.dropped)
+		b = append(append(append([]byte(nil), b[:c.limit]...), gap...), b[c.limit:]...)
 	}
 	return staleMark.ReplaceAll(b, nil)
 }

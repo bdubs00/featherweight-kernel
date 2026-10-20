@@ -89,13 +89,14 @@ providers:                      # one connection per provider; FW_PROVIDERS_<NAM
     apiKeyEnv: OPENAI_API_KEY
     headers: {}                 # extra headers on every request; values resolve through Secrets; FW_PROVIDERS_OPENAI_HEADERS_<NAME>
     timeout: 0s                 # one request; 0 is the default of the adapter
+    maxConcurrent: 0            # the most calls of this process to this provider at once, for a server with few slots; 0 is no limit
     tls:
       ca: ""                    # PEM bundle; default is the system roots
       cert: ""                  # client certificate and key for mutual TLS
       key: ""
       insecure: false           # development only
     options:                    # read by the OpenAI adapter; FW_PROVIDERS_OPENAI_OPTIONS_<NAME>
-      reasoning: auto           # auto | on | off: send the reasoning effort
+      reasoning: auto           # auto | on | off: send the reasoning effort; auto also sends a set effort other than high to a server that is not OpenAI
       maxTokensField: auto      # auto | max_tokens | max_completion_tokens
       authHeader: ""            # empty sends Authorization: Bearer; a name such as api-key sends the key in that header
       organization: ""          # the OpenAI-Organization header
@@ -153,7 +154,7 @@ tools:
     scope: agent                # agent: notes per profile under <home>/memory/agents/<agent> | shared: one set under <home>/memory/shared
   limits:                       # every tool call, from the built-in tools, MCP servers, and Go options alike
     maxInputBytes: 262144       # a larger input does not run
-    maxOutputBytes: 102400      # a larger result keeps its head and its tail
+    maxOutputBytes: 102400      # a larger result keeps its head and its tail, and the full text goes to .fw-tool/<call id>.txt of the run; a local model wants less, such as 16384
     timeout: 10m
     perTool:                    # a tool name or a glob; an exact name wins; FW_TOOLS_LIMITS_PER_TOOL_<NAME>_MAX_OUTPUT_BYTES
       http:

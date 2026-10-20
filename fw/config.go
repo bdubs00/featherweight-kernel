@@ -169,14 +169,18 @@ type ListenTLSConfig struct {
 // defaults and the options that it reads. BaseURL replaces the endpoint of
 // the provider, so a local server or a proxy needs no code change. APIKeyEnv
 // names the secret that holds the API key, when the default name of the
-// adapter is not the one in use.
+// adapter is not the one in use. MaxConcurrent bounds the model calls of
+// this process to the provider that are in flight at the same time, for a
+// server with few slots: a call waits for a free slot, and
+// fw.model.responded records the wait in queuedMs. Zero means no limit.
 type ProviderConfig struct {
-	BaseURL   string            `yaml:"baseUrl,omitempty" json:"baseUrl,omitempty"`
-	APIKeyEnv string            `yaml:"apiKeyEnv,omitempty" json:"apiKeyEnv,omitempty"`
-	Headers   map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"` // values resolve through Secrets
-	Timeout   time.Duration     `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	TLS       TLSConfig         `yaml:"tls" json:"tls"`
-	Options   map[string]string `yaml:"options,omitempty" json:"options,omitempty"`
+	BaseURL       string            `yaml:"baseUrl,omitempty" json:"baseUrl,omitempty"`
+	APIKeyEnv     string            `yaml:"apiKeyEnv,omitempty" json:"apiKeyEnv,omitempty"`
+	Headers       map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"` // values resolve through Secrets
+	Timeout       time.Duration     `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	MaxConcurrent int               `yaml:"maxConcurrent,omitempty" json:"maxConcurrent,omitempty"`
+	TLS           TLSConfig         `yaml:"tls" json:"tls"`
+	Options       map[string]string `yaml:"options,omitempty" json:"options,omitempty"`
 }
 
 // ProviderNamed returns the configuration of a provider, or a zero value.

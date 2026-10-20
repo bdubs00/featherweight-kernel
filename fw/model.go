@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"time"
 )
 
 // Role of a message.
@@ -163,6 +165,14 @@ type Response struct {
 	Usage      Usage           `json:"usage"`
 	Provider   string          `json:"provider"`
 	Model      string          `json:"model"`
+	// FirstByteMS is the time in milliseconds from the start of the call to
+	// the first streamed event of the answer. A model that does not
+	// measure it leaves it at zero.
+	FirstByteMS int64 `json:"ttfbMs,omitempty"`
+	// QueuedMS is the time in milliseconds that the call waited for a free
+	// slot of its provider (ProviderConfig.MaxConcurrent). The kernel sets
+	// it.
+	QueuedMS int64 `json:"queuedMs,omitempty"`
 }
 
 // ToolUses returns the tool_use blocks of a response.
@@ -223,6 +233,66 @@ func (m ModelFunc) Stream(ctx context.Context, req *Request, on func(Delta)) (*R
 		on(Delta{Type: "block", Block: &b})
 	}
 	return resp, nil
+}
+
+// slotModel holds each call of a model until its provider has a free slot
+// (ProviderConfig.MaxConcurrent), and records the wait in the response.
+// The slots of a provider are shared by every model of that provider in
+// the process.
+type slotModel struct {
+	Model
+	slots chan struct{}
+}
+
+// modelSlots returns the slots of each provider with a limit of concurrent
+// calls.
+func modelSlots(cfg *Config) map[string]chan struct{} {
+	out := map[string]chan struct{}{}
+	for name, pc := range cfg.Providers {
+		if pc.MaxConcurrent > 0 {
+			out[name] = make(chan struct{}, pc.MaxConcurrent)
+		}
+	}
+	return out
+}
+
+// limitModel returns m behind the slots of the provider of selector, or m
+// when the provider has no limit.
+func limitModel(slots map[string]chan struct{}, selector string, m Model) Model {
+	provider, _ := SplitSelector(selector)
+	if s := slots[provider]; s != nil && m != nil {
+		return &slotModel{Model: m, slots: s}
+	}
+	return m
+}
+
+// Unwrap returns the model behind the slots, so MediaTypesOf finds it.
+func (m *slotModel) Unwrap() Model { return m.Model }
+
+// Generate implements Model.
+func (m *slotModel) Generate(ctx context.Context, req *Request) (*Response, error) {
+	return m.call(ctx, func() (*Response, error) { return m.Model.Generate(ctx, req) })
+}
+
+// Stream implements Model.
+func (m *slotModel) Stream(ctx context.Context, req *Request, on func(Delta)) (*Response, error) {
+	return m.call(ctx, func() (*Response, error) { return m.Model.Stream(ctx, req, on) })
+}
+
+func (m *slotModel) call(ctx context.Context, fn func() (*Response, error)) (*Response, error) {
+	start := time.Now()
+	select {
+	case m.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("fw: wait for a model slot: %w", context.Cause(ctx))
+	}
+	defer func() { <-m.slots }()
+	queued := time.Since(start)
+	resp, err := fn()
+	if resp != nil {
+		resp.QueuedMS = queued.Milliseconds()
+	}
+	return resp, err
 }
 
 // ErrContextOverflow marks a model error that says the request is larger

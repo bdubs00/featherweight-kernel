@@ -80,7 +80,7 @@ func Replay(ctx context.Context, a *Agent, src Ledger, runID string, opts ...Run
 			if e.Decode(&d) != nil {
 				continue
 			}
-			res := ToolResult{Content: d.Content, IsError: d.IsError}
+			res := ToolResult{Content: d.Content, IsError: d.IsError, ExitCode: d.ExitCode}
 			if c, ok := calls[d.CallID]; ok {
 				results[c] = append(results[c], res)
 				continue

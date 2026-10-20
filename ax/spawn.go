@@ -174,6 +174,11 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 	if err != nil {
 		return nil, "", err
 	}
+	// Without the token no request reaches the child, so the child Task
+	// is never created.
+	if _, err := s.token(ctx); err != nil {
+		return nil, "", err
+	}
 	if req.Metadata == nil {
 		req.Metadata = map[string]string{}
 	}
@@ -206,11 +211,15 @@ func (s *Spawner) Spawn(ctx context.Context, parent *fw.Run, req fw.RunRequest) 
 
 // Plan implements fw.Planner: it returns the member name of the child Task
 // that Spawn creates for req, from the name of this Task and req.ID, and
-// creates nothing.
+// creates nothing. Without the static token of the fleet it fails, so the
+// parent records no child that cannot start.
 func (s *Spawner) Plan(_ *fw.Run, req fw.RunRequest) (string, error) {
 	task, _ := Stashed()
 	if task == nil {
 		return "", errors.New("ax: this process is not an ax Task, so it cannot start a child Task")
+	}
+	if _, err := s.token(context.Background()); err != nil {
+		return "", err
 	}
 	atespace, name := Identity(task)
 	if atespace == "" || name == "" {
@@ -278,6 +287,9 @@ func (s *Spawner) Place(ctx context.Context, parent *fw.Run) (string, error) {
 	}
 	child, err := childName(name, "")
 	if err != nil {
+		return "", err
+	}
+	if _, err := s.token(ctx); err != nil {
 		return "", err
 	}
 	client, err := s.ax()
@@ -677,7 +689,10 @@ func (s *Spawner) startOn(ctx context.Context, actor, path string, body []byte, 
 	wait := time.Second
 	for {
 		status, answer, err := s.do(ctx, http.MethodPost, actor, path, body, key)
+		var noToken *noTokenError
 		switch {
+		case errors.As(err, &noToken):
+			return nil, err
 		case err == nil && (status == http.StatusCreated || status == http.StatusOK):
 			var run fw.Run
 			if err := json.Unmarshal(answer, &run); err != nil || run.ID == "" {
@@ -786,12 +801,30 @@ func (s *Spawner) Cancel(ctx context.Context, member, id string) error {
 	return nil
 }
 
+// noTokenError says that the static token of the fleet is not set. No
+// retry helps, so a start of a child fails at once.
+type noTokenError struct{ name string }
+
+func (e *noTokenError) Error() string {
+	return fmt.Sprintf("ax: the static token %s is not set, so this process cannot reach a child Task", e.name)
+}
+
+// token returns the static token of the fleet, or a *noTokenError that
+// names its variable.
+func (s *Spawner) token(ctx context.Context) (string, error) {
+	token, err := fw.EnvSecrets{}.Get(ctx, s.tokenEnv)
+	if err != nil || strings.TrimSpace(token) == "" {
+		return "", &noTokenError{name: s.tokenEnv}
+	}
+	return strings.TrimSpace(token), nil
+}
+
 // do sends one request to a child through the router, with the static
 // token of the fleet, and returns the status and the body.
 func (s *Spawner) do(ctx context.Context, method, actor, path string, body []byte, idempotencyKey string) (int, []byte, error) {
-	token, err := fw.EnvSecrets{}.Get(ctx, s.tokenEnv)
-	if err != nil || strings.TrimSpace(token) == "" {
-		return 0, nil, fmt.Errorf("ax: the static token %s is not set, so this process cannot reach a child Task", s.tokenEnv)
+	token, err := s.token(ctx)
+	if err != nil {
+		return 0, nil, err
 	}
 	var rd io.Reader = http.NoBody
 	if body != nil {
@@ -802,7 +835,7 @@ func (s *Spawner) do(ctx context.Context, method, actor, path string, body []byt
 		return 0, nil, fmt.Errorf("ax: build the request to %s: %w", actor, err)
 	}
 	req.Header.Set("ate-target-actor", actor)
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

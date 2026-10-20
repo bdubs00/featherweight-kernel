@@ -61,7 +61,13 @@
 //     which OpenAI reasoning models need. Off sends neither, which most
 //     other servers need. Auto reads the variable FW_OPENAI_REASONING (1 or
 //     0) and otherwise turns reasoning on for o-series and GPT-5 model
-//     names only.
+//     names only. For any other model on a server that is not OpenAI or
+//     Azure OpenAI, auto still sends an effort that the configuration or
+//     the profile sets to a value other than high, the default of fw, as
+//     reasoning_effort, and keeps max_tokens. A local server such as vLLM,
+//     llama.cpp, or Strata then gets the effort that the ledger records.
+//     The default effort goes nowhere, because some servers refuse the
+//     field for a model that does not reason.
 //   - maxTokensField: auto, max_tokens, or max_completion_tokens. Default
 //     auto, which follows the reasoning setting.
 //   - authHeader: the header that carries the API key. Default
@@ -192,6 +198,10 @@ const (
 	// 0 sends it to none, when the reasoning option is auto.
 	ReasoningEnv = "FW_OPENAI_REASONING"
 
+	// defaultEffort is the effort of fw.DefaultConfig. With the reasoning
+	// option auto, a server that is not OpenAI gets every other effort.
+	defaultEffort = "high"
+
 	// DefaultIdleTimeout is the longest wait for the next byte of a
 	// response when the idleTimeout option is not set.
 	DefaultIdleTimeout = 120 * time.Second
@@ -251,6 +261,7 @@ type Model struct {
 	auth       string      // the header that carries the key
 	headers    http.Header // the organization, the project, and the configured headers
 	reasoning  bool
+	effortAuto bool     // send an effort other than defaultEffort without reasoning
 	tokenField string   // max_tokens or max_completion_tokens
 	cacheKey   bool     // send the run id as prompt_cache_key
 	parallel   *bool    // parallel_tool_calls, when set
@@ -274,6 +285,7 @@ type settings struct {
 	authHeader string
 	headers    map[string]string
 	reasoning  bool
+	effortAuto bool   // the reasoning option is auto, and FW_OPENAI_REASONING is unset
 	tokenField string // auto, max_tokens, or max_completion_tokens
 	cacheKey   string // auto, on, or off
 	parallel   string // empty, true, or false
@@ -380,6 +392,7 @@ func New(ctx context.Context, model string, cfg *fw.Config, secrets fw.Secrets) 
 		authHeader: opts.authHeader,
 		headers:    headers,
 		reasoning:  reasoning,
+		effortAuto: opts.reasoning == "auto" && strings.TrimSpace(os.Getenv(ReasoningEnv)) == "",
 		tokenField: opts.tokenField,
 		cacheKey:   opts.cacheKey,
 		parallel:   opts.parallel,
@@ -462,6 +475,7 @@ func newModel(s settings) (*Model, error) {
 		auth:       auth,
 		headers:    headers,
 		reasoning:  s.reasoning,
+		effortAuto: s.effortAuto && !s.reasoning && !openAIHost(u.Hostname()),
 		tokenField: tokenField,
 		cacheKey:   cacheKey,
 		parallel:   parallel,
@@ -605,6 +619,21 @@ func lookup(ctx context.Context, secrets fw.Secrets, name string) (string, error
 	return strings.TrimSpace(os.Getenv(name)), nil
 }
 
+// openAIHost reports whether host is the OpenAI API or an Azure OpenAI
+// endpoint, which refuse reasoning_effort for a model that does not reason.
+func openAIHost(host string) bool {
+	host = strings.ToLower(host)
+	if host == "api.openai.com" {
+		return true
+	}
+	for _, suffix := range []string{".openai.azure.com", ".cognitiveservices.azure.com", ".services.ai.azure.com"} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // reasoningModel reports whether a model name is an OpenAI reasoning model:
 // o1, o3, o4-mini, and the like, or a GPT-5 model. A provider prefix such as
 // "openai/" is ignored.
@@ -631,11 +660,14 @@ func (m *Model) Generate(ctx context.Context, req *fw.Request) (*fw.Response, er
 // arrived, is retried three times after the wait that Retry-After names or
 // an exponential backoff. Another error status fails at once with an
 // *APIError. A stream that sends no byte for the idle timeout, or that
-// grows past MaxResponseBytes, fails with an error that says so.
+// grows past MaxResponseBytes, fails with an error that says so. The
+// response holds in FirstByteMS the time from the start of the call, its
+// retries included, to the first event of the stream.
 func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) (*fw.Response, error) {
 	if req == nil {
 		return nil, errors.New("openai: nil request")
 	}
+	start := time.Now()
 	r := *req
 	r.Effort = r.EffortOr(m.effort)
 	body, names, err := BuildBody(&r, m.model, m.bodyOptions(&r))
@@ -666,13 +698,18 @@ func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) 
 	if err != nil {
 		return nil, fmt.Errorf("openai: stream %s: %w", m.model, m.explain(call, err))
 	}
-	return acc.response(m.model)
+	out, err := acc.response(m.model)
+	if out != nil && !acc.first.IsZero() {
+		out.FirstByteMS = acc.first.Sub(start).Milliseconds()
+	}
+	return out, err
 }
 
 // bodyOptions returns the body settings of one request.
 func (m *Model) bodyOptions(req *fw.Request) BodyOptions {
 	o := BodyOptions{
 		Reasoning:         m.reasoning,
+		Effort:            m.effortAuto && req.Effort != "" && req.Effort != defaultEffort,
 		MaxTokensField:    m.tokenField,
 		ParallelToolCalls: m.parallel,
 	}

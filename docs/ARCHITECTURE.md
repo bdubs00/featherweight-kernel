@@ -338,8 +338,11 @@ Each provider has a connection block under `providers.<name>` in `fw.yaml`, and 
 | `apiKeyEnv` | The secret that holds the API key, for a key under another name than the default |
 | `headers` | Extra headers on every request. A value that names a secret is replaced by the secret. |
 | `timeout` | The limit of one call, retries included. |
+| `maxConcurrent` | The most model calls of this process to the provider at the same time, for a server with few slots. A call waits for a free slot. `0`, the default, means no limit. |
 | `tls` | A CA bundle, a client certificate and key, or `insecure` for development. |
 | `options` | Options that one adapter reads. Section 6.6 lists the OpenAI options. |
+
+`fw.model.responded` records the time of each call in three fields. `latencyMs` is the whole call. `queuedMs` is the wait for a slot of `maxConcurrent`. `ttfbMs` is the time from the start of the call at the provider to the first streamed event of the answer. The OpenAI adapter measures it, and the other adapters leave it out. A long `ttfbMs` is a wait for the server, such as a queue at a model slot or a long prompt. The time after it is the work of the model.
 
 ### 6.3 Anthropic adapter settings
 
@@ -379,7 +382,7 @@ The adapter speaks the chat completions API over `net/http` with no SDK, so one 
 
 | Option | Values | Default |
 |---|---|---|
-| `reasoning` | `auto`, `on`, `off`: send the effort as `reasoning_effort` | `auto`: on for o-series and GPT-5 names |
+| `reasoning` | `auto`, `on`, `off`: send the effort as `reasoning_effort` | `auto`: on for o-series and GPT-5 names. For another model on a server that is not OpenAI or Azure OpenAI, such as vLLM, llama.cpp, or Strata, `auto` sends an effort of the configuration or the profile other than `high`, the default, and keeps `max_tokens`. |
 | `maxTokensField` | `auto`, `max_tokens`, `max_completion_tokens` | `auto`: follows `reasoning` |
 | `authHeader` | A header name. `Authorization` sends a Bearer token. Any other name sends the bare key, which Azure wants in `api-key`. | `Authorization` |
 | `organization`, `project` | The `OpenAI-Organization` and `OpenAI-Project` headers | `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` |
@@ -438,6 +441,8 @@ type ToolSource interface {
 
 The workbench adds the built-in tool `propose_agent` (the workbench architecture, section 6.4).
 
+`bash` answers a non-zero exit code with a normal result, not an error result. `fw.tool.responded` records the exit code in the field `exitCode`, which a tool sets through `ToolResult.ExitCode`, and the event line reads "the tool bash exited 1 in 6952 ms".
+
 Four built-in tools set `Action`:
 
 | Tool | Action |
@@ -452,6 +457,8 @@ The other built-in tools have no label. `files` and `memory` read, write, and de
 The `files` tool never opens a path under the paths that `Config.Reserved` lists: the home directory of `fw`, the directory of the file ledger, and the configuration file. The check uses the real path, after symbolic links. A change there changes what `fw` allows at its next start. For example, a profile file under `$FW_HOME/agents` can grant its agent access and read secrets from the environment through `${VAR}`. Every other path under the root needs no approval, except the paths that the rules of the workspace refuse (section 7.9).
 
 When the provider is Anthropic, `bash`, `files`, and `memory` use the Anthropic-defined tool shapes `bash_20250124`, `text_editor_20250728`, and `memory_20250818`. Other providers get the same tools with a plain JSON schema. Each profile lists the tools that it allows. The `bash` shell gets the environment of a tool process (section 7.12): no manifest of ax, no credential of `fw`, and no variable that holds a secret. It starts with `FW_HOME` and with the variables of `tools.bash.env`. A script inside the sandbox therefore reads an endpoint from its environment instead of from a literal in a prompt. `tools.bash.timeout` bounds one command, 120 seconds by default. A tool that implements `io.Closer` is closed at shutdown, which ends the shell. The `bash` tool keeps one shell per run: the working directory, the variables, and the background jobs of one run never reach another run or another person, and the kernel closes the shell when the run ends, through the interface `fw.RunCloser`, which any tool with state per run can implement.
+
+Each `bash` command starts with `set -e`, `set -u`, and `pipefail` off. A failure under a `set -e` of the command ends the command with its exit code and keeps the shell, its directory, and its variables.
 
 ### 7.3 MCP client over HTTP and HTTPS
 
@@ -553,10 +560,12 @@ Every tool call goes through the limits middleware, `fw.LimitTools`. The configu
 | Limit | Default | Effect |
 |---|---|---|
 | `maxInputBytes` | 256 KB | A larger input does not run. The model reads an error that names the limit. |
-| `maxOutputBytes` | 100 KB | A larger result keeps its head and its tail. A note at the cut says how many bytes are gone. |
+| `maxOutputBytes` | 100 KB | A larger result keeps its head and its tail. A note at the cut says how many bytes are gone, and in a run it names the file with the full text. |
 | `timeout` | 10m | A call that runs longer gets an error result and its context ends |
 
 The limits apply to the built-in tools, to MCP tools, to A2A peers, and to tools passed as Go options alike. The reason is that the middleware wraps every tool outermost. The kernel records the bounded result in the ledger, so the history that the next model call sends is bounded too. An image or a document in a result counts with its size. If it does not fit, the kernel drops it with a note. The cut keeps two thirds of the room for the head and one third for the tail. The start of a listing and the end of a log therefore both survive.
+
+In a run, the kernel also writes the full text of a cut result to `.fw-tool/<call id>.txt` in the directory of the run, with every secret replaced as in the ledger, and records `fw.file.changed` for it. The note at the cut names the file and its size, so the model reads the part that it needs with the `files` tool and a line range. One careless command then costs the context window only the limit, and a lower limit, such as 16 KB for a local model, loses nothing. The `bash` tool keeps up to 1 MiB of the head of each stream and 32 KB of its tail when this limit applies to it, so the file holds the whole output of most commands. Without the limit, `bash` keeps 100 KB of the head and the tail itself. Without `tools.files.perRun`, the directory of the run is the root of the workspace, so a git checkout there wants `.fw-tool/` in its `.gitignore`.
 
 ### 7.8 Memory
 
@@ -1145,6 +1154,8 @@ The directory [examples/observability](../examples/observability/README.md) hold
 ### 10.2 Traces
 
 The `trace` projection emits OpenTelemetry spans. A run is one span. Each turn is a child span, and each model call and tool call is a child of its turn. The service `Export` of the package `telemetry` starts the projection when a collector is named (section 10.5). The exporter is OTLP, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` variable. The `traceparent` value travels in every ledger event, in every bus message, in the `spawn_task` environment, and in outbound A2A and MCP requests.
+
+The spans carry the attributes of the OpenTelemetry GenAI agent conventions, so a trace store that knows them, such as Grafana, Langfuse, or Braintrust, reads the traces without a mapping. The run span keeps the name `fw.run` and carries `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and `gen_ai.agent.id`, both the profile, and `gen_ai.conversation.id`, the run id. A model span, `chat <model>`, carries the chat attributes and the conversation. A tool span, `execute_tool <tool>`, carries `gen_ai.tool.name`, `gen_ai.tool.call.id`, the agent, the conversation, and `gen_ai.tool.type`: `function` for a built-in tool or a tool of a Go option, and `extension` for a tool of an MCP server or an A2A peer. `fw.tool.requested` names the source of the tool for this. A tool of an MCP server also carries `mcp.method.name` `tools/call`, and a call of the `skill` tool carries `gen_ai.skill.name`.
 
 ### 10.3 Logs
 

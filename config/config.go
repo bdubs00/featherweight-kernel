@@ -321,6 +321,9 @@ func validate(c *fw.Config, servers bool) error {
 		if c.Providers[name].Timeout < 0 {
 			p = append(p, fmt.Sprintf("providers.%s.timeout %s is negative", name, c.Providers[name].Timeout))
 		}
+		if c.Providers[name].MaxConcurrent < 0 {
+			p = append(p, fmt.Sprintf("providers.%s.maxConcurrent %d is negative", name, c.Providers[name].MaxConcurrent))
+		}
 	}
 	p = append(p, checkLimit("tools.limits", c.Tools.Limits.Limit)...)
 	for _, name := range sortedKeys(c.Tools.Limits.PerTool) {

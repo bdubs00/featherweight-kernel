@@ -282,16 +282,24 @@ type ModelRequestedData struct {
 	Report               bool   `json:"report,omitempty"`
 }
 
-// ModelRespondedData is the payload of fw.model.responded.
+// ModelRespondedData is the payload of fw.model.responded. LatencyMS is
+// the whole call, the wait for a slot included. FirstByteMS is the time
+// from the start of the call at the provider to the first streamed event
+// of the answer, when the model measures it (Response.FirstByteMS).
+// QueuedMS is the wait for a slot of the provider (ProviderConfig.
+// MaxConcurrent). The difference tells the wait for the model from the
+// work of the model.
 type ModelRespondedData struct {
-	Content    []Block         `json:"content"`
-	Raw        json.RawMessage `json:"raw,omitempty"` // provider blocks, unchanged
-	StopReason StopReason      `json:"stopReason"`
-	StopDetail string          `json:"stopDetail,omitempty"`
-	Usage      Usage           `json:"usage"`
-	LatencyMS  int64           `json:"latencyMs"`
-	Provider   string          `json:"provider"`
-	Model      string          `json:"model"`
+	Content     []Block         `json:"content"`
+	Raw         json.RawMessage `json:"raw,omitempty"` // provider blocks, unchanged
+	StopReason  StopReason      `json:"stopReason"`
+	StopDetail  string          `json:"stopDetail,omitempty"`
+	Usage       Usage           `json:"usage"`
+	LatencyMS   int64           `json:"latencyMs"`
+	FirstByteMS int64           `json:"ttfbMs,omitempty"`
+	QueuedMS    int64           `json:"queuedMs,omitempty"`
+	Provider    string          `json:"provider"`
+	Model       string          `json:"model"`
 }
 
 // ToolRequestedData is the payload of fw.tool.requested.
@@ -306,6 +314,9 @@ type ToolRequestedData struct {
 	// the current tool spec; this field does not pin the tool implementation
 	// or guarantee exactly-once effects.
 	Idempotent bool `json:"idempotent,omitempty"`
+	// Source records ToolSpec.Source: "builtin", the name of the MCP
+	// server or of the A2A peer, or empty for a tool of a Go option.
+	Source string `json:"source,omitempty"`
 }
 
 // ToolRespondedData is the payload of fw.tool.responded.
@@ -314,6 +325,7 @@ type ToolRespondedData struct {
 	Tool      string  `json:"tool,omitempty"`
 	Content   []Block `json:"content"`
 	IsError   bool    `json:"isError"`
+	ExitCode  *int    `json:"exitCode,omitempty"` // the exit code of a command (ToolResult.ExitCode)
 	LatencyMS int64   `json:"latencyMs"`
 }
 
