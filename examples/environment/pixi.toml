@@ -1,0 +1,9 @@
+# The tools of the example agent from conda-forge. pixi installs them
+# under environment.dir/pixi-envs with pixi install --frozen.
+[workspace]
+name = "example-tools"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+
+[dependencies]
+jq = ">=1.7"
