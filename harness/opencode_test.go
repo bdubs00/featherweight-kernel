@@ -110,6 +110,16 @@ func TestOpencodeRun(t *testing.T) {
 	if strings.Contains(conf, testKey) || !json.Valid([]byte(conf)) {
 		t.Fatalf("the configuration of opencode = %s", conf)
 	}
+	// The redactor knows the password of the server.
+	var pass string
+	for _, line := range strings.Split(env, "\n") {
+		if v, ok := strings.CutPrefix(line, "OPENCODE_SERVER_PASSWORD="); ok {
+			pass = v
+		}
+	}
+	if len(pass) != 64 || a.Redact("password "+pass) != "password "+fw.Redacted {
+		t.Fatalf("the password %q is not redacted", pass)
+	}
 	if args := readFile(t, filepath.Join(d.root, "oc-args")); args != fmt.Sprintf("--port\n%d\n--hostname\n127.0.0.1\n", f.port()) {
 		t.Fatalf("args = %q", args)
 	}

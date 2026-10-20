@@ -87,7 +87,21 @@ if resume and state.get("deferred"):
 for line in sys.stdin:
     msg = json.loads(line)
     text = msg["message"]["content"]
-    if "read twice" in text:
+    if "show settings" in text:
+        # A tool call whose result holds the arguments of the process, as
+        # the output of ps does.
+        inp = {"file_path": "x.txt"}
+        out({"type": "assistant", "parent_tool_use_id": None,
+             "message": {"id": "msg_s", "model": arg("--model"), "role": "assistant", "stop_reason": "tool_use",
+                         "content": [{"type": "tool_use", "id": "toolu_s", "name": "Read", "input": inp}], "usage": usage}})
+        decision, reason = ask("toolu_s", "Read", inp)
+        out({"type": "user", "parent_tool_use_id": None,
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_s", "content": "claude --settings " + arg("--settings"), "is_error": False}]}})
+        out({"type": "assistant", "parent_tool_use_id": None,
+             "message": {"id": "msg_s2", "model": arg("--model"), "role": "assistant", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "Shown."}], "usage": usage}})
+        result("Shown.")
+    elif "read twice" in text:
         # Two tool calls, one in each of two responses.
         for i, tid in enumerate(("toolu_1", "toolu_2")):
             inp = {"file_path": "f%d.txt" % i}

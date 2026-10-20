@@ -965,16 +965,18 @@ func envDigest(env []string) string {
 }
 
 // logLines logs each line of the output of a process of the harness at
-// the debug level, with every secret replaced.
+// the debug level, with every secret replaced. The cut to 2000 bytes comes
+// after the replacement, so it never leaves a part of a secret that the
+// redactor no longer matches.
 func (h *host) logLines(rd io.Reader, stream string) {
 	sc := bufio.NewScanner(rd)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for sc.Scan() {
-		line := sc.Text()
+		line := h.a.Redact(sc.Text())
 		if len(line) > 2000 {
 			line = line[:2000]
 		}
-		h.log.Debug("harness output", "stream", stream, "line", h.a.Redact(line))
+		h.log.Debug("harness output", "stream", stream, "line", line)
 	}
 }
 

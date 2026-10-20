@@ -307,3 +307,17 @@ func TestPrivatePath(t *testing.T) {
 		}
 	}
 }
+
+// TestLogLinesRedactsBeforeTheCut logs a long line with a key at the cut:
+// the log holds no part of the key.
+func TestLogLinesRedactsBeforeTheCut(t *testing.T) {
+	d := newDirs(t)
+	a := newAgent(t, testConfig(t, d, "kind: opencode"), fw.NewMemLedger())
+	h := a.Runner().(*host)
+	var buf strings.Builder
+	h.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	h.logLines(strings.NewReader(strings.Repeat("x", 1995)+testKey+"\n"), "stderr")
+	if out := buf.String(); !strings.Contains(out, "xxx") || strings.Contains(out, testKey[:5]) {
+		t.Fatalf("log = %s", out)
+	}
+}

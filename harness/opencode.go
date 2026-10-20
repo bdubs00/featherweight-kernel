@@ -298,6 +298,7 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 	}
 	argv = append(argv, "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
 	pass := secret()
+	o.h.a.AddSecret(pass)
 	extra := []string{
 		"OPENCODE_SERVER_PASSWORD=" + pass,
 		"OPENCODE_CONFIG_CONTENT=" + string(conf),

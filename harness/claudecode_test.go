@@ -493,3 +493,41 @@ func TestClaudeCodeHookChecksTheBudget(t *testing.T) {
 		t.Fatalf("decisions = %+v", got)
 	}
 }
+
+// TestClaudeCodeHookSecretRedacted runs a tool call whose result holds the
+// arguments of the process, with the secret of the hook: the ledger holds
+// the result without the secret.
+func TestClaudeCodeHookSecretRedacted(t *testing.T) {
+	d := newDirs(t)
+	block := fakeClaude(t)
+	l := fw.NewMemLedger()
+	a := claudeAgent(t, d, block, l, nil)
+	r, err := a.Start(testCtx(t), "Please show settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateCompleted {
+		t.Fatalf("run = %+v", r)
+	}
+	var settings struct {
+		Hooks map[string][]struct{ Hooks []struct{ URL string } }
+	}
+	if err := json.Unmarshal([]byte(argOf(fakeCalls(t, d.home)[0].Args, "--settings")), &settings); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := strings.Cut(settings.Hooks["PreToolUse"][0].Hooks[0].URL, hookPath)
+	if len(key) != 64 {
+		t.Fatalf("the hook URL holds the secret %q", key)
+	}
+	var res fw.ToolRespondedData
+	ofType(events(t, l, r.ID), fw.EvToolResponded)[0].Decode(&res)
+	if text := fw.TextOf(res.Content); strings.Contains(text, key) || !strings.Contains(text, hookPath+fw.Redacted) {
+		t.Fatalf("result = %s", text)
+	}
+	for _, e := range events(t, l, r.ID) {
+		if strings.Contains(string(e.Data), key) {
+			t.Fatalf("the event %s holds the secret of the hook", e.Type)
+		}
+	}
+}

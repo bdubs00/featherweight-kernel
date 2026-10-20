@@ -274,6 +274,9 @@ func (c *claude) hookURL(ctx context.Context) (string, error) {
 func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf, hook, dir, sid string, resume bool, lines []string, through uint64) (ccOutcome, error) {
 	p := newClaudeProc(r)
 	key := secret()
+	// The secret is in the arguments of the process, which a tool call of
+	// the harness can print, so the redactor knows it while it works.
+	c.h.a.AddSecret(key)
 	c.h.mu.Lock()
 	c.h.hooks[key] = p
 	c.h.mu.Unlock()
@@ -281,6 +284,7 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		c.h.mu.Lock()
 		delete(c.h.hooks, key)
 		c.h.mu.Unlock()
+		c.h.a.RemoveSecret(key)
 	}()
 	settings := mustJSON(hookSettings(hook, key))
 	argv := append([]string(nil), c.h.cfg.Command...)
