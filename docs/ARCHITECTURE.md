@@ -2139,6 +2139,118 @@ It is not a container inside the container: gVisor does not nest. It is not a ro
 - On a system without `flock(2)`, two processes can install one environment at the same time.
 - No measurement of a heavy environment exists yet. Section 18.2 names the three numbers to take on the homelab before a default moves between `durable` and `image`.
 
+## 19. Hosted harnesses
+
+A harness is an agent program that people use on their laptops, such as opencode or Claude Code. The block `harness` of `fw.yaml` makes the kernel host one. Every run of the process then becomes a session of the harness instead of a run of the turn loop. The kernel keeps what makes a run durable: one ledger, one policy, one approval surface, and an idle run while a person decides, so a Task suspends at no cost and a cold boot continues the session. The package `harness` holds the hosts, one file for each kind, and `cmd/fw/driver_harness.go` links it behind the build tag `harness` (section 15).
+
+### 19.1 Configuration
+
+```yaml
+harness:
+  kind: opencode            # opencode | claude-code
+  home: /workspace/.harness # HOME, and CLAUDE_CONFIG_DIR for Claude Code
+  command: []               # the program and its first arguments
+  port: 0                   # opencode only: the loopback port of opencode serve
+```
+
+| Key | Meaning | Default |
+|---|---|---|
+| `kind` | The harness: `opencode` or `claude-code`. A block without it stops the start. | none |
+| `home` | The home of the harness: its sessions, its transcripts, and its credentials. It must be on the durable volume, beside the home of `fw` and never inside it, and never inside the directory of a run. | `.harness` beside the home of `fw`: `/workspace/.harness` under ax, `./.harness` elsewhere |
+| `command` | The program of the harness and its first arguments. The kernel adds its own flags after them. | `opencode serve`, or `claude` |
+| `port` | The loopback port of `opencode serve`. `0` picks a free port. A port for `claude-code` stops the start. | `0` |
+
+The block names no model and no key. The harness uses the model of the run, the model that the turn loop would use, with the endpoint and the key of its provider: `providers.<provider>.baseUrl` and the secret that `apiKeyEnv` names. A run without a model fails, as in the turn loop. A block that `fw config` prints holds no secret. A run that the turn loop started before the block was set stays with the turn loop.
+
+### 19.2 The runner
+
+The kernel holds one seam for the hosts, in `fw/runner.go`. A package registers a constructor with `fw.RegisterRunner(func(ctx context.Context, a *fw.Agent) (fw.Runner, error))`, and a program can pass one with `fw.WithRunner`. `New` builds the runner before it resumes the runs of the ledger, so a resumed run goes to it. `Agent.Runner` returns it.
+
+```go
+type Runner interface {
+    Drive(ctx context.Context, h *Hosted) (bool, error)
+}
+```
+
+The driver of a run asks the runner first, each time it starts: for a new run, after a follow-up, after a decision, and after a restart. `Drive` does the work that the events of the run leave, and returns when the run is finished, waits for a decision, or its context ends. Like the turn loop, the kernel releases the run only when no event arrived while `Drive` worked; otherwise it calls `Drive` again. A shutdown ends the context at once. `Drive` reports false for a run that it does not drive, and the turn loop drives that run.
+
+`Hosted` gives the runner what the turn loop uses: `Events`, `Emit` through the append path of the kernel (the secrets of the data are replaced, the status and the observers see the event, and an approval or a terminal event is synced), `Finish`, which records the end of the run unless a message came that the runner did not handle, `Decide` with the policy of the run, `Over` and `Budget` for the budget of the run, `Usage`, `Model`, `Queued`, and `Dir`, the directory of the tools of the run, which it creates with `tools.files.perRun`. Every exported signature of `fw` stays as it was.
+
+### 19.3 The session in the ledger
+
+The host records the steps of a session with the events of the turn loop, so the budget, the status, the views, `fw events`, the OTLP export, and the front work unchanged. A turn is one model call of the harness, as in the turn loop.
+
+| From the harness | In the ledger |
+|---|---|
+| opencode: a part `step-start`. Claude Code: the first `assistant` line of a message id. | `fw.turn.started`, `fw.model.requested` |
+| opencode: the parts `text` and `tool` of the step, and `step-finish` with its tokens. Claude Code: the `assistant` lines of one message id, with the usage of the message. | `fw.model.responded`, with the text, the tool calls, the stop reason, and the usage |
+| a tool call: the permission request of opencode, or the `tool_use` block of Claude Code | `fw.tool.requested`, before the call runs |
+| opencode: a part `tool` that is `completed` or `error`. Claude Code: a `user` line with a `tool_result`. | `fw.tool.responded` |
+| the end of the step, or the next model call | `fw.turn.finished`, then `fw.file.changed` for the files that the turn changed (19.7) |
+| a call that the policy asks a person about | `fw.approval.requested` (19.4) |
+| opencode: `session.idle`. Claude Code: the `result` line. | `fw.run.finished`, with the latest text as the output |
+| every other event of the harness | `fw.harness.event` |
+
+`fw.harness.event` holds `harness`, the kind, `kind`, the type of the event of the harness, such as `message.part.updated` or `result`, and `data`, a compact payload: ids, states, tool names, the stop reason, and the tokens, never the text of a file or a key. The high-frequency events of opencode, `message.part.delta` and `server.heartbeat`, are left out. The same event also records the steps of the kernel in the session. Their kinds start with `fw.`:
+
+| Kind | Meaning |
+|---|---|
+| `fw.start` | The run is a session of a harness. |
+| `fw.session` | The session has the id `session`: the id of the session of opencode, or the session UUID of Claude Code. |
+| `fw.prompt` | The harness got the messages of the run up to the sequence number `seq`. |
+| `fw.answer` | The harness got the decision of the approval `approval`. |
+| `fw.idle` | The harness finished the exchange that the latest `fw.prompt` or `fw.answer` started. |
+
+An exchange without its `fw.idle` was cut by a stop of the process. The next driver continues it (19.5).
+
+opencode reports the usage of a model call when the call ends, after its tool calls ran, while the kernel records a call that asks a person before it runs. Such a model call therefore gets its `fw.model.responded` with no usage at the first permission request, and its usage follows as `fw.run.annotated` with the usage, the provider, and the model. The usage, the cost, the budget, and the metrics count it in the same way (section 8.2). The model calls of a subagent count the same way and are not turns of the run.
+
+### 19.4 Policy and approvals
+
+The kernel names the tools of a harness in lower case, such as `bash`, `read`, `write`, `edit`, and `webfetch`, so one rule fits both kinds, for example `bash: git push*` or `write: filePath=*.env` (section 7.5). `bash` and the guards `external_directory` and `doom_loop` of opencode are destructive, so the default policy asks a person about them, as for the `bash` tool of the kernel. `read`, `glob`, `grep`, `list`, `ls`, `webfetch`, `websearch`, `skill`, and the to-do tools are read-only. Every other tool has no flag.
+
+opencode asks the kernel about every call. The kernel sets `OPENCODE_PERMISSION` to `ask` for every permission key, and the inline configuration `OPENCODE_CONFIG_CONTENT` sets `ask` for the agents `build`, `plan`, `general`, and `explore`, which win over the configuration of the project. The kernel prompts with the agent `build`. For each `permission.asked` event of the session or of a subagent, the kernel asks the policy of the run. It answers `allow` with `once` and `deny` with `reject` and the reason, on `POST /permission/{id}/reply`, or on `POST /session/{id}/permissions/{id}` of an older server.
+
+Claude Code asks the kernel through a `PreToolUse` hook of the type `http`. Each process gets the hook in `--settings`, with the URL `http://127.0.0.1:<port>/v1/harness/hook/<secret>` on the native API and `onFailure: block`, so a hook that fails blocks the call. The secret is new for each process and leaves with it. The route answers only a caller on the loopback address, and a secret that no process holds gets `deny`. The hook answers `allow` and `deny` from the policy, and `defer` where the policy asks.
+
+A call that the policy asks about becomes `fw.approval.requested` with the tool, the call id, the input, and the reason of the rule. The run moves to `input-required`, the driver returns, and `GET /v1/status` reports the Task as idle (section 11.8), so the front can suspend it. A decision from any surface starts the driver again. A deny that the rules of the run gained meanwhile wins over an allow, as in the turn loop.
+
+### 19.5 Waiting, suspend, and a cold boot
+
+opencode waits inside its server. When the decision comes while the process lives, the kernel answers the permission that waits, and the session goes on. When the Task slept meanwhile, the server and its permission are gone, but the session is in the database of opencode under the home of the harness. The new driver starts `opencode serve` again, gives the open tool calls an error result, `not finished: the harness stopped before the call ended`, and sends the session a note: the process stopped and started again, the person allowed or denied the call, and the session continues from where it stopped. When the session makes the same call again, with the same tool and the same input, the kernel answers it from the decision and asks no person again. A session that worked when the process stopped gets the same note without a decision.
+
+Claude Code does not wait. On `defer` it exits with `stop_reason: tool_deferred` and the call in `deferred_tool_use`, and the kernel records the approval from it. After the decision, also after a cold boot, the kernel runs `claude -p --resume <session>` with the same flags and a new hook, the same call fires the hook again, and the hook answers it from the decision in the ledger. A process that a stop cut is resumed with the note of opencode.
+
+The process of a harness runs in a process group of its own and ends with `fw`. A cancel of a run that waits aborts its session of opencode.
+
+### 19.6 Budget
+
+The host asks `Hosted.Over` before each turn and after each usage, with the limits of the run, of its tree, and the deadline of its lineage (section 5.2). At a limit it records `fw.budget.exceeded`, gives the open calls an error result, records the changed files, finishes the run as `failed` with the budget error, and stops the harness: it aborts the session of opencode or stops the process of Claude Code. A hosted run makes no final report. Claude Code also gets `--max-turns` with the turns that the run has left, and `--max-budget-usd` with the cost that it has left when the budget sets `maxCostUSD`.
+
+### 19.7 Files
+
+A harness writes files without kernel events. The host keeps the size, the time, and the mode of each file under the directory of the run, and at the end of each turn with a tool that can write, and at the end of each exchange, it records each file that changed as `fw.file.changed`, with the SHA-256 of the content and the tool `opencode` or `claude-code`, as the `files` tool does (section 7.9). `run_file` and the result view then show the files. The comparison leaves out the home of `fw`, the reserved paths, the home of the harness, `.git`, and `node_modules`. A directory with more than 50,000 files gets no record and a warning in the log. A cold boot starts a new comparison, so a change that the harness made before the stop and after the last record is not in the ledger.
+
+### 19.8 Processes and their environment
+
+The host starts each process as the tool user, with the environment of a tool process (`fw.ToolEnv`) and the variables of `tools.bash.env`, in the directory of the run, as the shell of `bash` (section 7.12). `HOME` is the home of the harness, and `FW_RUN_DIR` names the directory of the run. Then it adds what the harness needs on purpose:
+
+| Kind | Command | Variables |
+|---|---|---|
+| `opencode` | `opencode serve --port <port> --hostname 127.0.0.1`, once for the process, in the root of the workspace. A session for each run, created with `POST /session?directory=<directory of the run>`; a prompt with `POST /session/{id}/prompt_async` and the model `fw-<provider>/<model>`; the events from `GET /event`. | `OPENCODE_SERVER_PASSWORD`, a random password for the basic authentication of the kernel; `OPENCODE_CONFIG_CONTENT`, one provider of opencode for each provider of the kernel that a model of the configuration uses, with `baseURL` and `apiKey: {env:<apiKeyEnv>}`; `OPENCODE_PERMISSION`; `OPENCODE_DISABLE_MODELS_FETCH=1`; `OPENCODE_DISABLE_AUTOUPDATE=1`; the key under its `apiKeyEnv` |
+| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose --model <model> --settings <hook> --session-id <uuid>` for the first exchange, `--resume <uuid>` for each later one, and `--max-turns`, `--max-budget-usd`, and `--append-system-prompt` from the run | `CLAUDE_CONFIG_DIR` (the home), `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` from `providers.anthropic.baseUrl`, `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` |
+
+The instructions of the run go to the harness as its added system text: `system` of the prompt of opencode, and `--append-system-prompt` of Claude Code. The hooks, the skills, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, and `opencode.json` of the repository reach the harness unchanged. The output of a process goes to the log of `fw` at the level `debug`, with every secret replaced.
+
+### 19.9 Limits
+
+- The driver of opencode speaks the HTTP API of opencode 1, which `https://opencode.ai/docs/server/` documents. It was tested with opencode 1.19.3. opencode 2 has a new API under `/api` and needs a driver of its own.
+- Claude Code needs a model of the provider `anthropic` and its key. Its hook needs the native API on a plain HTTP listener, so `fw run`, which serves nothing, and a listener with TLS cannot host it. Claude Code ignores `defer` when one response makes several tool calls; the call then goes through the permission flow of Claude Code, which denies it in `-p` mode, and the model reads the denial. `AskUserQuestion` needs an answer in `updatedInput`, which the hook does not give yet.
+- The key of the model reaches the harness, and so every process that the harness starts. The fix is a placeholder key and a credential that the egress gateway adds (docs/REVIEW_2026-10-20.md, section 6.2). The password of opencode and the secret of the hook are also readable by the processes of the harness, which run as the same user. The policy decides each call that the harness asks about; a shell that the policy allowed can do what the harness can. The boundary is the Task and the tool user, as for `bash`.
+- An agent that a repository defines for opencode under another name can loosen its own permissions; the kernel prompts with `build`. A policy that denies `task` keeps such an agent out.
+- The system prompt and the instructions of a profile do not reach the harness, only the instructions of the run. Attachments and the MCP servers of `tools.mcp` do not reach it yet. The terminal route of docs/REVIEW_2026-10-20.md, section 4.9, for `opencode attach` and `claude --resume` by a person, is not built yet.
+- The usage of a model call that a stop of the process cut is lost.
+
 ## 20. Outcomes
 
 A run can claim work that nobody checked. Batch scenario1-a found pull request bodies with claims that no command showed. An outcome asks a second model context, the grader, to check the answer of a run against a rubric before the run finishes. When the grader finds a gap, the run gets one more turn to fix it. The kernel code is `fw/outcome.go`, and one call at the end of a successful run in `endTurn` (`fw/turn.go`) starts it.

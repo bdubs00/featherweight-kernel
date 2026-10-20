@@ -349,3 +349,13 @@ maxRuns: 16                     # runs in flight at once; more wait in the queue
 #         Every claim of the pull request body names the command that shows it.
 #       grader: ""                # a provider/model selector or a name from models; empty is the model of the run
 #       iterations: 1             # the most grader passes: 1 grades once, 2 or more give the run a turn to revise; 0 is 1, the most is 10
+
+# harness (section 19)
+# The block harness makes every run of the process a session of a hosted
+# harness. The harness uses the model of the run with providers.<p>.baseUrl
+# and the key of apiKeyEnv; the policy of the run decides each tool call.
+# harness:
+#   kind: opencode              # opencode | claude-code
+#   home: /workspace/.harness   # HOME, and CLAUDE_CONFIG_DIR for claude-code; default .harness beside the home of fw
+#   command: []                 # the program and its first arguments; default opencode serve, or claude
+#   port: 0                     # opencode only: the loopback port of opencode serve; 0 picks a free port
