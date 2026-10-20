@@ -358,6 +358,13 @@ func (r *Run) Apply(e Event, prices Prices) {
 			return
 		}
 		r.addUsage(*d.Usage, d.Provider, d.Model, prices)
+	case EvBudgetChanged:
+		// A branch keeps the changes that it copied, because it goes on
+		// with the budget that its source had at that point.
+		var d BudgetChangedData
+		if e.Decode(&d) == nil {
+			r.budget = d.Budget.Merge(r.budget)
+		}
 	case EvToolRequested:
 		if !r.keptEvent(e) {
 			r.Usage.ToolCalls++

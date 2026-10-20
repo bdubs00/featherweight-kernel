@@ -391,8 +391,11 @@ func (o overrun) shared() bool {
 }
 
 // amount writes a value of the limit with its unit.
-func (o overrun) amount(v float64) string {
-	switch o.limit {
+func (o overrun) amount(v float64) string { return amountOf(o.limit, v) }
+
+// amountOf writes a value of a limit with its unit.
+func amountOf(limit string, v float64) string {
+	switch limit {
 	case "maxTokens":
 		return fmt.Sprintf("%d tokens", int(v))
 	case "maxCostUSD":
@@ -406,14 +409,19 @@ func (o overrun) amount(v float64) string {
 // text names the limit in the error of the run self. A limit of the run
 // alone is its name, as it always was. A limit of a tree says "tree" and
 // who used how much.
-func (o overrun) text(self string) string {
-	if !o.tree {
-		return o.limit
+func (o overrun) text(self string) string { return o.data().text(self) }
+
+// text names the limit of the event in the error of the run self (see
+// overrun.text), so a run that finishes after its final report gives the
+// same error as a run that stops at once.
+func (d BudgetExceededData) text(self string) string {
+	if d.Scope != ScopeTree {
+		return d.Limit
 	}
-	if o.owner.id == self {
-		return fmt.Sprintf("%s of the run tree (this run and the runs under it used %s of %s)", o.limit, o.amount(o.value), o.amount(o.max))
+	if d.Run == self {
+		return fmt.Sprintf("%s of the run tree (this run and the runs under it used %s of %s)", d.Limit, amountOf(d.Limit, d.Value), amountOf(d.Limit, d.Max))
 	}
-	return fmt.Sprintf("%s of the run tree of run %s (it and the runs under it used %s of %s)", o.limit, o.owner.id, o.amount(o.value), o.amount(o.max))
+	return fmt.Sprintf("%s of the run tree of run %s (it and the runs under it used %s of %s)", d.Limit, d.Run, amountOf(d.Limit, d.Value), amountOf(d.Limit, d.Max))
 }
 
 // why says what ran out, for a refusal and for the runs that a stop

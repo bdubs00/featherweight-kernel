@@ -190,11 +190,12 @@ func TestDeadlineCountsWork(t *testing.T) {
 		clock.Advance(2 * time.Hour)
 		return TextResult("done after two hours"), nil
 	})
-	s := newScript(callTools(use("c1", "slow", `{}`)), endTurn("never"))
+	s := newScript(callTools(use("c1", "slow", `{}`)), endTurn("the report"))
 	a := clockAgent(t, s.Model(), clock, nil, WithTools(slow))
 	r, err := a.Run(ctx, "work", WithRunBudget(Budget{Deadline: time.Hour}))
 	mustState(t, r, err, StateFailed)
-	if r.Error != "budget exceeded: deadline" || len(s.requests()) != 1 {
+	// The second call is the final report and not a turn.
+	if r.Error != "budget exceeded: deadline" || len(s.requests()) != 2 || r.Output != "the report" || r.Usage.Turns != 1 {
 		t.Fatalf("run = %+v, requests = %d", r, len(s.requests()))
 	}
 	evs := ledgerEvents(t, a.Ledger(), r.ID)
