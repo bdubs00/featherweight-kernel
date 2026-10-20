@@ -35,13 +35,20 @@ import (
 // opencode is the driver of opencode.
 type opencode struct {
 	h *host
+	// starting holds a token while one driver stops or starts the server.
+	// The start of a server takes up to 90 seconds, and mu stays free
+	// meanwhile, so a cancel of another run never waits for it.
+	starting chan struct{}
 
 	mu       sync.Mutex
 	srv      *ocServer
 	sessions map[string]*ocSession // by run id
+	closed   bool
 }
 
-func newOpencode(h *host) *opencode { return &opencode{h: h, sessions: map[string]*ocSession{}} }
+func newOpencode(h *host) *opencode {
+	return &opencode{h: h, starting: make(chan struct{}, 1), sessions: map[string]*ocSession{}}
+}
 
 // ocServer is one opencode serve.
 type ocServer struct {
@@ -110,7 +117,7 @@ type ocEvent struct {
 func (o *opencode) Close() error {
 	o.mu.Lock()
 	srv := o.srv
-	o.srv = nil
+	o.srv, o.closed = nil, true
 	for id, s := range o.sessions {
 		s.stop()
 		delete(o.sessions, id)
@@ -267,11 +274,17 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 		return nil, err
 	}
 	digest := envDigest(env)
-	o.mu.Lock()
-	defer o.mu.Unlock()
+	select {
+	case o.starting <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-o.starting }()
 	sel := m.provider + "/" + m.name
-	if s := o.srv; s != nil && !s.dead() {
-		busy := len(o.sessions) > 0
+	o.mu.Lock()
+	s, busy := o.srv, len(o.sessions) > 0
+	o.mu.Unlock()
+	if s != nil && !s.dead() {
 		switch {
 		case s.models[sel] && (s.env == digest || busy):
 			return s, nil
@@ -281,10 +294,13 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 		if s.env != digest {
 			o.h.log.Info("the environment of opencode serve changed; it starts again")
 		}
-		stop(s.cmd, syscall.SIGTERM)
-		<-s.done
+		o.mu.Lock()
+		if o.srv == s {
+			o.srv = nil
+		}
+		o.mu.Unlock()
+		s.retire()
 	}
-	o.srv = nil
 	models := o.models(m)
 	conf, err := ocConfig(models, m)
 	if err != nil {
@@ -321,13 +337,16 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 	}
 	go o.h.logLines(stdout, "stdout")
 	go o.h.logLines(stderr, "stderr")
-	s := &ocServer{cmd: cmd, base: "http://127.0.0.1:" + strconv.Itoa(port), pass: pass, models: map[string]bool{}, env: digest, done: make(chan struct{}),
+	s = &ocServer{cmd: cmd, base: "http://127.0.0.1:" + strconv.Itoa(port), pass: pass, models: map[string]bool{}, env: digest, done: make(chan struct{}),
 		client: &http.Client{Transport: &http.Transport{Proxy: nil, DisableCompression: true}}}
 	for _, mc := range models {
 		s.models[mc.provider+"/"+mc.name] = true
 	}
 	go func() {
 		err := cmd.Wait()
+		// A server that crashed leaves the processes that it started, such
+		// as a shell of a tool call, in its process group.
+		stop(cmd, syscall.SIGKILL)
 		o.h.log.Info("opencode serve ended", "error", err)
 		close(s.done)
 	}()
@@ -335,9 +354,32 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 		stop(cmd, syscall.SIGKILL)
 		return nil, err
 	}
+	o.mu.Lock()
+	if o.closed {
+		o.mu.Unlock()
+		stop(cmd, syscall.SIGKILL)
+		return nil, errors.New("harness: the host of opencode stopped")
+	}
 	o.srv = s
+	o.mu.Unlock()
 	o.h.log.Info("opencode serve started", "port", port, "pid", cmd.Process.Pid)
 	return s, nil
+}
+
+// retire stops the server and waits for its end, for a bounded time: a
+// server that ignores SIGTERM gets SIGKILL after ten seconds.
+func (s *ocServer) retire() {
+	stop(s.cmd, syscall.SIGTERM)
+	select {
+	case <-s.done:
+		return
+	case <-time.After(10 * time.Second):
+	}
+	stop(s.cmd, syscall.SIGKILL)
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+	}
 }
 
 // ready waits until the server answers its health route.

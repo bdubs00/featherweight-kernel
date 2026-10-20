@@ -31,6 +31,8 @@ type fakeOC struct {
 	calls    int
 	oldRoute bool // the server answers 404 on /permission/{id}/reply
 	failNext int  // the server answers 500 on this many prompts
+	sick     bool // the health route answers 503
+	probes   int  // the requests to the health route
 	script   func(f *fakeOC, p fakePrompt)
 	started  chan fakePrompt
 }
@@ -51,6 +53,14 @@ func newFakeOC(t *testing.T, script func(f *fakeOC, p fakePrompt)) *fakeOC {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /global/health", func(w http.ResponseWriter, r *http.Request) {
 		f.auth(r)
+		f.mu.Lock()
+		f.probes++
+		sick := f.sick
+		f.mu.Unlock()
+		if sick {
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
 		fmt.Fprint(w, `{"healthy":true,"version":"1.19.3"}`)
 	})
 	mux.HandleFunc("POST /session", func(w http.ResponseWriter, r *http.Request) {

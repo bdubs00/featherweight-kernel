@@ -622,3 +622,39 @@ func TestOpencodeDecisionSurvivesALostNote(t *testing.T) {
 		t.Fatalf("%d approvals", n)
 	}
 }
+
+// TestOpencodeCancelDuringAStart cancels a run while another run starts
+// opencode serve, which does not answer yet: the cancel does not wait for
+// the start.
+func TestOpencodeCancelDuringAStart(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, answerOnly)
+	f.sick = true
+	cfg := testConfig(t, d, ocBlock(d, f))
+	a := newAgent(t, cfg, fw.NewMemLedger())
+	r, err := a.Start(testCtx(t), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.probes > 0
+	})
+	done := make(chan struct{})
+	go func() {
+		a.Runner().(*host).drv.canceled("another-run")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("a cancel waited for the start of opencode serve")
+	}
+	f.mu.Lock()
+	f.sick = false
+	f.mu.Unlock()
+	if r = waitState(t, a, r.ID, terminal); r.State != fw.StateCompleted {
+		t.Fatalf("run = %+v", r)
+	}
+}
