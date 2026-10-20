@@ -702,6 +702,10 @@ func (a *Agent) stepResponse(ctx context.Context, rs *runState, c *cursor, n int
 // that the model has not seen. Then the next step starts a new turn. The
 // check and the events are one step, so no message is lost.
 func (a *Agent) endTurn(ctx context.Context, rs *runState, c *cursor, n int) error {
+	// A run with an outcome has its answer graded first (outcome.go).
+	if graded, err := a.gradeOutcome(ctx, rs, c, n); graded || err != nil {
+		return err
+	}
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
 	fresh := c.unseen

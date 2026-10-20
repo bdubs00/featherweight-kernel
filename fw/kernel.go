@@ -480,6 +480,9 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	if err := a.checkModelOf(named, req.Profile); err != nil {
 		return nil, err
 	}
+	if err := CheckOutcome(a.cfg, req.Outcome); err != nil {
+		return nil, err
+	}
 	if len(req.Instructions) > maxInstructionBytes {
 		return nil, fmt.Errorf("%w: the instructions are longer than %d bytes", ErrInvalidRequest, maxInstructionBytes)
 	}
@@ -550,6 +553,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		ExtraTools:    extra,
 		Resolved:      resolved,
 		FilesRoot:     req.FilesRoot,
+		Outcome:       a.resolveOutcome(req, named, parent),
 	}
 	text := a.pinText(named, &queued)
 	ev, err := NewEvent(req.ID, EvRunQueued, queued)
@@ -821,7 +825,7 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 	if p.Budget != nil && p.Budget.negative() {
 		return fmt.Errorf("%w: a budget limit is negative", ErrInvalidRequest)
 	}
-	return nil
+	return CheckOutcome(a.cfg, p.Outcome)
 }
 
 // checkModel makes sure that a run has a model: the one of the request
@@ -1596,6 +1600,10 @@ func cloneRun(r *Run) *Run {
 		u := *r.TreeUsage
 		cp.TreeUsage = &u
 	}
+	if r.Outcome != nil {
+		o := *r.Outcome
+		cp.Outcome = &o
+	}
 	return &cp
 }
 
@@ -1643,6 +1651,10 @@ func WithRequest(req RunRequest) RunOption {
 		}
 		if len(req.Files) > 0 {
 			r.Files = append(r.Files, req.Files...)
+		}
+		if req.Outcome != nil {
+			o := *req.Outcome
+			r.Outcome = &o
 		}
 	}
 }

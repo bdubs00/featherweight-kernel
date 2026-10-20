@@ -163,6 +163,9 @@ type RunQueuedData struct {
 	// root of the files tool, also with tools.files.perRun. It counts on a
 	// run without a parent that is not a branch.
 	FilesRoot bool `json:"filesRoot,omitempty"`
+	// Outcome is the outcome of the run that the kernel resolved when it
+	// queued the run, or nil for a run without a rubric (see Outcome).
+	Outcome *Outcome `json:"outcome,omitempty"`
 }
 
 // ResolvedProfile is the configuration of a run that the kernel resolves
@@ -227,8 +230,9 @@ type MessageReceivedData struct {
 	Content []Block `json:"content"`
 	Origin  string  `json:"origin"`
 	// Note names the kind of a system message from the kernel: NoteLoop,
-	// NoteTime, NoteBudget, or NoteReport. It is empty for every other
-	// message.
+	// NoteTime, NoteBudget, or NoteReport, and of the user message from the
+	// kernel with the notes of a grader, NoteOutcome. It is empty for every
+	// other message.
 	Note string `json:"note,omitempty"`
 	// Budget says what a budget note (NoteBudget) is about, so a resume
 	// gives no note twice.

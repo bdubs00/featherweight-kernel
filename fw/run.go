@@ -189,7 +189,9 @@ func (b Budget) empty() bool {
 // every skill, and an empty list means none. Tools lists the tools, as globs
 // over tool names, and an empty list means every tool. TimeZone is the zone
 // of the runs of the profile. Empty means the zone of the parent run for a
-// child, else time.zone of the configuration.
+// child, else time.zone of the configuration. Outcome asks for a grade of
+// the answer of each run of the profile that is not a child run (see
+// Outcome).
 type AgentProfile struct {
 	Name         string   `yaml:"name,omitempty" json:"name"`
 	Description  string   `yaml:"description,omitempty" json:"description,omitempty"`
@@ -203,6 +205,7 @@ type AgentProfile struct {
 	Policy       *Rules   `yaml:"policy,omitempty" json:"policy,omitempty"`
 	Budget       *Budget  `yaml:"budget,omitempty" json:"budget,omitempty"`
 	Access       *Access  `yaml:"access,omitempty" json:"access,omitempty"` // who owns and uses the agent
+	Outcome      *Outcome `yaml:"outcome,omitempty" json:"outcome,omitempty"`
 }
 
 // Overlay returns p with the set fields of o applied on top. A set System,
@@ -210,7 +213,8 @@ type AgentProfile struct {
 // Instructions are appended. A non-nil Tools or Skills list replaces the
 // list of p. The policy is the stricter of the two, so an overlay can
 // tighten the rules but cannot loosen them. The budget takes every set field of o, and the
-// kernel caps the budget of a child run by its parent afterwards.
+// kernel caps the budget of a child run by its parent afterwards. A set
+// outcome block replaces the block of p as a whole.
 func (p AgentProfile) Overlay(o AgentProfile) AgentProfile {
 	if o.Name != "" {
 		p.Name = o.Name
@@ -258,6 +262,10 @@ func (p AgentProfile) Overlay(o AgentProfile) AgentProfile {
 			b := o.Budget.Merge(*p.Budget)
 			p.Budget = &b
 		}
+	}
+	if o.Outcome != nil {
+		out := *o.Outcome
+		p.Outcome = &out
 	}
 	// Access is never taken from an overlay: a request cannot grant itself
 	// a role.
@@ -376,6 +384,10 @@ type Run struct {
 	// does not count, and nothing reads it in the background.
 	TreeOpen    int `json:"treeOpen,omitempty"`
 	TreeWorking int `json:"treeWorking,omitempty"`
+	// Outcome is the latest grade of the answer of a run with an outcome,
+	// from fw.outcome.evaluated (see Outcome). It is nil for a run without
+	// a rubric.
+	Outcome *RunOutcome `json:"outcome,omitempty"`
 	// kept is RunQueuedData.Kept: the events of a branch that are copies of
 	// the events of its source, whose usage the branch leaves out.
 	kept uint64
@@ -394,6 +406,8 @@ type Run struct {
 // of Agent, so a caller shapes an agent for one run without a configuration
 // change: a system prompt, a tool subset, a model, a policy, or a budget.
 // The kernel keeps both in fw.run.queued, so a resume and a replay see them.
+// Outcome asks for a grade of the answer of the run, and replaces the
+// outcome of the profile (see Outcome).
 type RunRequest struct {
 	ID             string            `json:"id,omitempty"` // set by the kernel when empty
 	Agent          string            `json:"agent,omitempty"`
@@ -408,6 +422,7 @@ type RunRequest struct {
 	Parent         string            `json:"parent,omitempty"`
 	IdempotencyKey string            `json:"idempotencyKey,omitempty"`
 	Files          []Block           `json:"files,omitempty"` // attachments of the first message; see Attachment
+	Outcome        *Outcome          `json:"outcome,omitempty"`
 	// FilesRoot keeps the tools of the run in the root of the files tool
 	// when tools.files.perRun gives every other run a directory of its
 	// own, as the bootstrap of an ax workspace needs. Only a Go caller sets
