@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
 // stash holds the manifests for the axmeta surface, which the registry
@@ -32,8 +34,7 @@ func Stashed() (*Task, []*Workspace) {
 }
 
 // Redacted returns a copy of the Task in which the value of every spec.env
-// entry whose name holds KEY, TOKEN, SECRET, or PASSWORD, in any case, is
-// "***". A nil Task gives nil.
+// entry with a secret name (SecretName) is "***". A nil Task gives nil.
 func Redacted(task *Task) *Task {
 	if task == nil {
 		return nil
@@ -50,8 +51,26 @@ func Redacted(task *Task) *Task {
 	return &t
 }
 
+// RedactedWorkspace returns a copy of the Workspace in which the URL of
+// every spec.git repository has no user information, as RedactURL gives
+// it, because a token in such a URL clones a private repository. A nil
+// Workspace gives nil.
+func RedactedWorkspace(ws *Workspace) *Workspace {
+	if ws == nil {
+		return nil
+	}
+	w := *ws
+	w.Spec.Git = slices.Clone(ws.Spec.Git)
+	for i, g := range w.Spec.Git {
+		w.Spec.Git[i].Repo = RedactURL(g.Repo)
+	}
+	return &w
+}
+
 // SecretName reports whether an environment variable name looks like it
-// holds a secret: it contains KEY, TOKEN, SECRET, or PASSWORD, in any case.
+// holds a secret: it contains KEY, TOKEN, SECRET, or PASSWORD, in any case,
+// or the redactor of the ledger counts it as a secret (fw.IsSecretName),
+// as for DB_PASS or GH_PAT.
 func SecretName(name string) bool {
 	n := strings.ToUpper(name)
 	for _, w := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD"} {
@@ -59,5 +78,5 @@ func SecretName(name string) bool {
 			return true
 		}
 	}
-	return false
+	return fw.IsSecretName(name)
 }

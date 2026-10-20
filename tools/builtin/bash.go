@@ -64,8 +64,10 @@ const sessionIdle = 30 * time.Minute
 // too. A call outside a run, as from a test or the command line, shares
 // one shell under the empty run id.
 type bashTool struct {
+	cfg     *fw.Config // nil for a tool without a configuration
 	dir     string
-	env     []string // variables that every shell starts with, as NAME=value
+	home    string   // FW_HOME of the shell
+	env     []string // the variables of tools.bash.env, as NAME=value
 	timeout time.Duration
 
 	mu       sync.Mutex
@@ -83,7 +85,7 @@ type bashSession struct {
 }
 
 func newBash(cfg *fw.Config) (fw.Tool, error) {
-	t := &bashTool{timeout: bashTimeout, sessions: map[string]*bashSession{}, done: make(chan struct{})}
+	t := &bashTool{cfg: cfg, timeout: bashTimeout, home: fw.DefaultHome(), sessions: map[string]*bashSession{}, done: make(chan struct{})}
 	if cfg != nil {
 		if cfg.Tools.Files.Root != "" {
 			dir, err := filepath.Abs(cfg.Tools.Files.Root)
@@ -96,6 +98,9 @@ func newBash(cfg *fw.Config) (fw.Tool, error) {
 			t.timeout = cfg.Tools.Bash.Timeout
 		}
 		t.env = configEnv(cfg)
+		if cfg.Home != "" {
+			t.home = cfg.Home
+		}
 	}
 	go t.reap()
 	return t, nil
@@ -229,7 +234,7 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 	if in.Restart {
 		s.stop()
 		if strings.TrimSpace(in.Command) == "" {
-			if err := t.start(s); err != nil {
+			if err := t.start(ctx, s); err != nil {
 				return fw.ErrorResult(err.Error()), nil
 			}
 			return fw.TextResult("The bash shell has been restarted."), nil
@@ -239,7 +244,7 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 		return fw.ErrorResult("bash: the command is empty. Send a command, or send restart: true."), nil
 	}
 	if s.sh == nil {
-		if err := t.start(s); err != nil {
+		if err := t.start(ctx, s); err != nil {
 			return fw.ErrorResult(err.Error()), nil
 		}
 	}
@@ -247,8 +252,8 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 }
 
 // start starts a new shell for a session. The caller holds its token.
-func (t *bashTool) start(s *bashSession) error {
-	sh, err := startShell(t.dir, t.env)
+func (t *bashTool) start(ctx context.Context, s *bashSession) error {
+	sh, err := startShell(t.dir, t.shellEnv(ctx))
 	if err != nil {
 		return fmt.Errorf("bash: the shell cannot start: %v", err)
 	}
@@ -377,13 +382,11 @@ type shell struct {
 	errClosed bool // the shell closed its stderr pipe
 }
 
-// startShell starts bash in dir with the process environment, minus the
-// hidden variables, plus env. A name in env replaces the same name of the
-// process environment.
+// startShell starts bash in dir with the environment env (shellEnv).
 func startShell(dir string, env []string) (*shell, error) {
 	cmd := exec.Command("bash", "--noprofile", "--norc")
 	cmd.Dir = dir
-	cmd.Env = append(shellEnv(), env...)
+	cmd.Env = env
 	setGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

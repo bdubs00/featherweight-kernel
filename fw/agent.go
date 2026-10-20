@@ -186,6 +186,9 @@ func New(opts ...Option) (*Agent, error) {
 	// holds.
 	a.redact = newRedactor(os.Environ())
 	a.secrets = recordSecrets{Secrets: a.secrets, r: a.redact}
+	if names := toolSecretNames(cfg.Tools.Bash.Env); len(names) > 0 {
+		a.log.Warn("tools.bash.env gives the shell variables with a secret name; every command of the shell can read them", "names", names)
+	}
 	files := o.files
 	if files == nil {
 		if files, err = DirFiles(cfg.WorkspaceRoot()); err != nil {

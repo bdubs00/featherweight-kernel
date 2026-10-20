@@ -44,7 +44,7 @@ tls:                            # TLS on the listener; the default is plain HTTP
 
 auth:
   mode: oidc,spiffe,token       # one mode, or several tried in order: token | none | oidc | spiffe. "none" must be explicit; the default is token.
-  tokenEnv: FW_API_TOKEN        # token: the secret that holds the bearer token
+  tokenEnv: FW_API_TOKEN        # token: the secret that holds the bearer token; FW_API_TOKEN_FILE names a file that holds it instead, mode 0600 (docs/ARCHITECTURE.md section 7.12)
   oidc:                         # oidc: a bearer token from an OpenID Connect issuer; its discovery document gives the keys
     issuer: https://idp.example.com   # an https:// URL; insecure: true allows http:// for a test
     audience: [fw]              # accepted aud claims: a client id, or the public URL of this server
@@ -140,7 +140,7 @@ tools:
   http:
     allow: ["https://api.github.com/*"]
   bash:
-    env:                        # variables that every command starts with; values resolve through Secrets; FW_TOOLS_BASH_ENV_<NAME>
+    env:                        # variables that every command starts with, on top of the environment of a tool process, which holds no secret of fw (section 7.12); FW_TOOLS_BASH_ENV_<NAME>
       NATS_URL: ${NATS_URL:-nats://nats:4222}
     timeout: 0s                 # one command; 0 leaves the limit to tools.limits
   memory:

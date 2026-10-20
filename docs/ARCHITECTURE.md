@@ -414,7 +414,7 @@ The other built-in tools have no label. `files` and `memory` read, write, and de
 
 The `files` tool never opens a path under the paths that `Config.Reserved` lists: the home directory of `fw`, the directory of the file ledger, and the configuration file. The check uses the real path, after symbolic links. A change there changes what `fw` allows at its next start. For example, a profile file under `$FW_HOME/agents` can grant its agent access and read secrets from the environment through `${VAR}`. Every other path under the root needs no approval, except the paths that the rules of the workspace refuse (section 7.9).
 
-When the provider is Anthropic, `bash`, `files`, and `memory` use the Anthropic-defined tool shapes `bash_20250124`, `text_editor_20250728`, and `memory_20250818`. Other providers get the same tools with a plain JSON schema. Each profile lists the tools that it allows. The `bash` shell never inherits `FW_API_TOKEN` or a model API key, and `FW_BASH_HIDE` names more variables to hide. The shell starts with `FW_HOME` and with the variables of `tools.bash.env`. A script inside the sandbox therefore reads an endpoint from its environment instead of from a literal in a prompt. `tools.bash.timeout` bounds one command, 120 seconds by default. A tool that implements `io.Closer` is closed at shutdown, which ends the shell. The `bash` tool keeps one shell per run: the working directory, the variables, and the background jobs of one run never reach another run or another person, and the kernel closes the shell when the run ends, through the interface `fw.RunCloser`, which any tool with state per run can implement.
+When the provider is Anthropic, `bash`, `files`, and `memory` use the Anthropic-defined tool shapes `bash_20250124`, `text_editor_20250728`, and `memory_20250818`. Other providers get the same tools with a plain JSON schema. Each profile lists the tools that it allows. The `bash` shell gets the environment of a tool process (section 7.12): no manifest of ax, no credential of `fw`, and no variable that holds a secret. It starts with `FW_HOME` and with the variables of `tools.bash.env`. A script inside the sandbox therefore reads an endpoint from its environment instead of from a literal in a prompt. `tools.bash.timeout` bounds one command, 120 seconds by default. A tool that implements `io.Closer` is closed at shutdown, which ends the shell. The `bash` tool keeps one shell per run: the working directory, the variables, and the background jobs of one run never reach another run or another person, and the kernel closes the shell when the run ends, through the interface `fw.RunCloser`, which any tool with state per run can implement.
 
 ### 7.3 MCP client over HTTP and HTTPS
 
@@ -694,6 +694,28 @@ When a connection of a person ends at the broker, the broker publishes `fw.conne
 #### Restarts
 
 A call that waits for a connection survives a restart. The service never saw the call, so the call runs again after the restart, without the question of section 4.5. If the person is still not connected, the call asks again. A skip before the restart still ends the call. The grants of people live in the package that keeps the connections, so the kernel loses none of them (the workbench architecture, section 11).
+
+### 7.12 Tool processes
+
+A tool process is a process that a tool starts and that a model drives, such as the shell of `bash`. It runs untrusted input: a file that a run reads can hold a prompt injection that asks for a command. This section says what such a process gets.
+
+#### The environment
+
+`fw.ToolEnv` builds the environment of a tool process. From the environment of `fw`, it leaves out these variables:
+
+- `AX_TASK_YAML` and `AX_WORKSPACES_YAML`. The Task holds the value of every `spec.env` entry, such as `FW_API_TOKEN`, and a Workspace can hold a token in the URL of a repository.
+- The credentials that the configuration names: `auth.tokenEnv`, `tokens.credential`, the `apiKeyEnv` of each provider, the key variables of the model adapters, `auth.bearer` and `auth.oauth.clientSecret` of each MCP server, and `auth.oidc.clientSecret`. Each name also goes with the suffix `_FILE`.
+- The names in `FW_BASH_HIDE`, a list with commas between the names, and `FW_BASH_HIDE` itself.
+- Every variable with a secret name, by the rule of the redactor (section 4.2), such as `GITHUB_TOKEN` or `DB_PASSWORD`.
+- Every variable whose value holds a secret by the rules of the redactor: a value that `fw` resolved through `Secrets`, the value of a variable with a secret name, or text with the shape of a key, such as a JWT or a URL with a password.
+
+Then it adds the variables that the configuration gives the tool on purpose, `tools.bash.env` for the shell. Such a variable wins over the same name from the environment. It can have a secret name, because an operator named it, and `fw` logs a warning at start for each such name. It never has a name from the list above or a value that `fw` resolved through `Secrets`, so a configuration cannot pass a credential of `fw` to a tool under another name. The redactor still replaces its value in every event. The shell also gets `FW_HOME`.
+
+The metadata endpoints of section 11.1 answer every process in the sandbox. They replace with `***` the value of each `spec.env` entry with a secret name and the user information of each `spec.git` URL.
+
+#### The API token in a file
+
+The default `Secrets` reads `<NAME>` from the environment, then the file that `<NAME>_FILE` names (section 6.5). The static token can therefore come from a file: set `FW_API_TOKEN_FILE` instead of `FW_API_TOKEN`, or `<auth.tokenEnv>_FILE` for another name. Every reader of the token reads it this way: the `token` mode of `auth.mode`, the `ax` spawner, the token client of section 7.11, `fw doctor`, and the fleet of the workbench. A file keeps the token out of the environment of `fw` and out of a Task manifest. Make the file readable by the user of `fw` alone, with mode `0400` or `0600`.
 
 ## 8. Surfaces
 

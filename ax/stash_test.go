@@ -38,3 +38,31 @@ func TestRedacted(t *testing.T) {
 		t.Error("Redacted(nil) is not nil")
 	}
 }
+
+func TestSecretNameFollowsTheRedactor(t *testing.T) {
+	for name, want := range map[string]bool{"DB_PASS": true, "GH_PAT": true, "API_KEY": true, "FW_AGENT": false} {
+		if got := SecretName(name); got != want {
+			t.Errorf("SecretName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestRedactedWorkspace(t *testing.T) {
+	ws := &Workspace{Spec: WorkspaceSpec{Git: []GitRepo{
+		{Name: "app", Repo: "https://x-access-token:ghp_dddddddddddddddddddddddddddddddddddd@github.com/o/app.git"},
+		{Name: "open", Repo: "https://github.com/o/open.git"},
+	}}}
+	r := RedactedWorkspace(ws)
+	if got := r.Spec.Git[0].Repo; got != "https://***@github.com/o/app.git" {
+		t.Errorf("repo = %q", got)
+	}
+	if got := r.Spec.Git[1].Repo; got != "https://github.com/o/open.git" {
+		t.Errorf("open repo = %q", got)
+	}
+	if ws.Spec.Git[0].Repo == r.Spec.Git[0].Repo {
+		t.Error("RedactedWorkspace changed the original")
+	}
+	if RedactedWorkspace(nil) != nil {
+		t.Error("RedactedWorkspace(nil) is not nil")
+	}
+}
