@@ -73,6 +73,7 @@ type Agent struct {
 
 	modelsMu sync.Mutex
 	models   map[string]Model
+	slots    map[string]chan struct{} // the model slots of each provider with maxConcurrent
 
 	zoneMu sync.Mutex
 	zones  map[string]zoneEntry // time zones by name, see clock.go
@@ -155,6 +156,7 @@ func New(opts ...Option) (*Agent, error) {
 		observers:  o.observers,
 		annotators: o.annotators,
 		models:     map[string]Model{},
+		slots:      modelSlots(cfg),
 		noResume:   o.noResume,
 	}
 	a.followEvery, a.recordEvery, a.giveUp = defaultFollowEvery, defaultRecordEvery, followGiveUp
@@ -254,7 +256,7 @@ func New(opts ...Option) (*Agent, error) {
 		}
 	}
 	if o.model != nil {
-		a.model = a.wrapModel(o.model)
+		a.model = a.wrapModel(limitModel(a.slots, cfg.Model, o.model))
 	} else if cfg.Model == "" {
 		// No default model. The process serves, and a run request fails with
 		// ErrNoModel unless its profile names a model.
@@ -267,7 +269,7 @@ func New(opts ...Option) (*Agent, error) {
 		if err != nil {
 			a.log.Warn("default model not available yet", "model", cfg.Model, "error", err)
 		} else {
-			a.model = a.wrapModel(m)
+			a.model = a.wrapModel(limitModel(a.slots, cfg.Model, m))
 		}
 	}
 	if a.model != nil {
@@ -419,7 +421,7 @@ func (a *Agent) openModel(ctx context.Context, selector string) (Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	m = a.wrapModel(m)
+	m = a.wrapModel(limitModel(a.slots, selector, m))
 	a.models[selector] = m
 	return m, nil
 }

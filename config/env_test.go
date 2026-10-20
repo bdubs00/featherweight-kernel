@@ -118,10 +118,10 @@ func TestEnvMapsOfStructs(t *testing.T) {
 			func(c *fw.Config) any { return c.Providers["openai"].BaseURL }, "http://vllm:8000/v1"},
 		{"provider fields land in one entry", nil, map[string]string{
 			"FW_PROVIDERS_OPENAI_BASE_URL": "http://vllm:8000/v1", "FW_PROVIDERS_OPENAI_API_KEY_ENV": "VLLM_KEY", "FW_PROVIDERS_OPENAI_TIMEOUT": "30s",
-			"FW_PROVIDERS_OPENAI_TLS_INSECURE": "true", "FW_PROVIDERS_OPENAI_TLS_CA": "/ca.pem",
+			"FW_PROVIDERS_OPENAI_TLS_INSECURE": "true", "FW_PROVIDERS_OPENAI_TLS_CA": "/ca.pem", "FW_PROVIDERS_OPENAI_MAX_CONCURRENT": "1",
 		},
 			func(c *fw.Config) any { return c.Providers["openai"] },
-			fw.ProviderConfig{BaseURL: "http://vllm:8000/v1", APIKeyEnv: "VLLM_KEY", Timeout: 30 * time.Second, TLS: fw.TLSConfig{CA: "/ca.pem", Insecure: true}}},
+			fw.ProviderConfig{BaseURL: "http://vllm:8000/v1", APIKeyEnv: "VLLM_KEY", Timeout: 30 * time.Second, MaxConcurrent: 1, TLS: fw.TLSConfig{CA: "/ca.pem", Insecure: true}}},
 		{"provider keeps the file fields", func(c *fw.Config) {
 			c.Providers = map[string]fw.ProviderConfig{"openai": {APIKeyEnv: "K", Headers: map[string]string{"X-A": "1"}}}
 		}, map[string]string{"FW_PROVIDERS_OPENAI_BASE_URL": "http://x"},

@@ -201,6 +201,8 @@ func (t *Tracer) Observe(e fw.Event) {
 			attribute.Int("gen_ai.usage.cache_read.input_tokens", d.Usage.CacheReadTokens),
 			attribute.Int("gen_ai.usage.cache_creation.input_tokens", d.Usage.CacheWriteTokens),
 			attribute.Int64("fw.latency_ms", d.LatencyMS),
+			attribute.Int64("fw.ttfb_ms", d.FirstByteMS),
+			attribute.Int64("fw.queued_ms", d.QueuedMS),
 		)
 		rt.model.End(trace.WithTimestamp(ts))
 		rt.model = nil

@@ -646,14 +646,16 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		name = resp.Model
 	}
 	_, err = a.emit(ctx, rs, EvModelResponded, ModelRespondedData{
-		Content:    validJSONBlocks(resp.Content),
-		Raw:        validJSON(resp.Raw),
-		StopReason: resp.StopReason,
-		StopDetail: resp.StopDetail,
-		Usage:      resp.Usage,
-		LatencyMS:  latency,
-		Provider:   provider,
-		Model:      name,
+		Content:     validJSONBlocks(resp.Content),
+		Raw:         validJSON(resp.Raw),
+		StopReason:  resp.StopReason,
+		StopDetail:  resp.StopDetail,
+		Usage:       resp.Usage,
+		LatencyMS:   latency,
+		FirstByteMS: resp.FirstByteMS,
+		QueuedMS:    resp.QueuedMS,
+		Provider:    provider,
+		Model:       name,
 	})
 	return err
 }

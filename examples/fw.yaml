@@ -89,6 +89,7 @@ providers:                      # one connection per provider; FW_PROVIDERS_<NAM
     apiKeyEnv: OPENAI_API_KEY
     headers: {}                 # extra headers on every request; values resolve through Secrets; FW_PROVIDERS_OPENAI_HEADERS_<NAME>
     timeout: 0s                 # one request; 0 is the default of the adapter
+    maxConcurrent: 0            # the most calls of this process to this provider at once, for a server with few slots; 0 is no limit
     tls:
       ca: ""                    # PEM bundle; default is the system roots
       cert: ""                  # client certificate and key for mutual TLS

@@ -338,8 +338,11 @@ Each provider has a connection block under `providers.<name>` in `fw.yaml`, and 
 | `apiKeyEnv` | The secret that holds the API key, for a key under another name than the default |
 | `headers` | Extra headers on every request. A value that names a secret is replaced by the secret. |
 | `timeout` | The limit of one call, retries included. |
+| `maxConcurrent` | The most model calls of this process to the provider at the same time, for a server with few slots. A call waits for a free slot. `0`, the default, means no limit. |
 | `tls` | A CA bundle, a client certificate and key, or `insecure` for development. |
 | `options` | Options that one adapter reads. Section 6.6 lists the OpenAI options. |
+
+`fw.model.responded` records the time of each call in three fields. `latencyMs` is the whole call. `queuedMs` is the wait for a slot of `maxConcurrent`. `ttfbMs` is the time from the start of the call at the provider to the first streamed event of the answer. The OpenAI adapter measures it, and the other adapters leave it out. A long `ttfbMs` is a wait for the server, such as a queue at a model slot or a long prompt. The time after it is the work of the model.
 
 ### 6.3 Anthropic adapter settings
 

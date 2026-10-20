@@ -631,11 +631,14 @@ func (m *Model) Generate(ctx context.Context, req *fw.Request) (*fw.Response, er
 // arrived, is retried three times after the wait that Retry-After names or
 // an exponential backoff. Another error status fails at once with an
 // *APIError. A stream that sends no byte for the idle timeout, or that
-// grows past MaxResponseBytes, fails with an error that says so.
+// grows past MaxResponseBytes, fails with an error that says so. The
+// response holds in FirstByteMS the time from the start of the call, its
+// retries included, to the first event of the stream.
 func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) (*fw.Response, error) {
 	if req == nil {
 		return nil, errors.New("openai: nil request")
 	}
+	start := time.Now()
 	r := *req
 	r.Effort = r.EffortOr(m.effort)
 	body, names, err := BuildBody(&r, m.model, m.bodyOptions(&r))
@@ -666,7 +669,11 @@ func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) 
 	if err != nil {
 		return nil, fmt.Errorf("openai: stream %s: %w", m.model, m.explain(call, err))
 	}
-	return acc.response(m.model)
+	out, err := acc.response(m.model)
+	if out != nil && !acc.first.IsZero() {
+		out.FirstByteMS = acc.first.Sub(start).Milliseconds()
+	}
+	return out, err
 }
 
 // bodyOptions returns the body settings of one request.
