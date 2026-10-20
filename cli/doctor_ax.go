@@ -234,12 +234,14 @@ func shortErr(err error) string {
 }
 
 // doctorAXTrust reports the trust bundle of the egress gateway, which an
-// https egress rule needs, because the gateway terminates its TLS.
+// https egress rule needs, because the gateway terminates its TLS. An
+// absent bundle is a fact of the platform that nobody in the Task can
+// change, so only a bundle without a certificate fails.
 func doctorAXTrust(context.Context, *fw.Config, fw.Secrets, time.Duration) (bool, string) {
 	data, err := os.ReadFile(axTrustBundle)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return false, fmt.Sprintf("ax trust bundle: absent at %s; an https egress rule fails until ax mounts the SystemInfo volume of the egress gateway there, so use http and tls rules", axTrustBundle)
+		return true, fmt.Sprintf("ax trust bundle: absent at %s; https egress rules need the SystemInfo volume there, so use http and tls rules", axTrustBundle)
 	case err != nil:
 		return false, fmt.Sprintf("ax trust bundle: %s does not read: %v", axTrustBundle, err)
 	}

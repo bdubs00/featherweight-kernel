@@ -147,10 +147,11 @@ func (d *doctor) checkHome(cfg *fw.Config) {
 // line. The configuration check also names such a zone.
 // checkToolUser reports the user of the processes of tools (tools.user,
 // docs/ARCHITECTURE.md section 7.12), with the default of ax inside a
-// Task, as ax.ApplyToConfig sets it for fw serve.
+// Task, as ax.ApplyToConfig sets it for fw serve: only for root with the
+// capabilities that tools.user needs.
 func (d *doctor) checkToolUser(cfg *fw.Config) {
 	spec := cfg.Tools.User
-	if spec == "" && ax.Detect() && os.Geteuid() == 0 {
+	if spec == "" && ax.Detect() && os.Geteuid() == 0 && len(fw.MissingToolCaps()) == 0 {
 		spec = ax.DefaultToolUser
 	}
 	u, err := fw.LookupToolUser(spec)

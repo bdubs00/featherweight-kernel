@@ -145,7 +145,7 @@ func TestAXManifestsFromMetadata(t *testing.T) {
 }
 
 // The trust bundle line says absent and names the path until a SystemInfo
-// volume puts the bundle there.
+// volume puts the bundle there. Only a bundle without a certificate fails.
 func TestDoctorAXTrust(t *testing.T) {
 	dir := t.TempDir()
 	prev := axTrustBundle
@@ -153,7 +153,7 @@ func TestDoctorAXTrust(t *testing.T) {
 	t.Cleanup(func() { axTrustBundle = prev })
 
 	ok, line := doctorAXTrust(context.Background(), nil, nil, time.Second)
-	if ok || line != "ax trust bundle: absent at "+axTrustBundle+"; an https egress rule fails until ax mounts the SystemInfo volume of the egress gateway there, so use http and tls rules" {
+	if !ok || line != "ax trust bundle: absent at "+axTrustBundle+"; https egress rules need the SystemInfo volume there, so use http and tls rules" {
 		t.Errorf("absent: %v %q", ok, line)
 	}
 	if err := os.MkdirAll(filepath.Dir(axTrustBundle), 0o755); err != nil {

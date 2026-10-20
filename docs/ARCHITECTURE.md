@@ -2018,7 +2018,7 @@ A sandbox hides facts that the configuration does not show. `cli/doctor_ax.go` a
 | Line | What it checks | Verdict |
 |---|---|---|
 | `ax reach` | Each endpoint of section 21.2, with the MCP servers of the Workspaces. An `http` endpoint gets one GET without a credential, and any answer but the refusal of the egress gateway, a 403 with the body `egress denied`, passes. A `tls` endpoint gets a TLS handshake, which the gateway ends when no rule covers the name. Each probe has five seconds at most, and the probes run at the same time. | FAIL when an endpoint does not answer, with each endpoint and the fix |
-| `ax trust bundle` | The bundle of the egress gateway at `/run/ate/egress-trust-bundle/trust-bundle.pem`, where a SystemInfo volume puts it in `docs/egress-trust-bundle.md` of Agent Substrate. ax mounts no such volume yet, and an `https` rule needs the bundle, because the gateway terminates its TLS. | FAIL while the file is absent; ok with the number of certificates |
+| `ax trust bundle` | The bundle of the egress gateway at `/run/ate/egress-trust-bundle/trust-bundle.pem`, where a SystemInfo volume puts it in `docs/egress-trust-bundle.md` of Agent Substrate. ax mounts no such volume yet, and an `https` rule needs the bundle, because the gateway terminates its TLS. | ok with the limit while the file is absent, because nobody in the Task can change it; ok with the number of certificates; FAIL when the file holds no certificate |
 | `ax tools user` | The user that runs the tools, as `ax.ApplyToConfig` chooses it, and whether it is a separate user from the one of `fw`. | ok with the reason when no separate user is in effect; FAIL when `tools.user` names a user that root cannot become |
 | `ax durable` | `FW_HOME` is under `/workspace` and writable, `/workspace` is a mount in `/proc/self/mountinfo`, and every binding is under it. | FAIL with each problem |
 
@@ -2026,9 +2026,9 @@ Example lines for a Task of the lab in gVisor, with one egress rule missing:
 
 ```
 FAIL  ax reach: 1 of 5 endpoints does not answer: mcp github github-mcp.fw-fleet.svc.cluster.local:8082 (the egress gateway denies it); fix the egress of the Task (fw ax render derives a rule for each endpoint); these answer: model openai ax-model.fw-fleet.svc.cluster.local:8080, bus nats.fw-fleet.svc.cluster.local:8080, tokens fw-front.fw-fleet.svc.cluster.local:8080, telemetry opentelemetry-collector.otel-system.svc.cluster.local:4318
-FAIL  ax trust bundle: absent at /run/ate/egress-trust-bundle/trust-bundle.pem; an https egress rule fails until ax mounts the SystemInfo volume of the egress gateway there, so use http and tls rules
+ok    ax trust bundle: absent at /run/ate/egress-trust-bundle/trust-bundle.pem; https egress rules need the SystemInfo volume there, so use http and tls rules
 ok    ax tools user: the tools run as root (0), the user of fw, because root lacks CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_SETGID, CAP_SETUID in this sandbox; no separate user is in effect, so a tool process can read the files of fw
 ok    ax durable: FW_HOME /workspace/.fw is writable on the volume at /workspace, with 1 binding on it
 ```
 
-The trust bundle line turns to ok once an ax patch mounts the SystemInfo volume at that path. The line of the kernel `tools user` in `cli/doctor.go` names the default of ax without the capability check of section 7.12; the `ax tools user` line names the user that the tools get.
+The trust bundle line counts the certificates once an ax patch mounts the SystemInfo volume at that path. The line of the kernel `tools user` names the default of ax only for root with the capabilities of section 7.12, as `ax.ApplyToConfig` does, and the `ax tools user` line adds whether the user is a separate one.
