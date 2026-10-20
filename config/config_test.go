@@ -75,6 +75,9 @@ func TestEnvOverrides(t *testing.T) {
 		{"list surfaces", map[string]string{"FW_SURFACES": "native, metrics,,"}, func(c *fw.Config) any { return c.Surfaces }, []string{"native", "metrics"}},
 		{"list builtin", map[string]string{"FW_TOOLS_BUILTIN": "bash,files"}, func(c *fw.Config) any { return c.Tools.Builtin }, []string{"bash", "files"}},
 		{"list egress types", map[string]string{"FW_BUS_EGRESS_TYPES": "fw.run.finished"}, func(c *fw.Config) any { return c.Bus.EgressTypes }, []string{"fw.run.finished"}},
+		{"intake retries", map[string]string{"FW_BUS_INTAKE_RETRIES": "2"}, func(c *fw.Config) any { return c.Bus.IntakeRetries }, 2},
+		{"dead letter off", map[string]string{"FW_BUS_DEAD_LETTER": "false"}, func(c *fw.Config) any { return c.Bus.DeadLetterOn() }, false},
+		{"dead letter on by default", map[string]string{"FW_BUS_URL": "x"}, func(c *fw.Config) any { return c.Bus.DeadLetterOn() }, true},
 		{"list http allow", map[string]string{"FW_TOOLS_HTTP_ALLOW": "https://a/*,https://b/*"}, func(c *fw.Config) any { return c.Tools.HTTP.Allow }, []string{"https://a/*", "https://b/*"}},
 		{"list skills", map[string]string{"FW_TOOLS_SKILLS": "/skills,/more"}, func(c *fw.Config) any { return c.Tools.Skills }, []string{"/skills", "/more"}},
 		{"telemetry log", map[string]string{"FW_TELEMETRY_LOG": "debug"}, func(c *fw.Config) any { return c.Telemetry.Log }, "debug"},
@@ -132,6 +135,7 @@ func TestEnvNames(t *testing.T) {
 		"FW_TOOLS_LIMITS_TIMEOUT", "FW_TOOLS_BASH_TIMEOUT", "FW_TOOLS_SKILLS", "FW_SPAWN_MAX_DEPTH", "FW_BUDGET_MAX_REPEATS",
 		"FW_TIME_ZONE", "FW_TIME_NOTE_AFTER", "FW_AGENTS_<NAME>_TIME_ZONE",
 		"FW_POLICY_EXTERNAL_MCP", "FW_POLICY_EXTERNAL_TOOL", "FW_POLICY_EXTERNAL_BUS", "FW_POLICY_EXTERNAL_TIMEOUT",
+		"FW_BUS_INTAKE_RETRIES", "FW_BUS_DEAD_LETTER",
 	} {
 		if !slices.Contains(names, want) {
 			t.Errorf("EnvNames lacks %s", want)
@@ -604,6 +608,7 @@ providers:
 surfaces: [native, ""]
 telemetry: {log: loud}
 maxRuns: -1
+bus: {intakeRetries: -1}
 budget: {maxTurns: -1, maxTokens: -2, maxCostUSD: -0.5, deadline: -1s, maxToolCalls: -1, maxCallsPerTurn: -1, maxRepeats: -1}
 spawn: {maxDepth: -1, maxChildren: -1}
 compaction: {at: -1, model: nosuch}
@@ -634,7 +639,7 @@ agents:
 	wants := []string{
 		"auth.mode", "effort \"extreme\"", "listen is empty", "model \"claude\"", "models.fast",
 		"providers.OpenAI: a provider name", "providers.my-vllm: a provider name", "providers.my-vllm.timeout -1s is negative",
-		"surfaces[1]", "telemetry.log", "maxRuns -1 is negative",
+		"surfaces[1]", "telemetry.log", "maxRuns -1 is negative", "bus.intakeRetries -1 is negative",
 		"budget.maxTurns -1", "budget.maxTokens -2", "budget.maxCostUSD -0.5", "budget.deadline -1s", "budget.maxToolCalls -1", "budget.maxCallsPerTurn -1", "budget.maxRepeats -1",
 		"spawn.maxDepth -1", "spawn.maxChildren -1", "tools.bash.timeout -1s",
 		"compaction.at -1 is negative", "compaction.model \"nosuch\"", "tools.memory.scope \"team\"",

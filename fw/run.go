@@ -425,7 +425,8 @@ const (
 // (MetaDriftSystem, MetaDriftInstructions). A request and an annotation
 // cannot set them. They do not count against MaxMetadataEntries, and
 // neither do the keys that the kernel sets on a branch, MetaForkOf and
-// MetaForkSeq.
+// MetaForkSeq, nor the keys of the bus intake (intake.go), which a retry
+// carries in its request.
 var kernelMetadata = []string{"idempotencyKey", MetaDriftSystem, MetaDriftInstructions}
 
 // kernelMeta reports whether only the kernel sets the metadata key k.
@@ -433,7 +434,13 @@ func kernelMeta(k string) bool { return slices.Contains(kernelMetadata, k) }
 
 // boundless reports whether the metadata key k does not count against
 // MaxMetadataEntries, because the kernel sets it.
-func boundless(k string) bool { return kernelMeta(k) || k == MetaForkOf || k == MetaForkSeq }
+func boundless(k string) bool {
+	switch k {
+	case MetaForkOf, MetaForkSeq, MetaIntakeQueue, MetaIntakeAttempt, MetaIntakeRetryOf, MetaIntakeOutcome:
+		return true
+	}
+	return kernelMeta(k)
+}
 
 // CheckMetadata bounds the metadata of a request with ErrInvalidRequest.
 // The keys that the kernel sets are reserved: idempotencyKey holds the

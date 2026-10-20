@@ -2,7 +2,9 @@
 //
 // Publish stores each event in one JetStream stream. Subscribe is a core NATS
 // subscription: fan-out with no durability. Consume is a durable JetStream
-// pull consumer with at-least-once delivery.
+// pull consumer with at-least-once delivery. ConsumeGated is Consume with a
+// fw.Gate, which the bus intake of the kernel uses to take a job only for a
+// free run slot.
 package nats
 
 import (
@@ -12,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,12 +38,13 @@ func init() {
 }
 
 const (
-	defaultStream      = "FW"
-	defaultSubjects    = "fw.>"
-	defaultConcurrency = 4
+	defaultStream   = "FW"
+	defaultSubjects = "fw.>"
 
-	// ackWait is long because a handler can hold a message for a whole run.
-	// A handler that runs longer still tells the server it is in progress.
+	// ackWait is long because a handler of Consume can work for a long
+	// time. A handler that runs longer still tells the server it is in
+	// progress. The bus intake of the kernel acknowledges a job when its
+	// run is in the ledger, which takes milliseconds.
 	ackWait          = 5 * time.Minute
 	maxDeliver       = 5
 	defaultFetchWait = 2 * time.Second
@@ -83,22 +87,25 @@ var errNotConnected = errors.New("nats: not connected yet")
 // Open connects to NATS and makes sure the stream exists.
 //
 // It reads cfg.Bus.URL (default nats://127.0.0.1:4222), cfg.Bus.Intake,
-// cfg.Bus.Egress, and these keys of cfg.Bus.Options:
+// cfg.Bus.Egress, the dead-letter subject of the intake
+// (fw.BusConfig.DeadLetterSubject), and these keys of cfg.Bus.Options:
 //
 //   - stream: the JetStream stream name (default FW)
-//   - subjects: comma-separated subject filters of the stream (default fw.>)
+//   - subjects: comma-separated subject filters of the stream (default fw.>).
+//     The stream also captures the intake, the egress, and the dead letter.
 //   - credentials: the path to a .creds file
 //   - token: the name of a secret that holds the auth token, read from the
 //     environment by fw.EnvSecrets
 //   - concurrency: the number of messages that one Consume handles at a time
-//     (default 4)
+//     (default: the run slots of the agent, fw.Config.RunSlots, which is 1
+//     under ax)
 func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	if cfg == nil {
 		return nil, errors.New("nats: no config")
 	}
 	bc := cfg.Bus
 	opt := bc.Options
-	conc, err := intOption(opt, "concurrency", defaultConcurrency)
+	conc, err := intOption(opt, "concurrency", cfg.RunSlots())
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +122,7 @@ func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	}
 	b.SetLogger(slog.Default())
 
-	subjects := streamSubjects(opt["subjects"], bc.Intake, bc.Egress)
+	subjects := streamSubjects(opt["subjects"], bc.Intake, bc.Egress, bc.DeadLetterSubject())
 	// ready closes when Open has set b.js, because the connect handler can
 	// run before Open returns.
 	ready := make(chan struct{})
@@ -332,6 +339,23 @@ func (b *Bus) Subscribe(ctx context.Context, subject string, h func(fw.Event) er
 // The stop function stops fetching, lets the handlers in flight finish, and
 // waits for them. Do not call it from inside the handler.
 func (b *Bus) Consume(ctx context.Context, queue string, h func(fw.Event) error) (func(), error) {
+	return b.consume(ctx, queue, nil, h)
+}
+
+// ConsumeGated implements fw.GatedBus. It is Consume, and before each
+// fetch it asks the gate how many messages to take: at most the free
+// handler slots, and at least one, so the loop waits in Admit while the
+// gate has no room. The messages that it does not take stay on the stream
+// for the other consumers of the queue. The stop function ends a wait in
+// Admit.
+func (b *Bus) ConsumeGated(ctx context.Context, queue string, g fw.Gate, h func(fw.Event) error) (func(), error) {
+	if g == nil {
+		return nil, errors.New("nats: consume without a gate")
+	}
+	return b.consume(ctx, queue, g, h)
+}
+
+func (b *Bus) consume(ctx context.Context, queue string, g fw.Gate, h func(fw.Event) error) (func(), error) {
 	if h == nil {
 		return nil, errors.New("nats: consume without a handler")
 	}
@@ -360,19 +384,24 @@ func (b *Bus) Consume(ctx context.Context, queue string, h func(fw.Event) error)
 	if err != nil {
 		return nil, fmt.Errorf("nats: consumer %s: %w", cfg.Durable, err)
 	}
+	qctx, cancel := context.WithCancel(context.Background())
 	c := &consumer{
-		b:     b,
-		queue: queue,
-		cfg:   cfg,
-		cons:  cons,
-		h:     h,
-		sem:   make(chan struct{}, b.concurrency),
-		quit:  make(chan struct{}),
-		done:  make(chan struct{}),
+		b:      b,
+		queue:  queue,
+		cfg:    cfg,
+		cons:   cons,
+		h:      h,
+		gate:   g,
+		sem:    make(chan struct{}, b.concurrency),
+		quit:   make(chan struct{}),
+		qctx:   qctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
 	}
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
+		cancel()
 		return nil, errClosed
 	}
 	b.consumers[c] = struct{}{}
@@ -461,15 +490,23 @@ type consumer struct {
 	cfg   jetstream.ConsumerConfig
 	cons  jetstream.Consumer // owned by the fetch loop
 	h     func(fw.Event) error
+	gate  fw.Gate // nil for Consume
 
 	sem      chan struct{} // one slot per handler in flight
 	quit     chan struct{}
 	quitOnce sync.Once
+	qctx     context.Context // ends with quit, for a wait in the gate
+	cancel   context.CancelFunc
 	done     chan struct{} // closed when the fetch loop ends
 	handlers sync.WaitGroup
 }
 
-func (c *consumer) signal() { c.quitOnce.Do(func() { close(c.quit) }) }
+func (c *consumer) signal() {
+	c.quitOnce.Do(func() {
+		close(c.quit)
+		c.cancel()
+	})
+}
 
 func (c *consumer) stop() {
 	c.signal()
@@ -480,8 +517,9 @@ func (c *consumer) stop() {
 	c.b.mu.Unlock()
 }
 
-// run fetches as many messages as there are free handler slots. Messages that
-// arrive for a pull in flight after stop are still handled: stop drains.
+// run fetches as many messages as there are free handler slots, and with a
+// gate no more than the gate admits. Messages that arrive for a pull in
+// flight after stop are still handled: stop drains.
 func (c *consumer) run() {
 	defer close(c.done)
 	failures := 0
@@ -489,6 +527,17 @@ func (c *consumer) run() {
 		n, ok := c.acquire()
 		if !ok {
 			return
+		}
+		if c.gate != nil {
+			admitted, err := c.gate.Admit(c.qctx, n)
+			if err != nil {
+				// The stop, or the owner of the gate closes.
+				c.release(n)
+				return
+			}
+			admitted = min(admitted, n)
+			c.release(n - admitted)
+			n = admitted
 		}
 		got := 0
 		batch, err := c.cons.Fetch(n, jetstream.FetchMaxWait(c.b.fetchWait))
@@ -501,6 +550,9 @@ func (c *consumer) run() {
 			err = batch.Error()
 		}
 		c.release(n - got)
+		if c.gate != nil && n > got {
+			c.gate.Unused(n - got)
+		}
 		if err == nil {
 			failures = 0
 			continue
@@ -539,6 +591,10 @@ func (c *consumer) handle(m jetstream.Msg) {
 	if err := json.Unmarshal(m.Data(), &e); err != nil {
 		log.Warn("bus dropped a message that does not decode", "queue", c.queue, "subject", m.Subject(), "error", err)
 		_ = m.Term()
+		if c.gate != nil {
+			// The handler never saw the message, so its admission comes back here.
+			c.gate.Unused(1)
+		}
 		return
 	}
 	stopBeat := keepAlive(m, c.b.ackWait/3)
@@ -667,9 +723,9 @@ func durableName(queue string) string {
 }
 
 // streamSubjects returns the stream filters: the list from the subjects
-// option, plus a filter for the intake queue and the egress prefix when the
-// list does not capture them.
-func streamSubjects(list, intake, egress string) []string {
+// option, plus a filter for the intake queue, the egress prefix, and the
+// dead-letter subject of the intake when the list does not capture them.
+func streamSubjects(list, intake, egress, dead string) []string {
 	var subs []string
 	for _, s := range strings.Split(list, ",") {
 		if s = strings.TrimSpace(s); s != "" {
@@ -685,16 +741,42 @@ func streamSubjects(list, intake, egress string) []string {
 	if egress != "" {
 		subs = addFilter(subs, egress+".>")
 	}
+	if dead != "" {
+		subs = addFilter(subs, dead)
+	}
 	return subs
 }
 
 // addFilter adds the first token of the pattern followed by ">" when no
-// filter captures the pattern.
+// filter captures the pattern. A stream refuses two filters that overlap,
+// so when that wide filter overlaps one of the list, it adds the pattern
+// itself.
 func addFilter(subs []string, pattern string) []string {
 	if coveredByAny(subs, pattern) {
 		return subs
 	}
-	return append(subs, prefixFilter(pattern))
+	f := prefixFilter(pattern)
+	if slices.ContainsFunc(subs, func(s string) bool { return overlaps(s, f) }) {
+		f = pattern
+	}
+	return append(subs, f)
+}
+
+// overlaps reports whether some subject matches both filters.
+func overlaps(a, b string) bool {
+	at, bt := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; ; i++ {
+		if i == len(at) || i == len(bt) {
+			return len(at) == len(bt)
+		}
+		x, y := at[i], bt[i]
+		if x == ">" || y == ">" {
+			return true
+		}
+		if x != "*" && y != "*" && x != y {
+			return false
+		}
+	}
 }
 
 func prefixFilter(pattern string) string {

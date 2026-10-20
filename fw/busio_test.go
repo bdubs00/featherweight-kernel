@@ -56,14 +56,14 @@ func TestBusIntakeAndEgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Origin != OriginBus || r.Metadata["idempotencyKey"] != job.ID || r.Metadata["ticket"] != "42" || r.Output != "from bus" {
+	if r.Origin != OriginBus || r.Metadata["idempotencyKey"] != job.ID || r.Metadata["ticket"] != "42" || r.Metadata[MetaIntakeQueue] != "fw.jobs.test" || r.Output != "from bus" {
 		t.Fatalf("run = %+v", r)
 	}
 	if fin.Source != "fw://test/default/"+r.ID || fin.Seq == 0 {
 		t.Fatalf("egress event = %+v", fin)
 	}
 	// A redelivered message returns the first run and acknowledges.
-	if err := a.handleIntake(job); err != nil {
+	if err := a.handleIntake("fw.jobs.test", job); err != nil {
 		t.Fatalf("redelivery = %v", err)
 	}
 	if list, _ := a.List(ctx); len(list) != 1 {

@@ -132,6 +132,28 @@ func TestFileLedgerSyncsToolIntent(t *testing.T) {
 	}
 }
 
+// The queue of a run from the bus intake reaches the disk before Append
+// returns, because the intake acknowledges the message then. The queue of
+// a run from any other origin stays cheap.
+func TestFileLedgerSyncsTheQueueOfABusRun(t *testing.T) {
+	ctx := testCtx(t)
+	l, err := OpenFileLedger(filepath.Join(t.TempDir(), "runs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	for _, origin := range []string{OriginHTTP, OriginBus} {
+		before := l.syncs.Load()
+		if _, err := l.Append(ctx, MustEvent("R-"+origin, EvRunQueued, RunQueuedData{Agent: "default", Input: "x", Origin: origin})); err != nil {
+			t.Fatal(err)
+		}
+		synced := l.syncs.Load() > before
+		if want := origin == OriginBus; synced != want {
+			t.Errorf("origin %s: fsync = %v, want %v", origin, synced, want)
+		}
+	}
+}
+
 // A failed fsync reports failure and keeps the debt of the entries behind
 // the file. A retry pays every debt, however many appends later it is,
 // and a path that now exists does not end the debt for it.

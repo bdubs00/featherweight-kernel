@@ -65,22 +65,48 @@ func TestCovers(t *testing.T) {
 
 func TestStreamSubjects(t *testing.T) {
 	cases := []struct {
-		list, intake, egress string
-		want                 []string
+		list, intake, egress, dead string
+		want                       []string
 	}{
-		{"", "", "", []string{"fw.>"}},
-		{"", "fw.jobs.reviewer", "fw.events", []string{"fw.>"}},
-		{"", "jobs.reviewer", "", []string{"fw.>", "jobs.>"}},
-		{"", "", "events", []string{"fw.>", "events.>"}},
-		{"", "", "acme.events", []string{"fw.>", "acme.>"}},
-		{"", "jobs", "", []string{"fw.>", "jobs"}},
-		{" a.> , b.* ", "b.x", "a", []string{"a.>", "b.*"}},
-		{"a.>", "jobs.x", "jobs.out", []string{"a.>", "jobs.>"}},
+		{"", "", "", "", []string{"fw.>"}},
+		{"", "fw.jobs.reviewer", "fw.events", "fw.jobs.reviewer.dead", []string{"fw.>"}},
+		{"", "jobs.reviewer", "", "jobs.reviewer.dead", []string{"fw.>", "jobs.>"}},
+		{"", "", "events", "", []string{"fw.>", "events.>"}},
+		{"", "", "acme.events", "", []string{"fw.>", "acme.>"}},
+		{"", "jobs", "", "", []string{"fw.>", "jobs"}},
+		// A one-token intake does not capture its dead letter.
+		{"", "jobs", "", "jobs.dead", []string{"fw.>", "jobs", "jobs.>"}},
+		{" a.> , b.* ", "b.x", "a", "b.x.dead", []string{"a.>", "b.*", "b.x.dead"}},
+		{"a.>", "jobs.x", "jobs.out", "jobs.x.dead", []string{"a.>", "jobs.>"}},
+		// A list that names the intake alone gets the dead letter itself,
+		// because a stream refuses filters that overlap, such as fw.>.
+		{"fw.jobs.migrator", "fw.jobs.migrator", "", "fw.jobs.migrator.dead", []string{"fw.jobs.migrator", "fw.jobs.migrator.dead"}},
 	}
 	for _, c := range cases {
-		got := streamSubjects(c.list, c.intake, c.egress)
+		got := streamSubjects(c.list, c.intake, c.egress, c.dead)
 		if !slices.Equal(got, c.want) {
-			t.Errorf("streamSubjects(%q, %q, %q) = %v, want %v", c.list, c.intake, c.egress, got, c.want)
+			t.Errorf("streamSubjects(%q, %q, %q, %q) = %v, want %v", c.list, c.intake, c.egress, c.dead, got, c.want)
+		}
+	}
+}
+
+func TestOverlaps(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"fw.>", "fw.jobs.a", true},
+		{"fw.jobs.a", "fw.>", true},
+		{"fw.>", "fw", false},
+		{"fw.jobs.a", "fw.jobs.a.dead", false},
+		{"fw.*.a", "fw.jobs.*", true},
+		{"fw.*", "fw.a.b", false},
+		{"a.>", "b.>", false},
+		{">", "x", true},
+	}
+	for _, c := range cases {
+		if got := overlaps(c.a, c.b); got != c.want {
+			t.Errorf("overlaps(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
 		}
 	}
 }

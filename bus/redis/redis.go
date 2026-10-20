@@ -3,7 +3,9 @@
 // Each subject is one Redis stream with the same key, and one Pub/Sub
 // channel with the same name. Publish adds the event to both. Subscribe
 // listens on the channels: fan-out with no durability. Consume reads the
-// stream through a consumer group with at-least-once delivery.
+// stream through a consumer group with at-least-once delivery. ConsumeGated
+// is Consume with a fw.Gate, which the bus intake of the kernel uses to take
+// a job only for a free run slot.
 package redis
 
 import (
@@ -36,16 +38,17 @@ func init() {
 }
 
 const (
-	defaultURL         = "redis://127.0.0.1:6379/0"
-	defaultGroup       = "fw"
-	defaultMaxLen      = 100000
-	defaultConcurrency = 4
+	defaultURL    = "redis://127.0.0.1:6379/0"
+	defaultGroup  = "fw"
+	defaultMaxLen = 100000
 
 	maxDeliver        = 5
 	defaultBlock      = 2 * time.Second
 	defaultClaimEvery = time.Minute
-	// defaultClaimIdle is long because a handler can hold a message for a
-	// whole run. A handler that runs longer still resets the idle time.
+	// defaultClaimIdle is long because a handler of Consume can work for a
+	// long time. A handler that runs longer still resets the idle time. The
+	// bus intake of the kernel acknowledges a job when its run is in the
+	// ledger, which takes milliseconds.
 	defaultClaimIdle = 5 * time.Minute
 	claimBatch       = 100
 	subBuffer        = 1024
@@ -87,13 +90,17 @@ type Bus struct {
 //   - maxlen: the approximate cap on the length of each stream (default
 //     100000)
 //   - concurrency: the number of messages that one Consume handles at a time
-//     (default 4)
+//     (default: the run slots of the agent, fw.Config.RunSlots, which is 1
+//     under ax)
+//
+// Each subject is a stream of its own, so the dead-letter subject of the
+// intake keeps its records with no setting.
 func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	if cfg == nil {
 		return nil, errors.New("redis: no config")
 	}
 	opt := cfg.Bus.Options
-	conc, err := intOption(opt, "concurrency", defaultConcurrency)
+	conc, err := intOption(opt, "concurrency", cfg.RunSlots())
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +290,24 @@ func (b *Bus) Subscribe(ctx context.Context, subject string, h func(fw.Event) er
 // The stop function stops reading, lets the handlers in flight finish, and
 // waits for them. Do not call it from inside the handler.
 func (b *Bus) Consume(ctx context.Context, queue string, h func(fw.Event) error) (func(), error) {
+	return b.consume(ctx, queue, nil, h)
+}
+
+// ConsumeGated implements fw.GatedBus. It is Consume, and before each read
+// it asks the gate how many messages to take: at most the free handler
+// slots, and at least one, so the loop waits in Admit while the gate has
+// no room. The claim loop takes an admission for each message that it
+// delivers again. The messages that it does not take stay in the stream
+// for the other consumers of the group. The stop function ends a wait in
+// Admit.
+func (b *Bus) ConsumeGated(ctx context.Context, queue string, g fw.Gate, h func(fw.Event) error) (func(), error) {
+	if g == nil {
+		return nil, errors.New("redis: consume without a gate")
+	}
+	return b.consume(ctx, queue, g, h)
+}
+
+func (b *Bus) consume(ctx context.Context, queue string, g fw.Gate, h func(fw.Event) error) (func(), error) {
 	if h == nil {
 		return nil, errors.New("redis: consume without a handler")
 	}
@@ -295,16 +320,21 @@ func (b *Bus) Consume(ctx context.Context, queue string, h func(fw.Event) error)
 	if err := b.ensureGroup(ctx, queue); err != nil {
 		return nil, err
 	}
+	qctx, cancel := context.WithCancel(context.Background())
 	c := &consumer{
-		b:     b,
-		queue: queue,
-		h:     h,
-		sem:   make(chan struct{}, b.concurrency),
-		quit:  make(chan struct{}),
+		b:      b,
+		queue:  queue,
+		h:      h,
+		gate:   g,
+		sem:    make(chan struct{}, b.concurrency),
+		quit:   make(chan struct{}),
+		qctx:   qctx,
+		cancel: cancel,
 	}
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
+		cancel()
 		return nil, errClosed
 	}
 	b.consumers[c] = struct{}{}
@@ -337,15 +367,54 @@ type consumer struct {
 	b     *Bus
 	queue string
 	h     func(fw.Event) error
+	gate  fw.Gate // nil for Consume
+	// turn makes the read loop and the claim loop take turns at the gate.
+	// The read loop asks again as soon as a read comes back empty, so
+	// without turns it keeps every admission from the claim loop.
+	turn sync.Mutex
 
 	sem      chan struct{} // one slot per handler in flight
 	quit     chan struct{}
 	quitOnce sync.Once
+	qctx     context.Context // ends with quit, for a wait in the gate
+	cancel   context.CancelFunc
 	loops    sync.WaitGroup // the read and claim loops
 	handlers sync.WaitGroup
 }
 
-func (c *consumer) signal() { c.quitOnce.Do(func() { close(c.quit) }) }
+func (c *consumer) signal() {
+	c.quitOnce.Do(func() {
+		close(c.quit)
+		c.cancel()
+	})
+}
+
+// admit asks the gate for room for up to n messages, for which the caller
+// holds n handler slots. It gives back the slots that the gate does not
+// admit and returns the number admitted. Without a gate it admits n. It
+// returns false when the stop or the owner of the gate ends the wait.
+func (c *consumer) admit(n int) (int, bool) {
+	if c.gate == nil {
+		return n, true
+	}
+	c.turn.Lock()
+	admitted, err := c.gate.Admit(c.qctx, n)
+	c.turn.Unlock()
+	if err != nil {
+		c.release(n)
+		return 0, false
+	}
+	admitted = min(admitted, n)
+	c.release(n - admitted)
+	return admitted, true
+}
+
+// unused gives back n admissions that got no message.
+func (c *consumer) unused(n int) {
+	if c.gate != nil && n > 0 {
+		c.gate.Unused(n)
+	}
+}
 
 func (c *consumer) stop() {
 	c.signal()
@@ -356,8 +425,9 @@ func (c *consumer) stop() {
 	c.b.mu.Unlock()
 }
 
-// read reads as many new messages as there are free handler slots. Messages
-// that a read in flight returns after stop are still handled: stop drains.
+// read reads as many new messages as there are free handler slots, and
+// with a gate no more than the gate admits. Messages that a read in flight
+// returns after stop are still handled: stop drains.
 func (c *consumer) read() {
 	defer c.loops.Done()
 	ctx := context.Background()
@@ -365,6 +435,9 @@ func (c *consumer) read() {
 	for {
 		n, ok := c.acquire()
 		if !ok {
+			return
+		}
+		if n, ok = c.admit(n); !ok {
 			return
 		}
 		got := 0
@@ -384,6 +457,7 @@ func (c *consumer) read() {
 			}
 		}
 		c.release(n - got)
+		c.unused(n - got)
 		if err == nil || errors.Is(err, redis.Nil) {
 			failures = 0
 			continue
@@ -451,6 +525,9 @@ func (c *consumer) reclaim() {
 		if !c.acquireOne() {
 			return
 		}
+		if _, ok := c.admit(1); !ok {
+			return
+		}
 		// XCLAIM checks the idle time again, so only one consumer wins.
 		msgs, err := c.b.rdb.XClaim(ctx, &redis.XClaimArgs{
 			Stream:   c.queue,
@@ -461,12 +538,14 @@ func (c *consumer) reclaim() {
 		}).Result()
 		if err != nil || len(msgs) == 0 {
 			c.release(1)
+			c.unused(1)
 			continue
 		}
 		if msgs[0].Values == nil {
 			// The stream cap removed the entry.
 			_ = c.b.rdb.XAck(ctx, c.queue, c.b.group, p.ID).Err()
 			c.release(1)
+			c.unused(1)
 			continue
 		}
 		c.dispatch(msgs[0])
@@ -488,6 +567,8 @@ func (c *consumer) handle(m redis.XMessage) {
 	if err := json.Unmarshal([]byte(raw), &e); err != nil {
 		log.Warn("bus dropped a message that does not decode", "queue", c.queue, "entry", m.ID, "error", err)
 		c.ack(m.ID, "")
+		// The handler never saw the message, so its admission comes back here.
+		c.unused(1)
 		return
 	}
 	stopBeat := c.keepAlive(m.ID)

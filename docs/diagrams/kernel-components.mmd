@@ -26,7 +26,7 @@ flowchart TB
     direction TB
     HTTP["Native HTTP + A2A<br/>surface/native · surface/a2a<br/>Authn: token / OIDC / SPIFFE"]
     CLI["CLI or embedded Go<br/>cli/ · fw.New · Agent methods"]
-    INTAKE["Queue intake<br/>fw/busio.go<br/>Bus: mem / NATS / Redis"]
+    INTAKE["Queue intake<br/>fw/intake.go<br/>Bus: mem / NATS / Redis"]
     BUILD["Composition<br/>cmd/fw → cli → fw.New<br/>config/ + profiles + environment<br/>init registration + Go options"]
   end
 
