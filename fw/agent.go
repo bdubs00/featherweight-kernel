@@ -25,6 +25,7 @@ var ErrRunNotFound = errors.New("fw: run not found")
 
 // Agent is a configured featherweight agent. Build one with New.
 type Agent struct {
+	holds     atomic.Int32 // open holds of background work (Hold)
 	cfg       *Config
 	log       *slog.Logger
 	model     Model
@@ -693,3 +694,17 @@ func (a *Agent) closeResources() {
 		}
 	}
 }
+
+// Hold marks the process as busy with background work, such as the install
+// of an environment, until the returned function is called. The status of
+// the process is not idle while a hold is open, so a controller does not
+// put the process to sleep in the middle of the work (StatusOf in
+// surface/view). The function can be called more than once.
+func (a *Agent) Hold() (release func()) {
+	a.holds.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { a.holds.Add(-1) }) }
+}
+
+// Holds counts the open holds of background work.
+func (a *Agent) Holds() int { return int(a.holds.Load()) }

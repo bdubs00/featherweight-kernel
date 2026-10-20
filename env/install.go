@@ -194,6 +194,12 @@ func (in *installer) lock(ctx context.Context) (func(), error) {
 // try goes on from the cache. It returns the failure, or nil.
 func (in *installer) install(ctx context.Context, digest string, prev *Failure) *Failure {
 	start := time.Now()
+	if in.a != nil {
+		// The process is not idle while it installs, so the front does
+		// not suspend the Task in the middle of a download.
+		release := in.a.Hold()
+		defer release()
+	}
 	m, serr := in.materialize(ctx, digest)
 	if ctx.Err() != nil {
 		return nil
