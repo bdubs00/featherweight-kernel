@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -451,6 +452,11 @@ func (a *Agent) graderInput(rs *runState, evs []Event, o *Outcome, answer string
 // the run, where the files tool of the grader works.
 func (a *Agent) graderFiles(rs *runState, evs []Event) string {
 	files := RunFiles(evs)
+	// The full text of a cut tool result is a file of the run too
+	// (KeptResultsDir), but it is not work that the run did.
+	files = slices.DeleteFunc(files, func(f RunFile) bool {
+		return f.Path == KeptResultsDir || strings.HasPrefix(f.Path, KeptResultsDir+"/")
+	})
 	if len(files) == 0 {
 		return "The run changed no file through the files tool. A change that a shell command made does not show here."
 	}

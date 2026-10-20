@@ -254,6 +254,26 @@ type axCopied struct {
 // over the copied part, and the configuration that the kernel in the Task
 // loads from it.
 func axConfig(cfg *fw.Config, a *axArgs, r *axRendered) (string, *fw.Config, error) {
+	// The configuration of the caller is expanded, so a copied value can
+	// hold a secret in the open: a password in a URL, or a token in the
+	// options of the bus. Such a value never goes into a Task.
+	urls := map[string]string{"bus.url": cfg.Bus.URL, "tokens.url": cfg.Tokens.URL}
+	for name, p := range cfg.Providers {
+		urls["providers."+name+".baseUrl"] = p.BaseURL
+	}
+	for _, m := range cfg.Tools.MCP {
+		urls["tools.mcp "+m.Name+" endpoint"] = m.Endpoint
+	}
+	for key, v := range urls {
+		if credentialURL(v) {
+			return "", nil, fmt.Errorf("ax: %s holds a credential in its URL; write it as ${NAME} in the profile file and pass --env NAME=<value>, which the Task gets as a secret", key)
+		}
+	}
+	for key := range cfg.Bus.Options {
+		if secretOption(key) {
+			return "", nil, fmt.Errorf("ax: bus.options.%s can hold a credential; set it in the profile file as ${NAME} and pass --env NAME=<value>", key)
+		}
+	}
 	c := axCopied{Model: cfg.Model, Models: cfg.Models, Effort: cfg.Effort, Providers: map[string]fw.ProviderConfig{}}
 	if cfg.Bus.Driver != "mem" {
 		c.Bus = &cfg.Bus
@@ -846,4 +866,25 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// credentialURL reports whether s is a URL with a user part, which can
+// hold a password.
+func credentialURL(s string) bool {
+	if s == "" {
+		return false
+	}
+	u, err := url.Parse(s)
+	return err == nil && u.User != nil
+}
+
+// secretOption reports whether an option key names a credential.
+func secretOption(key string) bool {
+	k := strings.ToLower(key)
+	for _, w := range []string{"token", "password", "credential", "secret", "key"} {
+		if strings.Contains(k, w) {
+			return true
+		}
+	}
+	return false
 }

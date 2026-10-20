@@ -35,4 +35,14 @@ func TestBashSurvivesSetE(t *testing.T) {
 	if got != "alive\nexit code 0" {
 		t.Fatalf("after a function: got %q", got)
 	}
+	// The most common idiom: set -euo pipefail and a failure at the top
+	// level, where FUNCNAME is unset. The trap must not trip over set -u.
+	got = mustOK(t, call(t, ctx, b, `{"command":"set -euo pipefail; false; echo not-reached"}`))
+	if got != "exit code 1" {
+		t.Fatalf("set -euo pipefail; false: got %q", got)
+	}
+	got = mustOK(t, call(t, ctx, b, `{"command":"echo alive $KEPT"}`))
+	if got != "alive yes\nexit code 0" {
+		t.Fatalf("after set -euo pipefail: got %q", got)
+	}
 }

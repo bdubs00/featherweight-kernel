@@ -450,7 +450,9 @@ func (s *Server) transport(ctx context.Context) (sdk.Transport, error) {
 			cmd.Dir, _ = filepath.Abs(s.conf.WorkspaceRoot())
 			env = fw.ToolEnv(context.Background(), s.conf, env, nil)
 		}
-		env, err := fw.ExtendToolEnv(ctx, s.conf, env)
+		// The server starts when the tool list is read, at every step of
+		// every run, so a hook applies its variables and never waits here.
+		env, err := fw.ExtendToolEnv(fw.WithToolEnvNoWait(ctx), s.conf, env)
 		if err != nil {
 			return nil, fmt.Errorf("mcp: server %s cannot start: %w", s.cfg.Name, err)
 		}

@@ -33,7 +33,7 @@ func TestCutResultKeepsTheFullTextInAFile(t *testing.T) {
 	mustState(t, r, err, StateCompleted)
 
 	text := TextOf(firstToolResult(t, s).Content)
-	name := filepath.Join(KeptResultsDir, "call_1_x.txt")
+	name := filepath.Join(KeptResultsDir, r.ID+"-call_1_x.txt")
 	if !strings.HasPrefix(text, "HEAD ") || !strings.HasSuffix(text, " TAIL") || len(text) > 1024 ||
 		!strings.Contains(text, "The full result of "+itoa(len(full))+" bytes is in "+name) {
 		t.Fatalf("result = %q", text)

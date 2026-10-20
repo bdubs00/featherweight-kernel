@@ -237,7 +237,13 @@ func resolvePrompt(s string, dirs ...string) (string, error) {
 		if !isFile(c) {
 			continue
 		}
-		b, err := os.ReadFile(c)
+		// The check of the path runs on the file itself, not on a link
+		// to it, so a link notes.md to /proc/self/environ reads nothing.
+		real, err := filepath.EvalSymlinks(c)
+		if err != nil || !promptPath(real) {
+			return s, nil
+		}
+		b, err := os.ReadFile(real)
 		if err != nil {
 			return "", err
 		}
@@ -257,6 +263,11 @@ func promptFile(s string) bool {
 	default:
 		return false
 	}
+	return promptPath(s)
+}
+
+// promptPath reports whether a path is outside /proc, /sys, and /dev.
+func promptPath(s string) bool {
 	clean := filepath.Clean(s)
 	for _, p := range []string{"/proc/", "/sys/", "/dev/"} {
 		if strings.HasPrefix(clean, p) {

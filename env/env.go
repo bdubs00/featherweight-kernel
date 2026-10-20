@@ -79,7 +79,7 @@ func toolEnv(ctx context.Context, cfg *fw.Config, env []string) ([]string, error
 	if s == nil {
 		return env, nil
 	}
-	if fw.RunInfoFrom(ctx).RunID != "" {
+	if fw.RunInfoFrom(ctx).RunID != "" && !fw.ToolEnvNoWait(ctx) {
 		if err := newInstaller(fw.AgentFrom(ctx), cfg, s).ready(ctx); err != nil {
 			return nil, err
 		}

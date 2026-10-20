@@ -176,8 +176,8 @@ func (t *tool) change(ctx context.Context, in input) fw.ToolResult {
 		return fw.ErrorResult(fmt.Sprintf("env: %s %s changed %s, but the call ended before the install finished; the next command installs it.", args[0], in.Command, s.rel(manifest)))
 	}
 	run := fw.RunInfoFrom(ctx)
-	inst.log.Info("the environment changed", "digest", short(digest), "manager", in.Manager, "command", in.Command, "package", pkg, "run", run.RunID)
-	inst.publish(EvChanged, ChangedData{Digest: digest, Previous: previous, Manager: in.Manager, Command: in.Command, Package: pkg, Run: run.RunID, Agent: run.Agent})
+	inst.log.Info("the environment changed", "digest", short(digest), "manager", in.Manager, "command", in.Command, "package", inst.redact(pkg), "run", run.RunID)
+	inst.publish(EvChanged, ChangedData{Digest: digest, Previous: previous, Manager: in.Manager, Command: in.Command, Package: inst.redact(pkg), Run: run.RunID, Agent: run.Agent})
 	verb := map[string]string{"add": "Added", "remove": "Removed"}[in.Command]
 	return fw.TextResult(fmt.Sprintf("%s %s in %s and its lock file. The environment is ready (digest %s).\n%s", verb, pkg, s.rel(manifest), short(digest), t.list()))
 }

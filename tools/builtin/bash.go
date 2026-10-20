@@ -316,7 +316,7 @@ func (t *bashTool) run(ctx context.Context, s *bashSession, command string) (fw.
 	script := fmt.Sprintf("set +euo pipefail\n"+
 		"__fw_pid=$BASHPID __fw_fail=\n"+
 		"set -E\n"+
-		"trap '__fw_s=$?; if [[ $- == *e* && $BASHPID == \"$__fw_pid\" ]]; then if (( ${#FUNCNAME[@]} )); then return $__fw_s; fi; set +e; __fw_fail=$__fw_s; break 1000; fi' ERR\n"+
+		"trap '__fw_s=$?; if [[ $- == *e* && $BASHPID == \"$__fw_pid\" ]]; then if [[ -n ${FUNCNAME[0]-} ]]; then return $__fw_s; fi; set +e; __fw_fail=$__fw_s; break 1000; fi' ERR\n"+
 		"IFS= read -r -d '' __fw_cmd <<'%[1]s' || true\n%[2]s\n%[1]s\n"+
 		"for __fw_once in 1; do eval \"$__fw_cmd\" </dev/null; done\n"+
 		"__fw_ec=${__fw_fail:-$?}\n"+

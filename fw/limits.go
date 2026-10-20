@@ -162,7 +162,7 @@ func keepFull(ctx context.Context) func(text string) string {
 		if a != nil {
 			text = a.Redact(text)
 		}
-		name := path.Join(KeptResultsDir, id+".txt")
+		name := path.Join(KeptResultsDir, fileSafe(info.RunID)+"-"+id+".txt")
 		if err := f.WriteFile(name, []byte(text)); err != nil {
 			if a != nil {
 				a.Logger().Warn("fw: the full result of a cut tool call is not kept", "run", info.RunID, "call", info.CallID, "error", err)

@@ -810,4 +810,16 @@ func TestPromptFileSuffix(t *testing.T) {
 	if got := cfg.Agents["c"].System; got != "from a markdown file" {
 		t.Errorf("c: the markdown file was not read: %q", got)
 	}
+	// A link with the right suffix to a file of the process reads nothing.
+	link := filepath.Join(dir, "notes.md")
+	if err := os.Symlink("/proc/self/environ", link); err != nil {
+		t.Skip(err)
+	}
+	cfg, err = Load(writeFile(t, filepath.Join(dir, "fw2.yaml"), "model: openai/test\nagents:\n  d: {system: "+link+"}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Agents["d"].System; got != link {
+		t.Errorf("d: a link to /proc/self/environ was read: %q", got)
+	}
 }
