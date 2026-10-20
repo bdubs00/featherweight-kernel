@@ -2264,3 +2264,77 @@ A front that builds the run object from the lifecycle events of its workers, as 
 Unlike the system prompt of a profile, the rubric of a profile enters the ledger: `fw.run.queued` of the run holds the resolved outcome, and the input of each grader run holds the rubric, because the grader reads it from there. The content of the files in the input, up to 64 KiB for each pass, enters the ledger of the grader run too. The kernel replaces every secret in both, as in every event (section 4.2). A rubric therefore must hold nothing that a viewer of the run must not read.
 
 A replay (section 4.6) is a new run and resolves its outcome again: it takes the outcome of the named profile now, and the outcome of the request of the recorded run does not travel to it. Its grader runs call the model live, because a replay answers only the tool calls of the recorded run.
+
+## 21. fw ax and the doctor in a Task
+
+### 21.1 One Task from one profile file
+
+A developer without a front wants one Task from one profile file. Before `fw ax`, that took five steps: write the profile, render a Workspace and a Task by hand, apply them with `ax`, resume the Task, and wait for `/readyz` through the router. The verb `fw ax` in `cli/ax.go` does them in one command, with the manifest types of the ax API and the gRPC client that the spawner of section 11.9 uses:
+
+```
+fw ax render -f agents/reviewer.yaml --name reviewer --image <image@sha256:...> --egress deb.debian.org:80
+fw ax up     -f agents/reviewer.yaml --name reviewer --image <image@sha256:...> --server 127.0.0.1:8080 --router 127.0.0.1:8001
+fw ax status --name reviewer
+fw ax events --name reviewer <run-id>
+fw ax down   --name reviewer
+```
+
+| Flag | Verbs | Meaning |
+|---|---|---|
+| `--name` | all | The name of the Task, required. The Workspace is `<name>-ws`. |
+| `--atespace` | all | The atespace, `default` by default. |
+| `-f` | render, up | The profile file: a fragment of `fw.yaml`, such as `policy`, `access`, and `agents`, in the shape of `e2e/fleet/ax/profiles/*.yaml` of the lab. |
+| `--image` | render, up | The image by digest, `name@sha256:...`, required, because Substrate pulls an image by digest only. |
+| `--egress` | render, up | One more destination, repeated: `host:port` for an `http` rule, `tls:host:port`, `https:host:port`, or a URL. |
+| `--env` | render, up | One more `spec.env` entry, `NAME=VALUE`, repeated. It wins over a derived entry. |
+| `--workspace-file` | render, up | One more Workspace file, `path=localpath`, repeated. The path stays inside the workspace and is not `.fw/fw.yaml`. |
+| `--debug` | render, up | Sets `spec.debug`, which turns on the guest services of `ax ssh` (section 11.12). They carry no authentication. |
+| `--server` | up, status, down | The ax API. Else `AX_SERVER`, the variable of the ax command line, else `ax.server`. |
+| `--router` | up, status, events | The atenet router. Else `ax.router`. |
+| `--timeout` | up | How long `up` waits for `/readyz`, 10 minutes by default. |
+| `--format` | events | `jsonl`, the default, or `text`. |
+
+The verbs dial the addresses directly and never start a port-forward. The defaults of `ax.server` and `ax.router` are the addresses inside the cluster, so a laptop forwards the ports first and passes them. Each verb prints the addresses that it uses:
+
+```
+kubectl -n ax-system port-forward svc/ax-server 8080:8080
+kubectl -n ate-system port-forward svc/atenet-router 8001:80
+```
+
+### 21.2 What render writes
+
+`render` prints the Workspace and the Task as one stream of YAML documents, in the order of apply, with a comment that holds the warnings. The output is the same objects that `up` applies, with a placeholder `<secret: NAME>` in place of each secret value. It refuses a name that ax refuses, an image without a digest, a profile file with a key that the kernel does not know, a file path outside the workspace, and a Task that names no model. `fw ax` never chooses a model.
+
+The Workspace holds `.fw/fw.yaml`, which the kernel reads under ax (section 11.3). The file starts from the configuration of the caller, reduced to the keys that a Task shares with it: `model`, `models`, `effort`, `providers`, `bus`, `tokens`, and `tools.mcp`. A provider and an MCP server leave their headers behind, because a header can hold a secret, and each one that does gives a warning. A TLS file that a key names must reach the Task with `--workspace-file`. Each `$` of these values is doubled, so a value that the caller already expanded reaches the Task unchanged. The profile file goes on top as written: a key of the file replaces the same key, two mappings merge key by key, and a `${NAME}` of the file expands in the Task, from `spec.env`.
+
+The Task gets `spec.env` in this order: the static token when `auth.mode` holds `token`, the key of each model provider, the bearer of each MCP server, the credential for the token broker, the OTLP endpoints of the caller (`OTEL_EXPORTER_OTLP_ENDPOINT` and the endpoint of each signal), and the entries of `--env`. A secret takes its value from `--env`, else from the secrets driver of the caller. `render` prints a placeholder for each one, and for each `--env` entry with a secret name, and warns when the caller does not have a value. `up` refuses to start until every value is there.
+
+The egress rules come from the endpoints of the configuration of the Task, so no rule is forgotten: the base URL of each model provider, or the default endpoint of the adapter; each URL of the bus; `tokens.url`; the OTLP endpoints; and the endpoint of each MCP server. A child Task of `spawn.driver: ax`, an A2A peer, and an OIDC issuer need a rule from `--egress`. A plain `http` or `ws` URL gives an `http` rule and an `https`, `wss`, or `rediss` URL a `tls` passthrough rule, each for one host and its port. `--egress` adds more. The same rule appears once. An endpoint that no rule can carry gives a warning instead: a scheme such as `nats://` or `redis://`, because the egress gateway carries only HTTP and TLS, and `localhost` or an IP address, because a rule names a DNS name.
+
+### 21.3 up, status, events, and down
+
+`up` renders with the values, checks that the router answers, and only then changes anything. It applies the Workspace with `UpdateWorkspace`, creates the Task, and resumes it, because ax creates every Task suspended. Then it reads `/readyz` through the router until it answers 200. While it waits, it reads the phase of the Task and resumes a Task that ax reports as `Suspended` or `Failed`, up to three times, as the lab does after a crash at boot. Three misses of the router in a row stop the wait. A Task that exists already stops `up` with the advice to run `down`, because a Task does not change. At the end, `up` prints the address: the router and the header `ate-target-actor: <atespace>/<name>`.
+
+`status` prints the phase and the conditions of the Task from the ax API. While the Task runs, it also prints the body of `GET /v1/status` of the kernel, read through the router (section 11.8), as JSON, with `idle` and `idleSince`. It does not read the kernel of a Task that sleeps, because a request through the router wakes it. `events` reads the ledger of a run through the router, with `GET /v1/runs/{id}/events` and `Accept: application/json`, a page of 1,000 events at a time, and prints the lines of `fw events`. Both send the static token of the caller. `down` deletes the Task, tries again for a minute while Substrate refuses, waits until ax forgets the Task, and deletes the Workspace.
+
+### 21.4 The doctor in a Task
+
+A sandbox hides facts that the configuration does not show. `cli/doctor_ax.go` adds four lines to `fw doctor` through `cli.RegisterDoctorCheck`. They run inside the Task, through `ax ssh <task> -- fw doctor` or a Task with `spec.debug`, and need no cluster client. The process decides at its start: with `AX_TASK_YAML` or `AX_METADATA_URL` it registers the four lines, and otherwise one line, `ax: not under ax`. Without `AX_TASK_YAML`, the lines read the manifests from the metadata endpoints.
+
+| Line | What it checks | Verdict |
+|---|---|---|
+| `ax reach` | Each endpoint of section 21.2, with the MCP servers of the Workspaces. An `http` endpoint gets one GET without a credential, and any answer but the refusal of the egress gateway, a 403 with the body `egress denied`, passes. A `tls` endpoint gets a TLS handshake, which the gateway ends when no rule covers the name. Each probe has five seconds at most, and the probes run at the same time. | FAIL when an endpoint does not answer, with each endpoint and the fix |
+| `ax trust bundle` | The bundle of the egress gateway at `/run/ate/egress-trust-bundle/trust-bundle.pem`, where a SystemInfo volume puts it in `docs/egress-trust-bundle.md` of Agent Substrate. ax mounts no such volume yet, and an `https` rule needs the bundle, because the gateway terminates its TLS. | ok with the limit while the file is absent, because nobody in the Task can change it; ok with the number of certificates; FAIL when the file holds no certificate |
+| `ax tools user` | The user that runs the tools, as `ax.ApplyToConfig` chooses it, and whether it is a separate user from the one of `fw`. | ok with the reason when no separate user is in effect; FAIL when `tools.user` names a user that root cannot become |
+| `ax durable` | `FW_HOME` is under `/workspace` and writable, `/workspace` is a mount in `/proc/self/mountinfo`, and every binding is under it. | FAIL with each problem |
+
+Example lines for a Task of the lab in gVisor, with one egress rule missing:
+
+```
+FAIL  ax reach: 1 of 5 endpoints does not answer: mcp github github-mcp.fw-fleet.svc.cluster.local:8082 (the egress gateway denies it); fix the egress of the Task (fw ax render derives a rule for each endpoint); these answer: model openai ax-model.fw-fleet.svc.cluster.local:8080, bus nats.fw-fleet.svc.cluster.local:8080, tokens fw-front.fw-fleet.svc.cluster.local:8080, telemetry opentelemetry-collector.otel-system.svc.cluster.local:4318
+ok    ax trust bundle: absent at /run/ate/egress-trust-bundle/trust-bundle.pem; https egress rules need the SystemInfo volume there, so use http and tls rules
+ok    ax tools user: the tools run as root (0), the user of fw, because root lacks CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_SETGID, CAP_SETUID in this sandbox; no separate user is in effect, so a tool process can read the files of fw
+ok    ax durable: FW_HOME /workspace/.fw is writable on the volume at /workspace, with 1 binding on it
+```
+
+The trust bundle line counts the certificates once an ax patch mounts the SystemInfo volume at that path. The line of the kernel `tools user` names the default of ax only for root with the capabilities of section 7.12, as `ax.ApplyToConfig` does, and the `ax tools user` line adds whether the user is a separate one.
