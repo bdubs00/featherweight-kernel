@@ -87,7 +87,23 @@ if resume and state.get("deferred"):
 for line in sys.stdin:
     msg = json.loads(line)
     text = msg["message"]["content"]
-    if "two reads" in text:
+    if "read twice" in text:
+        # Two tool calls, one in each of two responses.
+        for i, tid in enumerate(("toolu_1", "toolu_2")):
+            inp = {"file_path": "f%d.txt" % i}
+            out({"type": "assistant", "parent_tool_use_id": None,
+                 "message": {"id": "msg_%d" % i, "model": arg("--model"), "role": "assistant", "stop_reason": "tool_use",
+                             "content": [{"type": "tool_use", "id": tid, "name": "Read", "input": inp}], "usage": usage}})
+            decision, reason = ask(tid, "Read", inp)
+            with open(os.path.join(home, "fake-decisions.jsonl"), "a") as f:
+                f.write(json.dumps({"id": tid, "decision": decision, "reason": reason}) + "\n")
+            out({"type": "user", "parent_tool_use_id": None,
+                 "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": reason or "contents", "is_error": decision != "allow"}]}})
+        out({"type": "assistant", "parent_tool_use_id": None,
+             "message": {"id": "msg_end", "model": arg("--model"), "role": "assistant", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "Read both."}], "usage": usage}})
+        result("Read both.")
+    elif "two reads" in text:
         # Two tool calls in one response, as Claude makes them at once.
         calls = [("toolu_a", {"file_path": "a.txt"}), ("toolu_b", {"file_path": "b.txt"})]
         for i, (tid, inp) in enumerate(calls):

@@ -86,9 +86,10 @@ func (p *claudeProc) saw(msg string, ids []string) {
 // batch returns the number of tool calls of the response that holds the
 // call id, or 0 when the mapper did not read the call. Claude writes the
 // lines of a response before it calls the hook, but the mapper can read
-// them later, so batch waits until the mapper read the call and then read
-// no line for batchQuiet, for batchWait at most.
-func (p *claudeProc) batch(ctx context.Context, id string) int {
+// them later, so batch waits until the mapper read the call, and with
+// settle also until the mapper read no line for batchQuiet, for batchWait
+// at most.
+func (p *claudeProc) batch(ctx context.Context, id string, settle bool) int {
 	limit := time.NewTimer(batchWait)
 	defer limit.Stop()
 	for {
@@ -99,6 +100,9 @@ func (p *claudeProc) batch(ctx context.Context, id string) int {
 			n = p.calls[msg]
 		}
 		p.mu.Unlock()
+		if known && !settle {
+			return n
+		}
 		var quiet <-chan time.Time
 		if known {
 			quiet = time.After(batchQuiet)
@@ -882,10 +886,23 @@ func (h *host) hook(w http.ResponseWriter, req *http.Request) {
 }
 
 // decide answers one call: from the decision of a person for a call that
-// waited, else from the policy, with defer where the policy asks.
+// waited, else from the policy, with defer where the policy asks. A run at
+// a limit of its budget gets a deny for every call, so the limits of the
+// tool calls, of the tree, and the deadline stop the next call, not the
+// next turn.
 func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) {
 	tool := strings.ToLower(in.Tool)
-	if d, ok := p.decisions[in.ToolUseID]; ok {
+	d, decided := p.decisions[in.ToolUseID]
+	if !decided {
+		// Once the mapper read the line of this call, the run holds every
+		// call before it, so the budget counts them. A resumed call that
+		// waited for a person has no new line.
+		p.batch(ctx, in.ToolUseID, false)
+	}
+	if _, msg, over := p.r.hr.Over(); over {
+		return "deny", msg
+	}
+	if decided {
 		if allow, why := p.r.recheck(ctx, d); !allow {
 			return "deny", why
 		}
@@ -901,7 +918,7 @@ func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) 
 	// Claude ignores defer when one response makes several tool calls,
 	// and its own permission flow then decides the call: it runs a read
 	// inside the working directory without asking.
-	if p.batch(ctx, in.ToolUseID) > 1 {
+	if p.batch(ctx, in.ToolUseID, true) > 1 {
 		return "deny", batchDenied
 	}
 	p.mu.Lock()

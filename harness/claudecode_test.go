@@ -461,3 +461,31 @@ func TestClaudeCodeDeadlineWithoutLines(t *testing.T) {
 		t.Fatalf("%d budget events", n)
 	}
 }
+
+// TestClaudeCodeHookChecksTheBudget makes two calls in two responses with
+// maxToolCalls 1: the hook denies the second call, and the run stops at
+// its budget.
+func TestClaudeCodeHookChecksTheBudget(t *testing.T) {
+	d := newDirs(t)
+	block := fakeClaude(t)
+	a := claudeAgent(t, d, block, fw.NewMemLedger(), nil)
+	r, err := a.Start(testCtx(t), "Please read twice", fw.WithRunBudget(fw.Budget{MaxToolCalls: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateFailed || !strings.Contains(r.Error, "maxToolCalls") {
+		t.Fatalf("run = %+v", r)
+	}
+	var got []struct{ ID, Decision, Reason string }
+	for _, line := range strings.Split(strings.TrimSpace(readFile(t, filepath.Join(d.home, "fake-decisions.jsonl"))), "\n") {
+		var x struct{ ID, Decision, Reason string }
+		if err := json.Unmarshal([]byte(line), &x); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, x)
+	}
+	if len(got) != 2 || got[0].Decision != "allow" || got[1].Decision != "deny" || !strings.Contains(got[1].Reason, "budget exceeded: maxToolCalls") {
+		t.Fatalf("decisions = %+v", got)
+	}
+}
