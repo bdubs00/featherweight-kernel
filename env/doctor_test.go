@@ -45,7 +45,7 @@ func TestDoctor(t *testing.T) {
 		t.Fatalf("failed: %v %q", ok, line)
 	}
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
-	if ok, line := doctor(ctx, f.cfg, nil, time.Second); ok || !strings.Contains(line, "uv is not on PATH; the image must carry it") {
+	if ok, line := doctor(ctx, f.cfg, nil, time.Second); ok || !strings.Contains(line, "uv is not on PATH; the image must carry it") || !strings.Contains(line, "tls "+pythonHost) {
 		t.Fatalf("no uv: %v %q", ok, line)
 	}
 	bad := newFixture(t, "pyhton: x")

@@ -105,10 +105,14 @@ func probe(ctx context.Context, name string, timeout time.Duration) (string, err
 // hostRef matches the scheme and the host of a URL in a lock file.
 var hostRef = regexp.MustCompile(`\b(https?)://([A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])`)
 
+// pythonHost is where uv downloads a Python when the image has none.
+const pythonHost = "releases.astral.sh"
+
 // hosts lists the hosts that the lock files download from, as egress
 // rules name them: "tls <host>" for https, which needs a rule with tls
 // passthrough, and "http <host>" for plain http. Without a lock file it
-// names the default registry of the manager.
+// names the default registry of the manager. Without python3 on PATH, uv
+// downloads a Python too.
 func (s *spec) hosts() []string {
 	seen := map[string]bool{}
 	add := func(rule string) {
@@ -132,6 +136,9 @@ func (s *spec) hosts() []string {
 	}
 	if s.python != "" {
 		scan(s.uvLock(), "pypi.org", "files.pythonhosted.org")
+		if _, err := exec.LookPath("python3"); err != nil {
+			add("tls " + pythonHost)
+		}
 	}
 	if s.tools != "" {
 		scan(s.pixiLock(), "conda.anaconda.org")
