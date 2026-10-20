@@ -746,7 +746,7 @@ func (o *opencode) exchange(ctx context.Context, r *run, s *ocSession, fresh boo
 			continue
 		case !st.terminal:
 			// The exchange ended, but the run did not record its end.
-			if done, err := r.hr.Finish(ctx, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: st.output}, st.prompted); err != nil || done {
+			if done, err := r.finish(ctx, st); err != nil || done {
 				return ocIdle, err
 			}
 			continue
@@ -774,7 +774,7 @@ func (o *opencode) exchange(ctx context.Context, r *run, s *ocSession, fresh boo
 				return ocIdle, r.fail(ctx, msg)
 			}
 		}
-		if done, err := r.hr.Finish(ctx, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: st.output}, st.prompted); err != nil || done {
+		if done, err := r.finish(ctx, st); err != nil || done {
 			return ocIdle, err
 		}
 	}

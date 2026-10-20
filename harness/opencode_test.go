@@ -499,3 +499,26 @@ func TestOpencodeReadOfTheHome(t *testing.T) {
 		t.Fatalf("replies = %+v", f.replies)
 	}
 }
+
+// TestOpencodeRubricSkipped runs with a rubric: the run records that no
+// grader graded its answer.
+func TestOpencodeRubricSkipped(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, writeHello)
+	cfg := testConfig(t, d, ocBlock(d, f))
+	l := fw.NewMemLedger()
+	a := newAgent(t, cfg, l)
+	r, err := a.Start(testCtx(t), "Create hello.txt", fw.WithOutcome(fw.Outcome{Rubric: "hello.txt holds hello."}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateCompleted || r.Outcome == nil || r.Outcome.Verdict != fw.GradeSkipped || r.Outcome.Reason != noGrader {
+		t.Fatalf("run = %+v, outcome = %+v", r, r.Outcome)
+	}
+	var od fw.OutcomeEvaluatedData
+	evs := events(t, l, r.ID)
+	if e := ofType(evs, fw.EvOutcomeEvaluated); len(e) != 1 || e[0].Decode(&od) != nil || od.Answer != ofType(evs, fw.EvModelResponded)[1].Seq {
+		t.Fatalf("outcome events = %v", e)
+	}
+}

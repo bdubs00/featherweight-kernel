@@ -85,6 +85,8 @@ type state struct {
 	responded bool              // the open turn has its fw.model.responded
 	open      map[string]string // the tool calls without a result, by call id, to the tool
 	output    string            // the text of the latest response with text
+	answer    uint64            // the latest fw.model.responded
+	graded    uint64            // the latest answer that a fw.outcome.evaluated names
 }
 
 // message is a message of the run for the harness: the input of the run
@@ -195,8 +197,13 @@ func scan(evs []fw.Event) *state {
 			s.turnOpen, s.responded = true, false
 		case fw.EvTurnFinished:
 			s.turnOpen = false
+		case fw.EvOutcomeEvaluated:
+			var d fw.OutcomeEvaluatedData
+			if e.Decode(&d) == nil {
+				s.graded = max(s.graded, d.Answer)
+			}
 		case fw.EvModelResponded:
-			s.responded = true
+			s.responded, s.answer = true, e.Seq
 			var d fw.ModelRespondedData
 			if e.Decode(&d) == nil {
 				if t := strings.TrimSpace(fw.TextOf(d.Content)); t != "" {
@@ -283,6 +290,24 @@ func (r *run) fail(ctx context.Context, msg string) error {
 	}
 	_, err := r.hr.Emit(ctx, fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeFailed, Output: r.st.output, Error: msg})
 	return err
+}
+
+// noGrader is the reason of the outcome of a hosted run with a rubric.
+const noGrader = "a hosted harness has no grader"
+
+// finish records the end of the run after an exchange, unless a message
+// came that the harness did not get (Hosted.Finish). A run with a rubric
+// records first that no grader graded its answer, once for each answer,
+// so the person sees why the run has no grade.
+func (r *run) finish(ctx context.Context, st *state) (bool, error) {
+	if o := r.hr.Queued().Outcome; o != nil && strings.TrimSpace(o.Rubric) != "" && st.answer > st.graded {
+		d := fw.OutcomeEvaluatedData{Verdict: fw.GradeSkipped, Iteration: 1, Iterations: max(o.Iterations, 1), Reason: noGrader, Answer: st.answer}
+		if _, err := r.hr.Emit(ctx, fw.EvOutcomeEvaluated, d); err != nil {
+			return false, err
+		}
+		st.graded = st.answer
+	}
+	return r.hr.Finish(ctx, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: st.output}, st.prompted)
 }
 
 // prompt returns the text of the messages that the harness did not get,

@@ -195,7 +195,7 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 			}
 			continue
 		case !st.terminal:
-			if done, err := r.hr.Finish(ctx, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: st.output}, st.prompted); err != nil || done {
+			if done, err := r.finish(ctx, st); err != nil || done {
 				return err
 			}
 			continue
@@ -229,7 +229,7 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 			return nil
 		}
 		st = r.rescan()
-		if done, err := r.hr.Finish(ctx, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: st.output}, st.prompted); err != nil || done {
+		if done, err := r.finish(ctx, st); err != nil || done {
 			return err
 		}
 	}
