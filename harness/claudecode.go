@@ -48,6 +48,71 @@ type claudeProc struct {
 
 	mu       sync.Mutex
 	verdicts map[string]fw.Decision // the calls that the hook deferred, by call id
+	msgOf    map[string]string      // the message of each tool call that the mapper read, by call id
+	calls    map[string]int         // the tool calls of each message, by message id
+	read     chan struct{}          // closed and replaced at each line that the mapper reads
+}
+
+func newClaudeProc(r *run) *claudeProc {
+	return &claudeProc{r: r, decisions: r.st.decisions, verdicts: map[string]fw.Decision{},
+		msgOf: map[string]string{}, calls: map[string]int{}, read: make(chan struct{})}
+}
+
+// The waits of the hook for the lines of a message (claudeProc.batch).
+const (
+	batchWait  = 2 * time.Second        // the longest wait
+	batchQuiet = 100 * time.Millisecond // no line for this long ends the burst of a message
+)
+
+// batchDenied is the reason of a deny for a call that the policy asks a
+// person about and that shares its response with other tool calls.
+const batchDenied = "this call needs an approval; make it alone"
+
+// saw records the tool calls of a line of claude, if any, and wakes the
+// hooks that wait for the lines.
+func (p *claudeProc) saw(msg string, ids []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, id := range ids {
+		if _, ok := p.msgOf[id]; !ok {
+			p.msgOf[id] = msg
+			p.calls[msg]++
+		}
+	}
+	close(p.read)
+	p.read = make(chan struct{})
+}
+
+// batch returns the number of tool calls of the response that holds the
+// call id, or 0 when the mapper did not read the call. Claude writes the
+// lines of a response before it calls the hook, but the mapper can read
+// them later, so batch waits until the mapper read the call and then read
+// no line for batchQuiet, for batchWait at most.
+func (p *claudeProc) batch(ctx context.Context, id string) int {
+	limit := time.NewTimer(batchWait)
+	defer limit.Stop()
+	for {
+		p.mu.Lock()
+		msg, known := p.msgOf[id]
+		n, read := 0, p.read
+		if known {
+			n = p.calls[msg]
+		}
+		p.mu.Unlock()
+		var quiet <-chan time.Time
+		if known {
+			quiet = time.After(batchQuiet)
+		}
+		select {
+		case <-read:
+		case <-quiet:
+			return n
+		case <-limit.C:
+			return n
+		case <-ctx.Done():
+			return n
+		}
+	}
 }
 
 // Close stops every process of claude.
@@ -203,7 +268,7 @@ func (c *claude) hookURL(ctx context.Context) (string, error) {
 
 // process runs one process of claude for one exchange.
 func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf, hook, dir, sid string, resume bool, lines []string, through uint64) (ccOutcome, error) {
-	p := &claudeProc{r: r, decisions: r.st.decisions, verdicts: map[string]fw.Decision{}}
+	p := newClaudeProc(r)
 	key := secret()
 	c.h.mu.Lock()
 	c.h.hooks[key] = p
@@ -530,6 +595,8 @@ func (m *ccMapper) line(ctx context.Context, line []byte) (*ccResult, error) {
 		return nil, nil
 	}
 	sub := ev.Parent != nil && *ev.Parent != ""
+	var calls []string
+	defer func() { m.p.saw(ev.Message.ID, calls) }()
 	switch ev.Type {
 	case "assistant":
 		blocks := ccBlocks(ev.Message.Content)
@@ -537,6 +604,7 @@ func (m *ccMapper) line(ctx context.Context, line []byte) (*ccResult, error) {
 		for _, b := range blocks {
 			if b.Type == fw.BlockToolUse {
 				tools = append(tools, b.Name)
+				calls = append(calls, b.ID)
 			}
 		}
 		if err := m.r.raw(ctx, "assistant", map[string]any{"message": ev.Message.ID, "stopReason": ev.Message.StopReason, "tools": tools, "subagent": sub}); err != nil {
@@ -809,6 +877,12 @@ func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) 
 		return "allow", ""
 	case fw.VerdictDeny:
 		return "deny", "denied by policy: " + v.Reason
+	}
+	// Claude ignores defer when one response makes several tool calls,
+	// and its own permission flow then decides the call: it runs a read
+	// inside the working directory without asking.
+	if p.batch(ctx, in.ToolUseID) > 1 {
+		return "deny", batchDenied
 	}
 	p.mu.Lock()
 	p.verdicts[in.ToolUseID] = v

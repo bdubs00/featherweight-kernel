@@ -376,3 +376,28 @@ func TestClaudeCodeBranchFails(t *testing.T) {
 		t.Fatalf("%d processes of claude", len(calls))
 	}
 }
+
+// TestClaudeCodeAskInABatch asks about two reads of one response. Claude
+// ignores defer for such a call, so the hook denies each one with a reason
+// that tells the model to make the call alone, and no approval waits.
+func TestClaudeCodeAskInABatch(t *testing.T) {
+	d := newDirs(t)
+	block := fakeClaude(t)
+	l := fw.NewMemLedger()
+	a := claudeAgent(t, d, block, l, &fw.Rules{Default: "allow", Ask: []string{"read"}})
+	r, err := a.Start(testCtx(t), "Make two reads")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateCompleted || r.Output != "Read both." {
+		t.Fatalf("run = %+v", r)
+	}
+	decisions := readFile(t, filepath.Join(d.home, "fake-decisions.jsonl"))
+	if strings.Count(decisions, `"decision": "deny"`) != 2 || strings.Count(decisions, batchDenied) != 2 {
+		t.Fatalf("decisions = %s", decisions)
+	}
+	if n := len(ofType(events(t, l, r.ID), fw.EvApprovalRequested)); n != 0 {
+		t.Fatalf("%d approvals", n)
+	}
+}

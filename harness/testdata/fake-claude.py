@@ -87,7 +87,26 @@ if resume and state.get("deferred"):
 for line in sys.stdin:
     msg = json.loads(line)
     text = msg["message"]["content"]
-    if "hello" in text:
+    if "two reads" in text:
+        # Two tool calls in one response, as Claude makes them at once.
+        calls = [("toolu_a", {"file_path": "a.txt"}), ("toolu_b", {"file_path": "b.txt"})]
+        for i, (tid, inp) in enumerate(calls):
+            out({"type": "assistant", "parent_tool_use_id": None,
+                 "message": {"id": "msg_r", "model": arg("--model"), "role": "assistant",
+                             "stop_reason": "tool_use" if i == len(calls) - 1 else None,
+                             "content": [{"type": "tool_use", "id": tid, "name": "Read", "input": inp}], "usage": usage}})
+        results = []
+        for tid, inp in calls:
+            decision, reason = ask(tid, "Read", inp)
+            with open(os.path.join(home, "fake-decisions.jsonl"), "a") as f:
+                f.write(json.dumps({"id": tid, "decision": decision, "reason": reason}) + "\n")
+            results.append({"type": "tool_result", "tool_use_id": tid, "content": reason or "contents", "is_error": decision != "allow"})
+        out({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": results}})
+        out({"type": "assistant", "parent_tool_use_id": None,
+             "message": {"id": "msg_r2", "model": arg("--model"), "role": "assistant", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "Read both."}], "usage": usage}})
+        result("Read both.")
+    elif "hello" in text:
         inp = {"file_path": "hello.txt", "content": "hello"}
         out({"type": "assistant", "parent_tool_use_id": None,
              "message": {"id": "msg_1", "model": arg("--model"), "role": "assistant", "stop_reason": None,
