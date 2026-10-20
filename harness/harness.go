@@ -206,6 +206,12 @@ func (h *host) Drive(ctx context.Context, hr *fw.Hosted) (bool, error) {
 		}
 		r.rescan()
 	}
+	if q := hr.Queued(); !r.st.terminal && q.Metadata[fw.MetaForkOf] != "" && r.st.session != "" && r.st.sessSeq <= q.Kept {
+		// The branch kept the session of its source. The harness holds one
+		// session for both runs, so the branch would drive the session of
+		// the source.
+		return true, r.fail(ctx, errBranch)
+	}
 	// A run that waits has nothing to do before the decision. A finished
 	// run has nothing left: a follow-up reopens it, so the run is then no
 	// longer terminal. A run that failed before the harness got its input
@@ -218,6 +224,9 @@ func (h *host) Drive(ctx context.Context, hr *fw.Hosted) (bool, error) {
 	}
 	return true, h.drv.drive(ctx, r)
 }
+
+// errBranch is the error of a branch of a run whose session started.
+const errBranch = "harness: a branch of a hosted run is not supported"
 
 // prepare creates the home of the harness for the tool user.
 func (h *host) prepare() error {

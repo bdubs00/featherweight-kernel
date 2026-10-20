@@ -402,3 +402,34 @@ func TestOpencodeFollowUpWithoutText(t *testing.T) {
 		t.Fatalf("prompts = %+v", f.prompts)
 	}
 }
+
+// TestOpencodeBranchFails branches a run whose session started: the
+// branch fails, and the session of the source gets no prompt from it.
+func TestOpencodeBranchFails(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, writeHello)
+	cfg := testConfig(t, d, ocBlock(d, f))
+	l := fw.NewMemLedger()
+	a := newAgent(t, cfg, l)
+	r, err := a.Start(testCtx(t), "Create hello.txt with the text hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, r.ID, terminal)
+	b, err := a.Fork(testCtx(t), r.ID, fw.ForkRequest{Input: "Do it again"})
+	if err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	br := waitState(t, a, b.ID, terminal)
+	if br.State != fw.StateFailed || br.Error != errBranch {
+		t.Fatalf("branch = %+v", br)
+	}
+	if n := len(ofType(events(t, l, b.ID), fw.EvError)); n != 1 {
+		t.Fatalf("%d fw.error events", n)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.prompts) != 1 {
+		t.Fatalf("prompts = %+v", f.prompts)
+	}
+}

@@ -339,3 +339,28 @@ exec sleep 30
 		t.Fatal("the agent did not close within 15 seconds")
 	}
 }
+
+// TestClaudeCodeBranchFails branches a run whose session started: the
+// branch fails and runs no claude --resume of the source session.
+func TestClaudeCodeBranchFails(t *testing.T) {
+	d := newDirs(t)
+	block := fakeClaude(t)
+	l := fw.NewMemLedger()
+	a := claudeAgent(t, d, block, l, nil)
+	r, err := a.Start(testCtx(t), "Create hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, r.ID, terminal)
+	b, err := a.Fork(testCtx(t), r.ID, fw.ForkRequest{Input: "Say it again"})
+	if err != nil {
+		t.Fatalf("fork: %v", err)
+	}
+	br := waitState(t, a, b.ID, terminal)
+	if br.State != fw.StateFailed || br.Error != errBranch {
+		t.Fatalf("branch = %+v", br)
+	}
+	if calls := fakeCalls(t, d.home); len(calls) != 1 {
+		t.Fatalf("%d processes of claude", len(calls))
+	}
+}

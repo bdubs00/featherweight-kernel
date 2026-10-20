@@ -64,6 +64,7 @@ type state struct {
 	started  bool // fw.run.started exists
 	hosted   bool // fw.harness.event exists: the run is a session
 	session  string
+	sessSeq  uint64 // the fw.harness.event that named the session
 	prompted uint64 // the latest message that the harness got
 	exchange uint64 // the latest fw.prompt or fw.answer
 	idle     uint64 // the latest fw.idle
@@ -179,7 +180,7 @@ func scan(evs []fw.Event) *state {
 			}
 			switch d.Kind {
 			case KindSession:
-				s.session = d.Session
+				s.session, s.sessSeq = d.Session, e.Seq
 			case KindPrompt:
 				s.prompted = max(s.prompted, d.Seq)
 				s.exchange = e.Seq
