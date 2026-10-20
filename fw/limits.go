@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,13 +18,24 @@ import (
 // cutNote is the text that marks a cut in a tool result.
 const cutNote = "\n\n[... %d bytes cut here; the result is limited to %d bytes. Ask for a smaller part, for example with a line range, a narrower command, or a filter ...]\n\n"
 
+// keptNote marks a cut in a tool result whose full text the kernel kept in
+// a file of the workspace of the run.
+const keptNote = "\n\n[... %d bytes cut here; the result is limited to %d bytes. The full result of %d bytes is in %s in the directory of this run. Read the rest with the files tool and a view_range ...]\n\n"
+
+// KeptResultsDir is the directory, under the directory of a run, where the
+// output limit keeps the full text of each result that it cuts, in a file
+// named after the call: <call id>.txt.
+const KeptResultsDir = ".fw-tool"
+
 // LimitTools returns middleware that applies limits to every call of the
 // wrapped tool. The limit of a tool comes from l.For with the tool name.
 //
 // An input larger than the input limit is refused with an error result that
 // the model reads. A text result larger than the output limit keeps its
 // head and its tail, with a note at the cut that says how many bytes were
-// cut. An image or a document in a result counts with its size and is
+// cut. In a run, the full text goes to KeptResultsDir/<call id>.txt in the
+// workspace of the run, with every secret replaced as in the ledger, and
+// the note names the file, so the model reads the rest with a tool. An image or a document in a result counts with its size and is
 // dropped with a note when it does not fit. A call that outlives the
 // timeout gets an error result, and the tool sees its context end.
 //
@@ -74,7 +86,7 @@ func (t *limitedTool) Call(ctx context.Context, input json.RawMessage) (ToolResu
 		return res, err
 	}
 	if n := t.limit.MaxOutputBytes; n > 0 {
-		res = truncateResult(res, n)
+		res = boundResult(res, n, keepFull(ctx))
 	}
 	return res, nil
 }
@@ -129,15 +141,63 @@ func (t *limitedContinuer) Continue(ctx context.Context, input json.RawMessage, 
 		return res, err
 	}
 	if n := t.limit.MaxOutputBytes; n > 0 {
-		res = truncateResult(res, n)
+		res = boundResult(res, n, keepFull(ctx))
 	}
 	return res, nil
+}
+
+// keepFull returns the function that keeps the full text of a cut result
+// in a file of the workspace of the call and returns its name, or "" when
+// it kept nothing. It is nil outside a run and for a call without a
+// workspace of its own, such as the continuation of a resumed call.
+func keepFull(ctx context.Context) func(text string) string {
+	info := RunInfoFrom(ctx)
+	id := fileSafe(info.CallID)
+	f, _ := ctx.Value(filesKey{}).(Files)
+	if info.RunID == "" || id == "" || f == nil {
+		return nil
+	}
+	return func(text string) string {
+		a := AgentFrom(ctx)
+		if a != nil {
+			text = a.Redact(text)
+		}
+		name := path.Join(KeptResultsDir, id+".txt")
+		if err := f.WriteFile(name, []byte(text)); err != nil {
+			if a != nil {
+				a.Logger().Warn("fw: the full result of a cut tool call is not kept", "run", info.RunID, "call", info.CallID, "error", err)
+			}
+			return ""
+		}
+		return name
+	}
+}
+
+// fileSafe returns s with every character that is not a letter, a digit,
+// a dash, or an underscore replaced by an underscore, or "" for an empty
+// or a long s.
+func fileSafe(s string) string {
+	if s == "" || len(s) > 128 {
+		return ""
+	}
+	b := []byte(s)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			b[i] = '_'
+		}
+	}
+	return string(b)
 }
 
 // truncateResult bounds a result to n bytes of content. Text blocks are cut
 // as one text, so the head and the tail of the whole result stay. Other
 // blocks count with their size and are dropped when they do not fit.
-func truncateResult(res ToolResult, n int) ToolResult {
+func truncateResult(res ToolResult, n int) ToolResult { return boundResult(res, n, nil) }
+
+// boundResult is truncateResult with keep, which keeps the full text of a
+// cut result and names the place for the note at the cut. A nil keep, or
+// one that returns "", gives the note of truncateResult.
+func boundResult(res ToolResult, n int, keep func(text string) string) ToolResult {
 	total := 0
 	for _, b := range res.Content {
 		total += blockSize(b)
@@ -178,7 +238,16 @@ func truncateResult(res ToolResult, n int) ToolResult {
 		text += strings.Join(notes, "\n")
 	}
 	if len(text) > rest {
-		text = CutMiddle(text, rest, n)
+		name := ""
+		if keep != nil {
+			name = keep(text)
+		}
+		if name == "" {
+			text = CutMiddle(text, rest, n)
+		} else {
+			size := len(text)
+			text = cutWith(text, rest, func(cut int) string { return fmt.Sprintf(keptNote, cut, n, size, name) })
+		}
 	}
 	if text != "" {
 		out = append(out, Text(text))
@@ -202,11 +271,16 @@ func blockSize(b Block) int {
 // keeps two thirds of the room and the tail keeps one third, both on rune
 // boundaries, with a note between them that names the cut and the limit.
 func CutMiddle(s string, n, limit int) string {
+	return cutWith(s, n, func(cut int) string { return fmt.Sprintf(cutNote, cut, limit) })
+}
+
+// cutWith is CutMiddle with the note that note returns for the number of
+// bytes cut.
+func cutWith(s string, n int, note func(cut int) string) string {
 	if len(s) <= n {
 		return s
 	}
-	note := fmt.Sprintf(cutNote, 0, limit)
-	room := n - len(note) - 8 // digits of the byte count
+	room := n - len(note(0)) - 8 // digits of the byte count
 	if room < 64 {
 		room = min(64, len(s))
 	}
@@ -223,7 +297,7 @@ func CutMiddle(s string, n, limit int) string {
 	if cut <= 0 {
 		return s
 	}
-	return s[:head] + fmt.Sprintf(cutNote, cut, limit) + s[start:]
+	return s[:head] + note(cut) + s[start:]
 }
 
 // WithToolTimeout returns a context that ends after d, and a cancel

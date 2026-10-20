@@ -116,12 +116,27 @@ func TestBashExitAndTimeout(t *testing.T) {
 
 func TestBashTruncates(t *testing.T) {
 	b, _ := newTestBash(t)
-	got := mustOK(t, call(t, context.Background(), b, `{"command":"head -c 3000000 /dev/zero | tr '\\0' a"}`))
-	if !strings.Contains(got, "[output truncated: 3000000 bytes") || !strings.HasSuffix(got, "exit code 0") {
+	got := mustOK(t, call(t, context.Background(), b, `{"command":"head -c 3000000 /dev/zero | tr '\\0' a; echo; echo VERDICT"}`))
+	if !strings.Contains(got, "[output truncated: 3000009 bytes") || !strings.HasSuffix(got, "VERDICT\n[output truncated: 3000009 bytes in total; the head and the tail are shown]\nexit code 0") {
 		t.Fatalf("truncation note missing: %q", got[max(0, len(got)-200):])
 	}
-	if len(got) > maxOutput+200 {
+	// The output limit of the configuration cuts the result later and
+	// keeps the full text in a file, so bash keeps more than the limit.
+	if len(got) > bashKeep+400 || len(got) < bashKeep-400 {
 		t.Fatalf("output is %d bytes", len(got))
+	}
+	// Without an output limit, bash keeps maxOutput itself.
+	cfg := fw.DefaultConfig()
+	cfg.Tools.Files.Root = t.TempDir()
+	cfg.Tools.Limits = fw.ToolLimits{}
+	tool, err := newBash(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tool.(*bashTool).Close()
+	got = mustOK(t, call(t, context.Background(), tool, `{"command":"head -c 3000000 /dev/zero | tr '\\0' a; echo; echo VERDICT"}`))
+	if len(got) > maxOutput+400 || !strings.Contains(got, "VERDICT") {
+		t.Fatalf("output without a limit is %d bytes: %q", len(got), got[max(0, len(got)-200):])
 	}
 }
 

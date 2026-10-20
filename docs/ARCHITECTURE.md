@@ -560,10 +560,12 @@ Every tool call goes through the limits middleware, `fw.LimitTools`. The configu
 | Limit | Default | Effect |
 |---|---|---|
 | `maxInputBytes` | 256 KB | A larger input does not run. The model reads an error that names the limit. |
-| `maxOutputBytes` | 100 KB | A larger result keeps its head and its tail. A note at the cut says how many bytes are gone. |
+| `maxOutputBytes` | 100 KB | A larger result keeps its head and its tail. A note at the cut says how many bytes are gone, and in a run it names the file with the full text. |
 | `timeout` | 10m | A call that runs longer gets an error result and its context ends |
 
 The limits apply to the built-in tools, to MCP tools, to A2A peers, and to tools passed as Go options alike. The reason is that the middleware wraps every tool outermost. The kernel records the bounded result in the ledger, so the history that the next model call sends is bounded too. An image or a document in a result counts with its size. If it does not fit, the kernel drops it with a note. The cut keeps two thirds of the room for the head and one third for the tail. The start of a listing and the end of a log therefore both survive.
+
+In a run, the kernel also writes the full text of a cut result to `.fw-tool/<call id>.txt` in the directory of the run, with every secret replaced as in the ledger, and records `fw.file.changed` for it. The note at the cut names the file and its size, so the model reads the part that it needs with the `files` tool and a line range. One careless command then costs the context window only the limit, and a lower limit, such as 16 KB for a local model, loses nothing. The `bash` tool keeps up to 1 MiB of the head of each stream and 32 KB of its tail when this limit applies to it, so the file holds the whole output of most commands. Without the limit, `bash` keeps 100 KB of the head and the tail itself. Without `tools.files.perRun`, the directory of the run is the root of the workspace, so a git checkout there wants `.fw-tool/` in its `.gitignore`.
 
 ### 7.8 Memory
 

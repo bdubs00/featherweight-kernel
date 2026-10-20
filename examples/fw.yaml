@@ -154,7 +154,7 @@ tools:
     scope: agent                # agent: notes per profile under <home>/memory/agents/<agent> | shared: one set under <home>/memory/shared
   limits:                       # every tool call, from the built-in tools, MCP servers, and Go options alike
     maxInputBytes: 262144       # a larger input does not run
-    maxOutputBytes: 102400      # a larger result keeps its head and its tail
+    maxOutputBytes: 102400      # a larger result keeps its head and its tail, and the full text goes to .fw-tool/<call id>.txt of the run; a local model wants less, such as 16384
     timeout: 10m
     perTool:                    # a tool name or a glob; an exact name wins; FW_TOOLS_LIMITS_PER_TOOL_<NAME>_MAX_OUTPUT_BYTES
       http:
