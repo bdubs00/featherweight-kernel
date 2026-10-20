@@ -84,11 +84,11 @@ func SniffMediaType(data []byte) string {
 	return mt
 }
 
-// keepFiles writes the bytes of each file block into the workspace. It
-// returns the blocks with references in place of the bytes, and the
-// changes to record. Only the kernel makes a reference, so a file block
-// without bytes is an error.
-func (a *Agent) keepFiles(blocks []Block) ([]Block, []FileChangedData, error) {
+// keepFiles writes the bytes of each file block into the directory dir of
+// the workspace (dirOf). It returns the blocks with references in place of
+// the bytes, and the changes to record. Only the kernel makes a reference,
+// so a file block without bytes is an error.
+func (a *Agent) keepFiles(dir string, blocks []Block) ([]Block, []FileChangedData, error) {
 	n, total := 0, 0
 	for _, b := range blocks {
 		if b.Type == BlockFile {
@@ -107,7 +107,10 @@ func (a *Agent) keepFiles(blocks []Block) ([]Block, []FileChangedData, error) {
 		return nil, nil, fmt.Errorf("%w: this agent has no workspace for files", ErrInvalidRequest)
 	}
 	var changes []FileChangedData
-	ws := a.files.bind(func(d FileChangedData) { changes = append(changes, d) })
+	ws, err := a.runWorkspace(dir, func(d FileChangedData) { changes = append(changes, d) })
+	if err != nil {
+		return nil, nil, err
+	}
 	out := make([]Block, 0, len(blocks))
 	for _, b := range blocks {
 		if b.Type != BlockFile {
@@ -167,7 +170,7 @@ func attach(ws *workspace, name string, data []byte) (FileRef, bool, error) {
 		if err != nil {
 			return FileRef{}, false, err
 		}
-		ref.Path = real
+		ref.Path = ws.full(real)
 		return ref, info != nil, nil
 	}
 	return FileRef{}, false, fmt.Errorf("%w: 100 other files have this name", fs.ErrExist)
@@ -216,9 +219,10 @@ func cleanFileName(name string) string {
 
 // readFiles returns msgs with each file block replaced by what the model
 // reads: the bytes for a media type in types, the text of a small text
-// file, or a note. A label first names the file and its path, so the
-// agent can open it with a tool. It copies only the messages that change.
-func (a *Agent) readFiles(msgs []Message, types []string) []Message {
+// file, or a note. A label first names the file and its path in the
+// directory dir of the run, so the agent can open it with a tool. It copies
+// only the messages that change.
+func (a *Agent) readFiles(msgs []Message, types []string, dir string) []Message {
 	var out []Message
 	for i, m := range msgs {
 		if !slices.ContainsFunc(m.Content, func(b Block) bool { return b.Type == BlockFile }) {
@@ -233,7 +237,7 @@ func (a *Agent) readFiles(msgs []Message, types []string) []Message {
 				content = append(content, b)
 				continue
 			}
-			content = append(content, a.fileBlocks(*b.File, types)...)
+			content = append(content, a.fileBlocks(*b.File, types, dir)...)
 		}
 		out[i] = Message{Role: m.Role, Content: content}
 	}
@@ -245,8 +249,8 @@ func (a *Agent) readFiles(msgs []Message, types []string) []Message {
 
 // fileBlocks reads one attachment for a model request. A file that is gone
 // or that cannot be read becomes a note, and never fails the run.
-func (a *Agent) fileBlocks(f FileRef, types []string) []Block {
-	label := fmt.Sprintf("The person attached %q (%s, %s). It is in the workspace at %s.", f.Name, f.MediaType, sizeWords(f.Size), f.Path)
+func (a *Agent) fileBlocks(f FileRef, types []string, dir string) []Block {
+	label := fmt.Sprintf("The person attached %q (%s, %s). It is in the workspace at %s.", f.Name, f.MediaType, sizeWords(f.Size), shown(f.Path, dir))
 	if a.files == nil {
 		return []Block{Text(label + " The workspace is not available.")}
 	}

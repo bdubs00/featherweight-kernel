@@ -45,6 +45,7 @@ func stashExample(t *testing.T) {
 	tools := &ax.Workspace{Kind: ax.KindWorkspace, Metadata: ax.ObjectMeta{Name: "tools"}}
 	code := &ax.Workspace{Kind: ax.KindWorkspace, Metadata: ax.ObjectMeta{Name: "code"}, Spec: ax.WorkspaceSpec{
 		Files: []ax.File{{Path: "AGENTS.md", Content: "# Rules\n- one\n"}},
+		Git:   []ax.GitRepo{{Name: "app", Repo: "https://x:ghp_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee@github.com/o/app.git"}},
 	}}
 	ax.Stash(task, []*ax.Workspace{tools, code})
 	t.Cleanup(func() { ax.Stash(nil, nil) })
@@ -129,6 +130,11 @@ func TestWorkspacesEndpoint(t *testing.T) {
 	}
 	if wss[0].Spec.Files[0].Content != "# Rules\n- one\n" {
 		t.Errorf("file content = %q", wss[0].Spec.Files[0].Content)
+	}
+	// A tool process reaches the endpoint, so a token in a clone URL stays
+	// out of the answer.
+	if strings.Contains(body, "ghp_") || wss[0].Spec.Git[0].Repo != "https://***@github.com/o/app.git" {
+		t.Errorf("repo = %q", wss[0].Spec.Git[0].Repo)
 	}
 }
 

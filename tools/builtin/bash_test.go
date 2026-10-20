@@ -229,3 +229,24 @@ func TestBashShellPerRun(t *testing.T) {
 		t.Fatalf("a call after Close = %+v, %v", res, err)
 	}
 }
+
+// The shell gets no manifest of ax and no variable that holds a secret,
+// so a model that runs env finds no credential of fw (section 7.2).
+func TestBashEnvHidesSecrets(t *testing.T) {
+	t.Setenv("AX_TASK_YAML", "spec: {}")
+	t.Setenv("AX_WORKSPACES_YAML", "spec: {}")
+	t.Setenv("GITHUB_TOKEN", "ghp_cccccccccccccccccccccccccccccccccccc")
+	t.Setenv("FW_API_TOKEN_FILE", "/run/secrets/token")
+	t.Setenv("DATABASE_URL", "postgres://app:s3cretpassw0rd@db:5432/app")
+	t.Setenv("FW_TEST_PLAIN", "visible")
+	b, _ := newTestBash(t)
+	got := mustOK(t, call(t, context.Background(), b, `{"command":"env"}`))
+	for _, name := range []string{"AX_TASK_YAML=", "AX_WORKSPACES_YAML=", "GITHUB_TOKEN=", "FW_API_TOKEN_FILE=", "DATABASE_URL="} {
+		if strings.Contains(got, "\n"+name) || strings.HasPrefix(got, name) {
+			t.Errorf("the shell got %s", strings.TrimSuffix(name, "="))
+		}
+	}
+	if !strings.Contains(got, "FW_TEST_PLAIN=visible") {
+		t.Errorf("the shell lost a plain variable:\n%s", got)
+	}
+}

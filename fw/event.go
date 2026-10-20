@@ -159,6 +159,10 @@ type RunQueuedData struct {
 	// older kernel has none, and such a run reads its named profile at each
 	// step.
 	Resolved *ResolvedProfile `json:"resolved,omitempty"`
+	// FilesRoot is RunRequest.FilesRoot: the tools of the run work in the
+	// root of the files tool, also with tools.files.perRun. It counts on a
+	// run without a parent that is not a branch.
+	FilesRoot bool `json:"filesRoot,omitempty"`
 }
 
 // ResolvedProfile is the configuration of a run that the kernel resolves

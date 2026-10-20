@@ -173,6 +173,7 @@ spec:
       content: |
         auth: {mode: none}
         a2a: {name: tester}
+        tools: {user: none}     # as root, the boot takes the tool user of the images
     - path: .fw/agents/helper.yaml
       content: |
         system: You help.

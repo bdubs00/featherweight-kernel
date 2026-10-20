@@ -44,7 +44,7 @@ tls:                            # TLS on the listener; the default is plain HTTP
 
 auth:
   mode: oidc,spiffe,token       # one mode, or several tried in order: token | none | oidc | spiffe. "none" must be explicit; the default is token.
-  tokenEnv: FW_API_TOKEN        # token: the secret that holds the bearer token
+  tokenEnv: FW_API_TOKEN        # token: the secret that holds the bearer token; FW_API_TOKEN_FILE names a file that holds it instead, mode 0600 (docs/ARCHITECTURE.md section 7.12)
   oidc:                         # oidc: a bearer token from an OpenID Connect issuer; its discovery document gives the keys
     issuer: https://idp.example.com   # an https:// URL; insecure: true allows http:// for a test
     audience: [fw]              # accepted aud claims: a client id, or the public URL of this server
@@ -134,15 +134,19 @@ tokens:                         # the tokens of people, from a broker outside th
 
 tools:
   builtin: [bash, files, http, memory, skill, clock, ask_user, spawn_task, await_task]   # the workbench adds propose_agent
+  user: ""                      # the user of bash and of the stdio MCP servers: a name or uid, with :group or :gid; "none" is the user of fw.
+                                # Empty is 65532 (nonroot of the images) under ax with fw as root, else the user of fw. FW_TOOLS_USER (section 7.12)
   files:                        # the workspace of the files tool and bash (section 7.9)
     root: /workspace
     deny: [.env, ".env.*", "*.pem", "*.key", .netrc, "**/.git/config"]   # never read or written; .gitignore patterns
     readOnly: [.git]            # read, never written
     maxFileBytes: 8388608       # the largest file that is read or written
+    perRun: null                # true: each run works in <root>/runs/<run id>, the root of files and the start of bash (FW_RUN_DIR in the shell);
+                                # a child run and a branch use the directory of their tree. null (unset) is on under ax and off elsewhere. FW_TOOLS_FILES_PER_RUN
   http:
     allow: ["https://api.github.com/*"]
   bash:
-    env:                        # variables that every command starts with; values resolve through Secrets; FW_TOOLS_BASH_ENV_<NAME>
+    env:                        # variables that every command starts with, on top of the environment of a tool process, which holds no secret of fw (section 7.12); FW_TOOLS_BASH_ENV_<NAME>
       NATS_URL: ${NATS_URL:-nats://nats:4222}
     timeout: 0s                 # one command; 0 leaves the limit to tools.limits
   memory:

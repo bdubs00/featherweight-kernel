@@ -95,6 +95,9 @@ func isSecretName(name string) bool {
 type redactor struct {
 	mu     sync.RWMutex
 	values []string // longest first, so a value that holds another goes first
+	// resolved holds the values that fw resolved through Secrets, a subset
+	// of values. ToolEnv keeps them from a tool under any name.
+	resolved []string
 }
 
 // newRedactor returns a redactor that knows the secret values of the
@@ -122,6 +125,40 @@ func (r *redactor) add(v string) {
 	}
 	r.values = append(r.values, v)
 	slices.SortFunc(r.values, func(a, b string) int { return len(b) - len(a) })
+}
+
+// addResolved records a value that fw resolved through Secrets.
+func (r *redactor) addResolved(v string) {
+	r.add(v)
+	v = strings.TrimSpace(v)
+	if len(v) < minSecretLen {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !slices.Contains(r.resolved, v) {
+		r.resolved = append(r.resolved, v)
+	}
+}
+
+// hasSecret reports whether s holds a secret: a value that the redactor
+// knows, or text with the shape of a secret.
+func (r *redactor) hasSecret(s string) bool { return r != nil && r.text(s) != s }
+
+// hasResolved reports whether s holds a value that fw resolved through
+// Secrets.
+func (r *redactor) hasResolved(s string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, v := range r.resolved {
+		if strings.Contains(s, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // text returns s with every secret replaced.
@@ -329,7 +366,7 @@ type recordSecrets struct {
 func (s recordSecrets) Get(ctx context.Context, name string) (string, error) {
 	v, err := s.Secrets.Get(ctx, name)
 	if err == nil {
-		s.r.add(v)
+		s.r.addResolved(v)
 	}
 	return v, err
 }

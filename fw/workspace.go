@@ -25,6 +25,10 @@ type workspace struct {
 	readOnly []string
 	max      int64
 	emit     func(FileChangedData) // nil outside a tool call
+	// prefix is the directory of inner under the workspace of the agent,
+	// such as runs/<id> for the directory of a run (sub), or "". A change
+	// records its path under the workspace of the agent.
+	prefix string
 }
 
 var _ Files = (*workspace)(nil)
@@ -246,9 +250,14 @@ func (w *workspace) sum(real string) string {
 }
 
 func (w *workspace) record(d FileChangedData) {
-	if w.emit != nil {
-		w.emit(d)
+	if w.emit == nil {
+		return
 	}
+	d.Path = w.full(d.Path)
+	if d.OldPath != "" {
+		d.OldPath = w.full(d.OldPath)
+	}
+	w.emit(d)
 }
 
 // matchAny reports whether a pattern of the list matches the real name or

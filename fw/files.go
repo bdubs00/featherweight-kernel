@@ -59,10 +59,22 @@ func DirFiles(dir string) (Files, error) {
 }
 
 // dirFiles is a directory on the local disk.
-type dirFiles struct{ dir string }
+type dirFiles struct {
+	dir string
+	// sub is a directory under dir, with slashes, that is the root of the
+	// store, such as the directory of a run, or "". Each operation opens
+	// dir and then sub inside it, so a link at sub cannot lead outside dir.
+	sub string
+	// owner gets every file and directory that a write creates, when it is
+	// set: the tool user, because the kernel writes as fw (section 7.12).
+	owner *fileOwner
+}
+
+// fileOwner is the owner of the new files of a store.
+type fileOwner struct{ uid, gid int }
 
 // Dir returns the absolute directory.
-func (d *dirFiles) Dir() string { return d.dir }
+func (d *dirFiles) Dir() string { return filepath.Join(d.dir, filepath.FromSlash(d.sub)) }
 
 // root opens the directory and returns the local form of name.
 func (d *dirFiles) root(op, name string) (*os.Root, string, error) {
@@ -74,7 +86,64 @@ func (d *dirFiles) root(op, name string) (*os.Root, string, error) {
 	if err != nil {
 		return nil, "", &fs.PathError{Op: op, Path: name, Err: errors.Unwrap(err)}
 	}
+	if d.sub != "" {
+		sr, err := r.OpenRoot(filepath.FromSlash(d.sub))
+		r.Close()
+		if err != nil {
+			return nil, "", &fs.PathError{Op: op, Path: name, Err: errors.Unwrap(err)}
+		}
+		r = sr
+	}
 	return r, local, nil
+}
+
+// makeSub creates the directory sub under the store, one part at a time,
+// and refuses a part that is not a directory or that is a symbolic link.
+// With a tool user u, each part belongs to fw with the group of u: the
+// parts above the last one are sticky (guardMode) and the last one, the
+// directory of a run, has mode 0775. The tool user therefore works in the
+// directory of a run but can never rename it or put a link in its place,
+// and a part that belongs to the tool user is refused (section 7.12).
+func (d *dirFiles) makeSub(sub string, u *ToolUser) error {
+	if err := os.MkdirAll(d.dir, 0o755); err != nil {
+		return err
+	}
+	r, err := os.OpenRoot(d.dir)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	parts := strings.Split(sub, "/")
+	cur := ""
+	for i, part := range parts {
+		cur = filepath.Join(cur, part)
+		info, err := r.Lstat(cur)
+		made := false
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := r.Mkdir(cur, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+				return err
+			}
+			made = true
+			info, err = r.Lstat(cur)
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is not a directory", filepath.ToSlash(cur))
+		}
+		if u == nil {
+			continue
+		}
+		mode := fs.FileMode(0o775)
+		if i < len(parts)-1 {
+			mode = guardMode
+		}
+		if err := ownSub(r, cur, info, u, mode, made); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // localName checks a name and returns it with the separator of the system.
@@ -134,16 +203,61 @@ func (d *dirFiles) WriteFile(name string, data []byte) error {
 	defer r.Close()
 	mode := d.mode()
 	if dir := filepath.Dir(local); dir != "." {
-		if err := r.MkdirAll(dir, mode); err != nil {
+		if err := d.mkdirAll(r, dir, mode); err != nil {
 			return err
 		}
 	}
-	return r.WriteFile(local, data, mode&^0o111)
+	if d.owner == nil {
+		return r.WriteFile(local, data, mode&^0o111)
+	}
+	// A new file goes to the owner through its descriptor, so a link that
+	// appears at the name meanwhile changes nothing.
+	f, err := r.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode&^0o111)
+	switch {
+	case err == nil:
+		if err := f.Chown(d.owner.uid, d.owner.gid); err != nil {
+			f.Close()
+			return err
+		}
+	case errors.Is(err, fs.ErrExist):
+		if f, err = r.OpenFile(local, os.O_WRONLY|os.O_TRUNC, 0); err != nil {
+			return err
+		}
+	default:
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// mkdirAll creates the directory dir under r and its parents. Each
+// directory that it creates goes to the owner of the store.
+func (d *dirFiles) mkdirAll(r *os.Root, dir string, mode fs.FileMode) error {
+	if d.owner == nil {
+		return r.MkdirAll(dir, mode)
+	}
+	cur := ""
+	for _, part := range strings.Split(filepath.ToSlash(dir), "/") {
+		cur = filepath.Join(cur, part)
+		err := r.Mkdir(cur, mode)
+		switch {
+		case err == nil:
+			if err := r.Lchown(cur, d.owner.uid, d.owner.gid); err != nil {
+				return err
+			}
+		case !errors.Is(err, fs.ErrExist):
+			return err
+		}
+	}
+	return nil
 }
 
 // mode returns the permissions of the directory, or 0755.
 func (d *dirFiles) mode() fs.FileMode {
-	if info, err := os.Stat(d.dir); err == nil {
+	if info, err := os.Stat(d.Dir()); err == nil {
 		return info.Mode().Perm()
 	}
 	return 0o755
@@ -186,7 +300,7 @@ func (d *dirFiles) Rename(oldname, newname string) error {
 		return &fs.PathError{Op: "rename", Path: newname, Err: fs.ErrExist}
 	}
 	if dir := filepath.Dir(newLocal); dir != "." {
-		if err := r.MkdirAll(dir, d.mode()); err != nil {
+		if err := d.mkdirAll(r, dir, d.mode()); err != nil {
 			return err
 		}
 	}
@@ -200,7 +314,7 @@ func (d *dirFiles) RealName(name string) (string, error) {
 	if !fs.ValidPath(name) {
 		return "", &fs.PathError{Op: "resolve", Path: name, Err: fs.ErrInvalid}
 	}
-	real := evalExisting(d.dir)
+	real := evalExisting(d.Dir())
 	rel, err := filepath.Rel(real, evalExisting(filepath.Join(real, filepath.FromSlash(name))))
 	if err != nil || !filepath.IsLocal(rel) {
 		return "", &fs.PathError{Op: "resolve", Path: name, Err: ErrFileOutside}

@@ -40,6 +40,10 @@ spec:
           builtin: [bash, files, http]
           files:
             root: /workspace
+            # Every run reviews the checkout of app/ that this Workspace
+            # prepares, so the runs share the root. Under ax the default
+            # gives each run an empty directory of its own instead.
+            perRun: false
     - path: .fw/agents/reviewer.yaml
       content: |
         name: reviewer
@@ -85,6 +89,8 @@ spec:
   workspaces:
     - name: reviewer-ws
       path: /workspace
+      # The goal runs its tools as the tool user nonroot, which owns /workspace/app but cannot
+      # install system packages; put those in an image built FROM the toolbox image.
       goal: "Install the toolchain that the repository under app/ needs and run its test suite once."
   debug: false
 ---

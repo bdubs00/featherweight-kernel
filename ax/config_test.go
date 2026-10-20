@@ -162,3 +162,89 @@ func TestIdentity(t *testing.T) {
 		t.Errorf("Identity(nil) = %q, %q", a, n)
 	}
 }
+
+// Under ax a process that runs as root starts its tools as the tool user
+// of the images, and the tool user owns the volume and every binding.
+func TestApplyToConfigToolUser(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	bindings := []Binding{{Ref: WorkspaceRef{Name: "a"}, Path: "/workspace/a"}, {Ref: WorkspaceRef{Name: "b"}, Path: "/src/b"}}
+	cfg := fw.DefaultConfig()
+	ApplyToConfig(cfg, &Task{}, bindings)
+	want := ""
+	if os.Geteuid() == 0 {
+		want = DefaultToolUser
+	}
+	if cfg.Tools.User != want {
+		t.Errorf("Tools.User = %q, want %q", cfg.Tools.User, want)
+	}
+	if !reflect.DeepEqual(cfg.Workspaces, []string{DefaultWorkspacePath, "/workspace/a", "/src/b"}) {
+		t.Errorf("Workspaces = %v", cfg.Workspaces)
+	}
+
+	cfg = fw.DefaultConfig()
+	cfg.Tools.User = fw.ToolUserNone
+	ApplyToConfig(cfg, &Task{}, bindings)
+	if cfg.Tools.User != fw.ToolUserNone {
+		t.Errorf("an explicit tools.user became %q", cfg.Tools.User)
+	}
+}
+
+// Under ax each run gets a directory of its own unless the configuration
+// says otherwise.
+func TestApplyToConfigPerRun(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	cfg := fw.DefaultConfig()
+	ApplyToConfig(cfg, &Task{}, nil)
+	if !cfg.Tools.Files.PerRunOn() {
+		t.Error("perRun is off under ax")
+	}
+	off := false
+	cfg = fw.DefaultConfig()
+	cfg.Tools.Files.PerRun = &off
+	ApplyToConfig(cfg, &Task{}, nil)
+	if cfg.Tools.Files.PerRunOn() {
+		t.Error("an explicit perRun: false became true")
+	}
+}
+
+// The goal of a binding prepares the workspace that every run shares, so
+// its run works in the root of the files tool, also with perRun.
+func TestBootstrapWorksInTheRoot(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	cfg := fw.DefaultConfig()
+	cfg.Home = t.TempDir()
+	cfg.Tools.Files.Root = t.TempDir()
+	cfg.Tools.User = fw.ToolUserNone
+	ApplyToConfig(cfg, &Task{}, nil)
+	ledger := fw.NewMemLedger()
+	a, err := fw.New(fw.WithConfig(cfg), fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithLedger(ledger), fw.WithBus(fw.NewMemBus()),
+		fw.WithModel(fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
+			return &fw.Response{Content: []fw.Block{fw.Text("ready")}, StopReason: fw.StopEndTurn}, nil
+		}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close(context.Background()) })
+	if err := Bootstrap(context.Background(), a, "install", cfg.Tools.Files.Root, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := a.List(context.Background())
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs = %v, %v", runs, err)
+	}
+	var q fw.RunQueuedData
+	for e, err := range ledger.Read(context.Background(), runs[0].ID, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Type == fw.EvRunQueued {
+			if err := e.Decode(&q); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if !q.FilesRoot || q.Agent != BootstrapProfile {
+		t.Fatalf("queued = %+v", q)
+	}
+}

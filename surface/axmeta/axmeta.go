@@ -5,7 +5,8 @@
 // The endpoints carry no authentication. Only a process inside the sandbox
 // reaches them, through the URL in AX_METADATA_URL. They serve the manifests
 // that ax.Stash recorded, with the values of secret spec.env entries replaced
-// by "***".
+// by "***" and the user information of each spec.git URL replaced, because
+// a tool process inside the sandbox reaches them too.
 package axmeta
 
 import (
@@ -95,7 +96,7 @@ func serveWorkspaces(w http.ResponseWriter, _ *http.Request) {
 	var docs []any
 	for _, b := range ax.Bindings(task, workspaces) {
 		if b.Workspace != nil {
-			docs = append(docs, b.Workspace)
+			docs = append(docs, ax.RedactedWorkspace(b.Workspace))
 		}
 	}
 	if len(docs) == 0 {

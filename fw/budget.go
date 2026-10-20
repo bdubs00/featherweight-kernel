@@ -252,7 +252,7 @@ func (a *Agent) stepReport(ctx context.Context, rs *runState, c *cursor, n int) 
 		}
 	}
 	h, tokens := rs.historyLocked(extra)
-	req.Messages = a.readFiles(h.Messages, MediaTypesOf(model))
+	req.Messages = a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs))
 	_, err = a.emitLocked(ctx, rs, EvModelRequested, ModelRequestedData{
 		Provider:             provider,
 		Model:                name,

@@ -95,6 +95,10 @@ func TestEnvOverrides(t *testing.T) {
 			return []int{c.Budget.MaxToolCalls, c.Budget.MaxCallsPerTurn, c.Budget.MaxRepeats}
 		}, []int{9, 3, 2}},
 		{"bash timeout", map[string]string{"FW_TOOLS_BASH_TIMEOUT": "90s"}, func(c *fw.Config) any { return c.Tools.Bash.Timeout }, 90 * time.Second},
+		{"tool user", map[string]string{"FW_TOOLS_USER": "65532:65532"}, func(c *fw.Config) any { return c.Tools.User }, "65532:65532"},
+		{"files per run", map[string]string{"FW_TOOLS_FILES_PER_RUN": "true"}, func(c *fw.Config) any { return c.Tools.Files.PerRunOn() }, true},
+		{"files per run off", map[string]string{"FW_TOOLS_FILES_PER_RUN": "false"}, func(c *fw.Config) any { return c.Tools.Files.PerRun != nil && !*c.Tools.Files.PerRun }, true},
+		{"files per run unset", map[string]string{"FW_BUS_URL": "x"}, func(c *fw.Config) any { return c.Tools.Files.PerRun == nil }, true},
 		{"value is not expanded", map[string]string{"FW_BUS_URL": "${NATS_URL}", "NATS_URL": "nats://x"}, func(c *fw.Config) any { return c.Bus.URL }, "${NATS_URL}"},
 		{"time zone", map[string]string{"FW_TIME_ZONE": "America/Chicago"}, func(c *fw.Config) any { return c.Time.Zone }, "America/Chicago"},
 		{"time note after", map[string]string{"FW_TIME_NOTE_AFTER": "30m"}, func(c *fw.Config) any { return c.Time.NoteAfter }, 30 * time.Minute},
@@ -133,6 +137,7 @@ func TestEnvNames(t *testing.T) {
 	for _, want := range []string{
 		"FW_BUS_URL", "FW_TOOLS_SEARCH_THRESHOLD", "FW_AUTH_MODE", "FW_MCP_PATH", "FW_TELEMETRY_LOG", "FW_MODEL", "FW_HOME", "FW_MAX_RUNS", "FW_BUDGET_MAX_COST_USD",
 		"FW_TOOLS_LIMITS_TIMEOUT", "FW_TOOLS_BASH_TIMEOUT", "FW_TOOLS_SKILLS", "FW_SPAWN_MAX_DEPTH", "FW_BUDGET_MAX_REPEATS",
+		"FW_TOOLS_USER", "FW_TOOLS_FILES_PER_RUN",
 		"FW_TIME_ZONE", "FW_TIME_NOTE_AFTER", "FW_AGENTS_<NAME>_TIME_ZONE",
 		"FW_POLICY_EXTERNAL_MCP", "FW_POLICY_EXTERNAL_TOOL", "FW_POLICY_EXTERNAL_BUS", "FW_POLICY_EXTERNAL_TIMEOUT",
 		"FW_BUS_INTAKE_RETRIES", "FW_BUS_DEAD_LETTER",

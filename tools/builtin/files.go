@@ -79,8 +79,9 @@ var filesCommands = []string{"view", "create", "str_replace", "insert"}
 // checks every name and records every change. own serves a call outside
 // an agent, such as a test.
 type filesTool struct {
-	ed  *editor
-	own fw.Files
+	ed   *editor
+	own  fw.Files
+	root string // the absolute root of own
 }
 
 var _ fw.Resolver = (*filesTool)(nil)
@@ -102,12 +103,27 @@ func newFiles(cfg *fw.Config) (fw.Tool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("builtin: files: %w", err)
 	}
-	return &filesTool{own: own, ed: &editor{
+	return &filesTool{own: own, root: abs, ed: filesEditor(abs)}, nil
+}
+
+// filesEditor returns the editor of the files tool on the directory dir.
+func filesEditor(dir string) *editor {
+	return &editor{
 		tool:     "files",
 		commands: filesCommands,
-		name:     rootName(abs),
-		show:     func(name string) string { return filepath.Join(abs, filepath.FromSlash(name)) },
-	}}, nil
+		name:     rootName(dir),
+		show:     func(name string) string { return filepath.Join(dir, filepath.FromSlash(name)) },
+	}
+}
+
+// editor returns the editor of a call: on the directory of the run with
+// tools.files.perRun, which the kernel names in the run info next to the
+// workspace of that directory, and on the root otherwise.
+func (t *filesTool) editor(ctx context.Context) *editor {
+	if dir := fw.RunInfoFrom(ctx).Dir; dir != "" && dir != t.root && fw.FilesFrom(ctx) != nil {
+		return filesEditor(dir)
+	}
+	return t.ed
 }
 
 // Spec implements fw.Tool.
@@ -127,7 +143,7 @@ func (t *filesTool) files(ctx context.Context) fw.Files {
 
 // Call implements fw.Tool.
 func (t *filesTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResult, error) {
-	return t.ed.call(ctx, t.files(ctx), input)
+	return t.editor(ctx).call(ctx, t.files(ctx), input)
 }
 
 // Resolve implements fw.Resolver. It names the file of a call by its real
@@ -147,7 +163,7 @@ func (t *filesTool) Resolve(ctx context.Context, input json.RawMessage) (json.Ra
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, err
 	}
-	name, err := t.ed.name(p)
+	name, err := t.editor(ctx).name(p)
 	if err != nil {
 		return nil, err
 	}

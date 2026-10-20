@@ -47,6 +47,11 @@ type Config struct {
 	Telemetry  TelemetryConfig           `yaml:"telemetry" json:"telemetry"`
 	MaxRuns    int                       `yaml:"maxRuns" json:"maxRuns"`
 	Version    string                    `yaml:"-" json:"version,omitempty"`
+	// Workspaces lists more directories of the workspace than the root of
+	// the files tool, such as the volume and the bindings of an ax Task,
+	// which the package ax sets. With tools.user, the tool user owns them
+	// as it owns the root (section 7.12).
+	Workspaces []string `yaml:"-" json:"-"`
 	// ConfigFile is the configuration file that the loader read, or "".
 	ConfigFile string `yaml:"-" json:"-"`
 	// FileProfiles names the profiles that the loader read from the files
@@ -276,6 +281,12 @@ func (c *Config) RunSlots() int {
 // hold skills (see LoadSkills); the default is the skills directory under
 // the home directory.
 type ToolsConfig struct {
+	// User is the user that runs the processes of tools, such as the shell
+	// of bash and a stdio MCP server: a name or a uid, with an optional
+	// ":group" or ":gid" (LookupToolUser). Empty is the default of the
+	// environment: the user of fw, or 65532 under ax, which the package ax
+	// sets. "none" runs them as the user of fw.
+	User            string            `yaml:"user,omitempty" json:"user,omitempty"`
 	Builtin         []string          `yaml:"builtin" json:"builtin"`
 	Files           FilesToolConfig   `yaml:"files" json:"files"`
 	HTTP            HTTPToolConfig    `yaml:"http" json:"http"`
@@ -298,7 +309,20 @@ type FilesToolConfig struct {
 	Deny         []string `yaml:"deny" json:"deny"`
 	ReadOnly     []string `yaml:"readOnly" json:"readOnly"`
 	MaxFileBytes int64    `yaml:"maxFileBytes" json:"maxFileBytes"`
+	// PerRun gives each run a directory of its own, <root>/runs/<run id>,
+	// as the root of the files tool and the directory where bash starts
+	// (section 7.9). Unset is the default of the environment: on under
+	// ax, which the package ax sets, and off elsewhere.
+	PerRun *bool `yaml:"perRun,omitempty" json:"perRun,omitempty"`
 }
+
+// RunsDir is the directory under the root of the files tool that holds the
+// directory of each run with tools.files.perRun.
+const RunsDir = "runs"
+
+// PerRunOn reports whether each run gets a directory of its own
+// (tools.files.perRun).
+func (c FilesToolConfig) PerRunOn() bool { return c.PerRun != nil && *c.PerRun }
 
 // defaultDeny is the default of tools.files.deny: files that usually hold
 // a secret.

@@ -279,6 +279,16 @@ func (g *globals) bootAX(ctx context.Context, b *axBoot, listen string) error {
 		// Prepare still prepared the other bindings; serve what is there.
 		log.Error("fw: ax boot: prepare workspaces", "error", err)
 	}
+	for _, r := range b.results {
+		if r.FirstRun {
+			// The new files belong to fw, so the tool user gets the
+			// workspace again (docs/ARCHITECTURE.md section 7.12).
+			if err := os.Remove(fw.ToolTreeMarker(home)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Warn("fw: ax boot: remove the marker of the tool user", "error", err)
+			}
+			break
+		}
+	}
 
 	path := g.config
 	if path == "" {

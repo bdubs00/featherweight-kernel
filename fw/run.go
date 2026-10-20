@@ -408,6 +408,11 @@ type RunRequest struct {
 	Parent         string            `json:"parent,omitempty"`
 	IdempotencyKey string            `json:"idempotencyKey,omitempty"`
 	Files          []Block           `json:"files,omitempty"` // attachments of the first message; see Attachment
+	// FilesRoot keeps the tools of the run in the root of the files tool
+	// when tools.files.perRun gives every other run a directory of its
+	// own, as the bootstrap of an ax workspace needs. Only a Go caller sets
+	// it (InFilesRoot); no surface does.
+	FilesRoot bool `json:"-"`
 }
 
 // RunOption changes a RunRequest.
@@ -433,6 +438,10 @@ func WithPrincipalName(p string) RunOption { return func(r *RunRequest) { r.Prin
 
 // WithParent records the parent run.
 func WithParent(id string) RunOption { return func(r *RunRequest) { r.Parent = id } }
+
+// InFilesRoot keeps the tools of the run in the root of the files tool,
+// also with tools.files.perRun (RunRequest.FilesRoot).
+func InFilesRoot() RunOption { return func(r *RunRequest) { r.FilesRoot = true } }
 
 // MetaTitle is the metadata key that sets the title of a run. A surface
 // that takes a title from a person puts it here.
