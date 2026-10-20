@@ -60,6 +60,10 @@ type RunInfo struct {
 	// KindUser. A tool that acts for a person reads both (see PersonTokens).
 	Principal     string
 	PrincipalKind string
+	// Dir is the absolute directory where the tools of the run work: the
+	// root of the files tool, or the directory of the run with
+	// tools.files.perRun (section 7.9). bash starts there.
+	Dir string
 }
 
 type runKey struct{}

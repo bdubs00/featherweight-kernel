@@ -65,6 +65,9 @@ func BootstrapTimeout() time.Duration {
 //     own user and logs a warning.
 //   - Workspaces holds /workspace and the path of each binding, which the
 //     tool user owns.
+//   - Tools.Files.PerRun is true when it is unset: each run gets a
+//     directory of its own under the root of the files tool, because the
+//     runs of a Task, of several people, follow one another on one volume.
 //   - Every spec.mcp.servers entry joins Tools.MCP unless an entry with the
 //     same name exists. The fw.yaml entry wins. spec.mcp.registries entries
 //     are logged and skipped.
@@ -93,6 +96,10 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 		} else {
 			log.Warn("ax: fw does not run as root, so the processes of tools run as the user of fw and can read its state; run fw as root for tools.user", "uid", os.Geteuid())
 		}
+	}
+	if cfg.Tools.Files.PerRun == nil {
+		on := true
+		cfg.Tools.Files.PerRun = &on
 	}
 	for _, p := range append([]string{DefaultWorkspacePath}, bindingPaths(bindings)...) {
 		if !slices.Contains(cfg.Workspaces, p) {
@@ -194,7 +201,9 @@ func Bootstrap(ctx context.Context, a *fw.Agent, goal, dir string, timeout time.
 
 	log.Info("ax: bootstrap started")
 	start := time.Now()
-	r, err := a.Run(ctx, BootstrapInput(goal, dir), fw.AsAgent(BootstrapProfile), fw.WithOrigin("cli"))
+	// The goal prepares the workspace that every run shares, so its tools
+	// work in the root of the files tool, also with tools.files.perRun.
+	r, err := a.Run(ctx, BootstrapInput(goal, dir), fw.AsAgent(BootstrapProfile), fw.WithOrigin("cli"), fw.InFilesRoot())
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			log.Warn("ax: bootstrap timed out", "error", err)

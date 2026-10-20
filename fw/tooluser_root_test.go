@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -176,5 +177,56 @@ func TestToolUserCannotReplaceTheFilesRoot(t *testing.T) {
 	}
 	if out, err := asTool(u, filepath.Join(ws, "app"), "echo // more >> main.go && mkdir pkg && touch pkg/a.go"); err != nil {
 		t.Errorf("the tool user cannot work in the root: %v: %s", err, out)
+	}
+}
+
+// With tools.files.perRun, the directory of the runs and the directory of
+// each run belong to fw, so the tool user works in the directory of a run
+// but cannot rename it or put a link in its place, and a directory of a
+// run that the tool user made is refused.
+func TestToolUserAndRunDirectories(t *testing.T) {
+	ws, home := rootWorkspace(t)
+	cfg := DefaultConfig()
+	cfg.Home = home
+	cfg.Tools.Files.Root = filepath.Join(ws, "app")
+	cfg.Workspaces = []string{ws}
+	on := true
+	cfg.Tools.Files.PerRun = &on
+	cfg.Tools.User = strconv.Itoa(freeID) + ":" + strconv.Itoa(freeID)
+	a := newTestAgent(t, newScript().Model(), WithConfig(cfg))
+	u := a.ToolUser()
+	runs := filepath.Join(ws, "app", RunsDir)
+	if uid, gid, mode := ownerOf(t, runs); uid != 0 || gid != freeID || mode&os.ModeSticky == 0 {
+		t.Fatalf("runs: uid %d gid %d mode %v", uid, gid, mode)
+	}
+	w, err := a.runWorkspace(path.Join(RunsDir, "r1"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid, gid, mode := ownerOf(t, filepath.Join(runs, "r1")); uid != 0 || gid != freeID || mode.Perm() != 0o775 || mode&os.ModeSticky != 0 {
+		t.Fatalf("the directory of a run: uid %d gid %d mode %v", uid, gid, mode)
+	}
+	if err := w.WriteFile("made/by/fw.txt", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if uid, _, _ := ownerOf(t, filepath.Join(runs, "r1", "made", "by", "fw.txt")); uid != freeID {
+		t.Errorf("a file of the files tool belongs to %d", uid)
+	}
+	if out, err := asTool(u, filepath.Join(runs, "r1"), "mkdir src && echo x > src/a && rm -rf made"); err != nil {
+		t.Fatalf("the tool user cannot work in the directory of its run: %v: %s", err, out)
+	}
+	for _, script := range []string{"mv r1 r9", "rm -rf r1", "mkdir -p empty/r1 && mv -T empty/r1 r1"} {
+		if out, err := asTool(u, runs, script); err == nil {
+			t.Errorf("the tool user ran %q: %s", script, out)
+		}
+	}
+	if uid, _, mode := ownerOf(t, filepath.Join(runs, "r1")); uid != 0 || !mode.IsDir() {
+		t.Errorf("the directory of the run changed: uid %d, mode %v", uid, mode)
+	}
+	if out, err := asTool(u, runs, "mkdir r3"); err != nil {
+		t.Fatalf("mkdir: %v: %s", err, out)
+	}
+	if _, err := a.runWorkspace(path.Join(RunsDir, "r3"), nil); err == nil || !strings.Contains(err.Error(), "belongs to the tool user") {
+		t.Fatalf("a directory that the tool user made = %v", err)
 	}
 }

@@ -62,3 +62,33 @@ func TestBashRunsAsToolUser(t *testing.T) {
 		t.Fatalf("the shell read the state of fw: %q", got)
 	}
 }
+
+// As root, with a tool user and tools.files.perRun, the shell of a run
+// works in the directory of the run as the tool user, and the files tool
+// reads what the shell wrote.
+func TestToolUserWorksInTheDirectoryOfTheRun(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to start the shell as another user")
+	}
+	s := newScripted()
+	var results []string
+	keep := func(next *fw.Response) func(*fw.Request) *fw.Response {
+		return func(req *fw.Request) *fw.Response {
+			for _, b := range lastToolResults(t, req) {
+				results = append(results, fw.TextOf(b.Content))
+			}
+			return next
+		}
+	}
+	s.say("work", callTools(use("b1", "bash", `{"command":"id -u; mkdir src && echo cloned > src/README && stat -c %u src/README; ls $FW_HOME"}`)))
+	s.then("work", keep(callTools(use("f1", "files", `{"command":"view","path":"src/README"}`))))
+	s.then("work", keep(endTurn("done")))
+	a, _ := perRunTools(t, s, "54321:54321")
+	r, err := a.Run(t.Context(), "work")
+	if err != nil || r.State != fw.StateCompleted {
+		t.Fatalf("run = %+v, %v", r, err)
+	}
+	if len(results) != 2 || !strings.HasPrefix(results[0], "54321\n54321\n") || !strings.Contains(results[0], "Permission denied") || !strings.Contains(results[1], "cloned") {
+		t.Fatalf("results = %q", results)
+	}
+}

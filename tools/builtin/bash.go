@@ -88,13 +88,11 @@ type bashSession struct {
 func newBash(cfg *fw.Config) (fw.Tool, error) {
 	t := &bashTool{cfg: cfg, timeout: bashTimeout, home: fw.DefaultHome(), sessions: map[string]*bashSession{}, done: make(chan struct{})}
 	if cfg != nil {
-		if cfg.Tools.Files.Root != "" {
-			dir, err := filepath.Abs(cfg.Tools.Files.Root)
-			if err != nil {
-				return nil, fmt.Errorf("builtin: bash: root %s: %w", cfg.Tools.Files.Root, err)
-			}
-			t.dir = dir
+		dir, err := filepath.Abs(cfg.WorkspaceRoot())
+		if err != nil {
+			return nil, fmt.Errorf("builtin: bash: root %s: %w", cfg.WorkspaceRoot(), err)
 		}
+		t.dir = dir
 		if cfg.Tools.Bash.Timeout > 0 {
 			t.timeout = cfg.Tools.Bash.Timeout
 		}
@@ -257,9 +255,15 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 	return t.run(ctx, s, in.Command)
 }
 
-// start starts a new shell for a session. The caller holds its token.
+// start starts a new shell for a session in the directory of the run,
+// which the kernel names in the run info, or in the root of the workspace.
+// The caller holds its token.
 func (t *bashTool) start(ctx context.Context, s *bashSession) error {
-	sh, err := startShell(t.dir, t.shellEnv(ctx), t.user)
+	dir := fw.RunInfoFrom(ctx).Dir
+	if dir == "" {
+		dir = t.dir
+	}
+	sh, err := startShell(dir, t.shellEnv(ctx, dir), t.user)
 	if err != nil {
 		return fmt.Errorf("bash: the shell cannot start: %v", err)
 	}

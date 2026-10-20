@@ -188,3 +188,63 @@ func TestApplyToConfigToolUser(t *testing.T) {
 		t.Errorf("an explicit tools.user became %q", cfg.Tools.User)
 	}
 }
+
+// Under ax each run gets a directory of its own unless the configuration
+// says otherwise.
+func TestApplyToConfigPerRun(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	cfg := fw.DefaultConfig()
+	ApplyToConfig(cfg, &Task{}, nil)
+	if !cfg.Tools.Files.PerRunOn() {
+		t.Error("perRun is off under ax")
+	}
+	off := false
+	cfg = fw.DefaultConfig()
+	cfg.Tools.Files.PerRun = &off
+	ApplyToConfig(cfg, &Task{}, nil)
+	if cfg.Tools.Files.PerRunOn() {
+		t.Error("an explicit perRun: false became true")
+	}
+}
+
+// The goal of a binding prepares the workspace that every run shares, so
+// its run works in the root of the files tool, also with perRun.
+func TestBootstrapWorksInTheRoot(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	cfg := fw.DefaultConfig()
+	cfg.Home = t.TempDir()
+	cfg.Tools.Files.Root = t.TempDir()
+	cfg.Tools.User = fw.ToolUserNone
+	ApplyToConfig(cfg, &Task{}, nil)
+	ledger := fw.NewMemLedger()
+	a, err := fw.New(fw.WithConfig(cfg), fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithLedger(ledger), fw.WithBus(fw.NewMemBus()),
+		fw.WithModel(fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
+			return &fw.Response{Content: []fw.Block{fw.Text("ready")}, StopReason: fw.StopEndTurn}, nil
+		}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close(context.Background()) })
+	if err := Bootstrap(context.Background(), a, "install", cfg.Tools.Files.Root, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := a.List(context.Background())
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs = %v, %v", runs, err)
+	}
+	var q fw.RunQueuedData
+	for e, err := range ledger.Read(context.Background(), runs[0].ID, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Type == fw.EvRunQueued {
+			if err := e.Decode(&q); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if !q.FilesRoot || q.Agent != BootstrapProfile {
+		t.Fatalf("queued = %+v", q)
+	}
+}

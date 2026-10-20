@@ -139,6 +139,8 @@ tools:
     deny: [.env, ".env.*", "*.pem", "*.key", .netrc, "**/.git/config"]   # never read or written; .gitignore patterns
     readOnly: [.git]            # read, never written
     maxFileBytes: 8388608       # the largest file that is read or written
+    perRun: null                # true: each run works in <root>/runs/<run id>, the root of files and the start of bash (FW_RUN_DIR in the shell);
+                                # a child run and a branch use the directory of their tree. null (unset) is on under ax and off elsewhere. FW_TOOLS_FILES_PER_RUN
   http:
     allow: ["https://api.github.com/*"]
   bash:

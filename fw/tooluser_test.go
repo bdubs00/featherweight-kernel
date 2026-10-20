@@ -187,7 +187,8 @@ func TestChownTree(t *testing.T) {
 	guards := guardDirs([]string{root}, reserved, nil)
 	var got []string
 	u := &ToolUser{UID: freeID, GID: freeID}
-	changed, kept, err := chownTree(root, u, reserved, guards, func(p string, uid, gid int) error {
+	keep := func(p string, _ bool) bool { return slices.Contains(guards, p) }
+	changed, kept, err := chownTree(root, u, reserved, keep, func(p string, uid, gid int) error {
 		if uid != freeID || gid != freeID {
 			t.Errorf("lchown %s to %d:%d", p, uid, gid)
 		}

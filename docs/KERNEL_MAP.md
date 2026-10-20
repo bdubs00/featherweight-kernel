@@ -63,7 +63,7 @@ The sequence shows the main answer/tool paths. Refusal, output-token continuatio
 - Consecutive `ParallelSafe` tool calls run together. Their results are recorded in request order after the batch joins. Tool progress and questions can append while calls run.
 - Policy approvals make the driver idle. Questions and connection requests inside a running tool wait on a decision channel. Both kinds of wait are represented by approval events.
 - Startup rebuilds run status, idempotency keys, and child references. The driver reloads history when it runs. An unanswered model request is retried; an interrupted idempotent tool can run again. Other interrupted tools ask for approval, with explicit exceptions for `Continuer` tools and calls that were waiting for a connection.
-- A follow-up can reopen a finished run. `Fork` copies a ledger prefix into a new run. A local branch shares the process workspace; a remote branch uses a `Forker`. Replay supplies recorded tool results matched by tool name and JSON arguments.
+- A follow-up can reopen a finished run. `Fork` copies a ledger prefix into a new run. A local branch shares the process workspace, and with `tools.files.perRun` the directory of its source; a remote branch uses a `Forker`. Replay supplies recorded tool results matched by tool name and JSON arguments.
 
 ### Events leaving the process
 

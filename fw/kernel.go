@@ -146,6 +146,9 @@ type runState struct {
 	drvCtx    context.Context // the context of the driver that owns the run
 	canceling bool
 	waiters   map[string]chan ApprovalDecidedData // questions from tools, by approval id
+	// dir is the directory of the tools of the run once dirSet (dirOf).
+	dir    string
+	dirSet bool
 }
 
 func (k *kernel) newRunState(id, agent, trace string) *runState {
@@ -509,7 +512,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			return nil, err
 		}
 	}
-	files, changes, err := a.keepFiles(req.Files)
+	files, changes, err := a.keepFiles(a.newRunDir(req.ID, parent, req.FilesRoot), req.Files)
 	if err != nil {
 		return nil, err
 	}
@@ -538,6 +541,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		Files:         files,
 		ExtraTools:    extra,
 		Resolved:      resolved,
+		FilesRoot:     req.FilesRoot,
 	}
 	text := a.pinText(named, &queued)
 	ev, err := NewEvent(req.ID, EvRunQueued, queued)
@@ -976,7 +980,7 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string)
 	if len(msg.Content) == 0 {
 		return fmt.Errorf("%w: a follow-up message has no content", ErrInvalidRequest)
 	}
-	content, changes, err := a.keepFiles(msg.Content)
+	content, changes, err := a.keepFiles(a.dirOf(rs), msg.Content)
 	if err != nil {
 		return err
 	}

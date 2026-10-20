@@ -126,12 +126,29 @@ func (a *Agent) useToolUser(u *ToolUser) error {
 		return fmt.Errorf("fw: tools.user: the workspace %s: %w", cfg.WorkspaceRoot(), err)
 	}
 	filesRoot = evalExisting(filesRoot)
-	guards := guardDirs(roots, reserved, []string{filesRoot})
+	keepDirs := []string{filesRoot}
+	runs := ""
+	if cfg.Tools.Files.PerRunOn() {
+		// The directory of the runs stays with fw too, so the tool user
+		// cannot rename the directory of a run (dirFiles.makeSub).
+		runs = filepath.Join(filesRoot, RunsDir)
+		if info, err := os.Lstat(runs); err == nil && (info.Mode()&fs.ModeSymlink != 0 || !info.IsDir()) {
+			return fmt.Errorf("fw: tools.user: %s is not a directory; remove it, because tools.files.perRun keeps the directories of the runs there", runs)
+		}
+		if err := os.MkdirAll(runs, 0o755); err != nil {
+			return fmt.Errorf("fw: tools.user: %w", err)
+		}
+		keepDirs = append(keepDirs, runs)
+	}
+	guards := guardDirs(roots, reserved, keepDirs)
+	keep := func(p string, dir bool) bool {
+		return slices.Contains(guards, p) || dir && runs != "" && filepath.Dir(p) == runs
+	}
 	marker := ToolTreeMarker(cfg.Home)
 	want := treeRecord(u, roots, reserved)
 	if have, err := os.ReadFile(marker); err != nil || string(have) != want {
 		for _, r := range roots {
-			n, kept, err := chownTree(r, u, reserved, guards, os.Lchown)
+			n, kept, err := chownTree(r, u, reserved, keep, os.Lchown)
 			if err != nil {
 				return fmt.Errorf("fw: tools.user: give the workspace %s to %s: %w", r, u, err)
 			}
@@ -142,6 +159,11 @@ func (a *Agent) useToolUser(u *ToolUser) error {
 		}
 	}
 	for _, d := range guards {
+		// No tool runs yet, so a directory that is a directory now stays
+		// one until the change below.
+		if info, err := os.Lstat(d); err != nil || info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("fw: tools.user: %s, which holds the state of fw or the workspace of the files tool, is not a directory", d)
+		}
 		if err := os.Chown(d, uid, int(u.GID)); err != nil {
 			return fmt.Errorf("fw: tools.user: the directory %s, which holds the state of fw: %w", d, err)
 		}
@@ -185,8 +207,32 @@ func (a *Agent) useToolUser(u *ToolUser) error {
 	if err := u.checkTokenFile(cfg); err != nil {
 		return err
 	}
-	if slices.ContainsFunc(reserved, func(p string) bool { return under(p, filesRoot) }) {
+	if !cfg.Tools.Files.PerRunOn() && slices.ContainsFunc(reserved, func(p string) bool { return under(p, filesRoot) }) {
 		a.log.Warn("the root of the files tool holds the state of fw: the files tool keeps out of it, but a shell that changes a path while the files tool opens it can lead the tool there; put FW_HOME outside the root for untrusted input", "home", cfg.Home, "root", filesRoot)
+	}
+	return nil
+}
+
+// ownSub gives the directory name of r to fw with the group of u and the
+// mode mode, for dirFiles.makeSub. A directory that makeSub did not make
+// and that belongs to the tool user is refused: that user can put a link
+// in its place between the check and the use.
+func ownSub(r *os.Root, name string, info fs.FileInfo, u *ToolUser, mode fs.FileMode, made bool) error {
+	st := info.Sys().(*syscall.Stat_t)
+	if !made && st.Uid == u.UID {
+		return fmt.Errorf("%s belongs to the tool user %s, so fw does not use it; remove it", filepath.ToSlash(name), u)
+	}
+	euid := os.Geteuid()
+	if int(st.Uid) != euid || st.Gid != u.GID {
+		if err := r.Lchown(name, euid, int(u.GID)); err != nil {
+			return err
+		}
+	}
+	const bits = fs.ModeSticky | fs.ModePerm
+	if info.Mode()&bits != mode&bits {
+		if err := r.Chmod(name, mode); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -274,12 +320,12 @@ func treeRecord(u *ToolUser, roots, reserved []string) string {
 
 // chownTree gives every entry under root to u, without following a
 // symbolic link and without crossing into another file system. It skips
-// each reserved path and leaves each guard directory to useToolUser. A
-// file with more than one hard link keeps its owner, because a link can
-// lead to a file outside the workspace. It returns how many entries it
-// changed and how many linked files it kept. lchown is os.Lchown outside
-// a test.
-func chownTree(root string, u *ToolUser, reserved, guards []string, lchown func(string, int, int) error) (changed, kept int, err error) {
+// each reserved path, and it leaves each entry for which keep is true,
+// such as a guard directory, to useToolUser, but walks into it. A file
+// with more than one hard link keeps its owner, because a link can lead
+// to a file outside the workspace. It returns how many entries it changed
+// and how many linked files it kept. lchown is os.Lchown outside a test.
+func chownTree(root string, u *ToolUser, reserved []string, keep func(p string, dir bool) bool, lchown func(string, int, int) error) (changed, kept int, err error) {
 	top, err := os.Lstat(root)
 	if err != nil {
 		return 0, 0, err
@@ -304,7 +350,7 @@ func chownTree(root string, u *ToolUser, reserved, guards []string, lchown func(
 		if d.IsDir() && st.Dev != dev {
 			return filepath.SkipDir
 		}
-		if slices.Contains(guards, p) {
+		if keep != nil && keep(p, d.IsDir()) {
 			return nil
 		}
 		if !d.IsDir() && st.Nlink > 1 {

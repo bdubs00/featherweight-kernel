@@ -119,10 +119,10 @@ func TestAttachmentsOnAFollowUp(t *testing.T) {
 		f := &FileRef{Path: p, Name: "a.txt", MediaType: "text/plain", Size: 5, SHA256: hex.EncodeToString(sum[:])}
 		return []Message{{Role: RoleUser, Content: []Block{{Type: BlockFile, File: f}}}}
 	}
-	if l := a.readFiles(ref("attachments/a.txt"), nil)[0].Content[0].Text; !strings.Contains(l, "It changed after the person attached it.") || !strings.HasSuffix(l, "edited") {
+	if l := a.readFiles(ref("attachments/a.txt"), nil, "")[0].Content[0].Text; !strings.Contains(l, "It changed after the person attached it.") || !strings.HasSuffix(l, "edited") {
 		t.Fatalf("changed file = %q", l)
 	}
-	if l := a.readFiles(ref("attachments/a-2.txt"), nil)[0].Content[0].Text; !strings.HasSuffix(l, "The file is gone.") {
+	if l := a.readFiles(ref("attachments/a-2.txt"), nil, "")[0].Content[0].Text; !strings.HasSuffix(l, "The file is gone.") {
 		t.Fatalf("gone file = %q", l)
 	}
 }

@@ -506,7 +506,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		}
 	}
 	h, tokens := rs.historyLocked(extra)
-	req.Messages = a.readFiles(h.Messages, MediaTypesOf(model))
+	req.Messages = a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs))
 	_, err = a.emitLocked(ctx, rs, EvModelRequested, ModelRequestedData{
 		Provider:             provider,
 		Model:                name,
@@ -916,7 +916,7 @@ func (a *Agent) recheck(ctx context.Context, rs *runState, prof AgentProfile, t 
 	if !ok {
 		return Decision{Verdict: VerdictAllow}
 	}
-	pctx := WithRunInfo(ctx, RunInfo{RunID: rs.id, Agent: rs.agent, CallID: u.ID})
+	pctx := a.policyCtx(ctx, rs, u.ID)
 	call := ResolveCall(pctx, t, ToolCall{RunID: rs.id, Agent: rs.agent, CallID: u.ID, Spec: t.Spec(), Input: u.Input})
 	return NewRulesPolicy(merged).Decide(pctx, call)
 }
@@ -1054,7 +1054,7 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 			}
 			p.run = true
 		default:
-			pctx := WithRunInfo(ctx, RunInfo{RunID: rs.id, Agent: rs.agent, CallID: u.ID})
+			pctx := a.policyCtx(ctx, rs, u.ID)
 			call := ResolveCall(pctx, t, ToolCall{RunID: rs.id, Agent: rs.agent, CallID: u.ID, Spec: p.spec, Input: u.Input})
 			d := policy.Decide(pctx, call)
 			switch d.Verdict {
@@ -1274,13 +1274,30 @@ func (a *Agent) callTool(ctx context.Context, rs *runState, p plannedCall, input
 	tctx = WithConnecter(tctx, a.connecter(ctx, rs, p.use, aborted))
 	if a.files != nil {
 		tool := p.use.Name
-		tctx = withFiles(tctx, a.files.bind(func(d FileChangedData) {
+		ws, err := a.runWorkspace(a.dirOf(rs), func(d FileChangedData) {
 			d.CallID, d.Tool = callID, tool
 			_, _ = a.emit(ctx, rs, EvFileChanged, d)
-		}))
+		})
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("tool %s: %v", p.use.Name, err)), nil
+		}
+		tctx = withFiles(tctx, ws)
 	}
 	res, err = p.tool.Call(tctx, input)
 	return res, err
+}
+
+// policyCtx returns the context in which a tool resolves a call before the
+// policy decides it: the run, and the workspace of its directory, so the
+// files tool names the path that the call will open (section 7.5).
+func (a *Agent) policyCtx(ctx context.Context, rs *runState, callID string) context.Context {
+	info := a.runInfo(rs)
+	info.CallID = callID
+	ctx = WithRunInfo(ctx, info)
+	if a.files != nil {
+		ctx = withFiles(ctx, a.files.sub(a.dirOf(rs)))
+	}
+	return ctx
 }
 
 // asker returns the Asker of one tool call. A question is an approval with
@@ -1366,7 +1383,7 @@ func (a *Agent) waitDecision(ctx, runCtx context.Context, rs *runState, req Appr
 // runInfo returns the run info of rs for a tool, without a call id.
 func (a *Agent) runInfo(rs *runState) RunInfo {
 	q := rs.queuedData()
-	return RunInfo{RunID: rs.id, Agent: rs.agent, Principal: q.Principal, PrincipalKind: q.PrincipalKind}
+	return RunInfo{RunID: rs.id, Agent: rs.agent, Principal: q.Principal, PrincipalKind: q.PrincipalKind, Dir: a.absDir(a.dirOf(rs))}
 }
 
 func toolUses(blocks []Block) []Block {

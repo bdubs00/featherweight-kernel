@@ -28,10 +28,15 @@ func configEnv(cfg *fw.Config) []string {
 	return out
 }
 
-// shellEnv returns the environment of a new shell: the process environment
-// and the variables of tools.bash.env through the rules of fw.ToolEnv, so
-// a model that runs "env" finds no secret of fw, then FW_HOME.
-func (t *bashTool) shellEnv(ctx context.Context) []string {
+// shellEnv returns the environment of a new shell in dir: the process
+// environment and the variables of tools.bash.env through the rules of
+// fw.ToolEnv, so a model that runs "env" finds no secret of fw, then
+// FW_HOME and FW_RUN_DIR, the directory of the run.
+func (t *bashTool) shellEnv(ctx context.Context, dir string) []string {
 	env := fw.ToolEnv(ctx, t.cfg, os.Environ(), t.env)
-	return append(env, "FW_HOME="+t.home)
+	env = append(env, "FW_HOME="+t.home)
+	if dir == "" {
+		dir, _ = os.Getwd()
+	}
+	return append(env, "FW_RUN_DIR="+dir)
 }

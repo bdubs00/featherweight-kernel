@@ -246,7 +246,20 @@ type FilesToolConfig struct {
 	Deny         []string `yaml:"deny" json:"deny"`
 	ReadOnly     []string `yaml:"readOnly" json:"readOnly"`
 	MaxFileBytes int64    `yaml:"maxFileBytes" json:"maxFileBytes"`
+	// PerRun gives each run a directory of its own, <root>/runs/<run id>,
+	// as the root of the files tool and the directory where bash starts
+	// (section 7.9). Unset is the default of the environment: on under
+	// ax, which the package ax sets, and off elsewhere.
+	PerRun *bool `yaml:"perRun,omitempty" json:"perRun,omitempty"`
 }
+
+// RunsDir is the directory under the root of the files tool that holds the
+// directory of each run with tools.files.perRun.
+const RunsDir = "runs"
+
+// PerRunOn reports whether each run gets a directory of its own
+// (tools.files.perRun).
+func (c FilesToolConfig) PerRunOn() bool { return c.PerRun != nil && *c.PerRun }
 
 // defaultDeny is the default of tools.files.deny: files that usually hold
 // a secret.
