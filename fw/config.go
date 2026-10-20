@@ -197,13 +197,64 @@ type LedgerConfig struct {
 }
 
 // BusConfig selects the Bus driver and its uses.
+//
+// IntakeRetries is the number of times that the kernel puts a job of the
+// intake queue on the queue again after its run failed, as a new run that
+// any process of the queue can take. The default is 0, because a retry
+// spends model tokens. DeadLetter turns off the dead-letter subject
+// "<intake>.dead" when it is false. The default is on, because a record
+// costs nothing (docs/ARCHITECTURE.md section 9.3).
 type BusConfig struct {
-	Driver      string            `yaml:"driver" json:"driver"`
-	URL         string            `yaml:"url,omitempty" json:"url,omitempty"`
-	Intake      string            `yaml:"intake,omitempty" json:"intake,omitempty"`
-	Egress      string            `yaml:"egress,omitempty" json:"egress,omitempty"`
-	EgressTypes []string          `yaml:"egressTypes,omitempty" json:"egressTypes,omitempty"`
-	Options     map[string]string `yaml:"options,omitempty" json:"options,omitempty"`
+	Driver        string            `yaml:"driver" json:"driver"`
+	URL           string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Intake        string            `yaml:"intake,omitempty" json:"intake,omitempty"`
+	IntakeRetries int               `yaml:"intakeRetries,omitempty" json:"intakeRetries,omitempty"`
+	DeadLetter    *bool             `yaml:"deadLetter,omitempty" json:"deadLetter,omitempty"`
+	Egress        string            `yaml:"egress,omitempty" json:"egress,omitempty"`
+	EgressTypes   []string          `yaml:"egressTypes,omitempty" json:"egressTypes,omitempty"`
+	Options       map[string]string `yaml:"options,omitempty" json:"options,omitempty"`
+}
+
+// DeadLetterSuffix is the last token of the dead-letter subject of an
+// intake queue.
+const DeadLetterSuffix = ".dead"
+
+// DeadLetterOn reports whether the dead letter of the intake is on: true
+// unless DeadLetter is false.
+func (c BusConfig) DeadLetterOn() bool { return c.DeadLetter == nil || *c.DeadLetter }
+
+// DeadLetterSubject returns the subject of the dead-letter records of the
+// intake, "<intake>.dead", such as fw.jobs.reviewer.dead. It returns ""
+// when the dead letter is off, when no intake is set, or when the intake
+// holds a wildcard, because a publish needs an exact subject.
+func (c BusConfig) DeadLetterSubject() string {
+	if !c.DeadLetterOn() {
+		return ""
+	}
+	return DeadLetterOf(c.Intake)
+}
+
+// DeadLetterOf returns the dead-letter subject of an intake queue,
+// "<queue>.dead", or "" for an empty queue or a queue with a wildcard.
+func DeadLetterOf(queue string) string {
+	if !exactSubject(queue) {
+		return ""
+	}
+	return queue + DeadLetterSuffix
+}
+
+// exactSubject reports whether a subject has tokens and no wildcard, so a
+// publish can name it.
+func exactSubject(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, t := range strings.Split(s, ".") {
+		if t == "" || t == "*" || t == ">" {
+			return false
+		}
+	}
+	return true
 }
 
 // RunSlots returns the number of top-level runs that work at a time:

@@ -2,6 +2,8 @@ package nats
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -128,6 +130,99 @@ func TestConcurrencyDefaultsToTheRunSlots(t *testing.T) {
 		_ = b.js.DeleteStream(context.Background(), b.stream)
 		_ = b.Close()
 	}
+}
+
+// slowModel blocks every call until its context ends.
+func slowModel(started chan<- string) fw.Model {
+	return fw.ModelFunc{StreamFn: func(ctx context.Context, req *fw.Request, _ func(fw.Delta)) (*fw.Response, error) {
+		started <- fw.TextOf(req.Messages[0].Content)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+}
+
+func doneModel() fw.Model {
+	return fw.ModelFunc{StreamFn: func(context.Context, *fw.Request, func(fw.Delta)) (*fw.Response, error) {
+		return &fw.Response{Content: []fw.Block{fw.Text("done")}, StopReason: fw.StopEndTurn}, nil
+	}}
+}
+
+// Two kernels with one run slot each share one intake queue, as two ax
+// Tasks do. Each takes one job at a time, so the second job goes to the
+// second kernel while the first works. A kernel acknowledges its job when
+// the run is in the ledger. Its shutdown ends with the context of the
+// shutdown, with the stop of this driver, which waits for its handlers: a
+// handler that waited for the run hung the stop past any context.
+func TestIntakeSharesAQueue(t *testing.T) {
+	url := serverURL(t)
+	root := "t" + strings.ToLower(fw.NewID())
+	queue := root + ".jobs.migrator"
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	agent := func(node string, m fw.Model) (*fw.Agent, *Bus) {
+		t.Helper()
+		cfg := fw.DefaultConfig()
+		cfg.MaxRuns = 1
+		cfg.Node = node
+		cfg.Agents = map[string]fw.AgentProfile{"default": {}}
+		cfg.Bus = fw.BusConfig{Driver: "nats", URL: url, Intake: queue,
+			Options: map[string]string{"stream": strings.ToUpper(root), "subjects": root + ".>"}}
+		b, err := Open(context.Background(), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.fetchWait = 200 * time.Millisecond
+		a, err := fw.New(fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithConfig(cfg), fw.WithModelName("anthropic/claude-opus-5-5"),
+			fw.WithModel(m), fw.WithLedger(fw.NewMemLedger()), fw.WithBus(b), fw.WithLogger(quiet))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a, b
+	}
+	started := make(chan string, 4)
+	first, fb := agent("first", slowModel(started))
+	t.Cleanup(func() { _ = fb.js.DeleteStream(context.Background(), fb.stream) })
+	for _, in := range []string{"job one", "job two"} {
+		publish(t, fb, queue, fw.MustEvent("", fw.EvRunRequest, fw.RunRequest{Input: in}))
+	}
+	select {
+	case in := <-started:
+		if !strings.Contains(in, "job one") {
+			t.Fatalf("the first kernel works on %q", in)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first kernel took no job")
+	}
+	eventually(t, "the ack of the first job", func() bool { return consumerInfo(t, fb, queue).NumAckPending == 0 })
+	time.Sleep(300 * time.Millisecond)
+	if n := consumerInfo(t, fb, queue).NumPending; n != 1 {
+		t.Fatalf("jobs on the stream while the first kernel works = %d, want 1", n)
+	}
+
+	second, _ := agent("second", doneModel())
+	ctx := context.Background()
+	eventually(t, "the second job on the second kernel", func() bool {
+		runs, _ := second.List(ctx)
+		return len(runs) == 1 && runs[0].Input == "job two" && runs[0].State == fw.StateCompleted
+	})
+	if runs, _ := first.List(ctx); len(runs) != 1 || runs[0].Input != "job one" {
+		t.Fatalf("runs of the first kernel = %v", runs)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		sctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		first.Close(sctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shutdown of the first kernel waits for its run")
+	}
+	sctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	second.Close(sctx)
 }
 
 // A message that does not decode never reaches the handler, so the

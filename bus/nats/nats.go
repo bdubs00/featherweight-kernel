@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,10 +87,12 @@ var errNotConnected = errors.New("nats: not connected yet")
 // Open connects to NATS and makes sure the stream exists.
 //
 // It reads cfg.Bus.URL (default nats://127.0.0.1:4222), cfg.Bus.Intake,
-// cfg.Bus.Egress, and these keys of cfg.Bus.Options:
+// cfg.Bus.Egress, the dead-letter subject of the intake
+// (fw.BusConfig.DeadLetterSubject), and these keys of cfg.Bus.Options:
 //
 //   - stream: the JetStream stream name (default FW)
-//   - subjects: comma-separated subject filters of the stream (default fw.>)
+//   - subjects: comma-separated subject filters of the stream (default fw.>).
+//     The stream also captures the intake, the egress, and the dead letter.
 //   - credentials: the path to a .creds file
 //   - token: the name of a secret that holds the auth token, read from the
 //     environment by fw.EnvSecrets
@@ -119,7 +122,7 @@ func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	}
 	b.SetLogger(slog.Default())
 
-	subjects := streamSubjects(opt["subjects"], bc.Intake, bc.Egress)
+	subjects := streamSubjects(opt["subjects"], bc.Intake, bc.Egress, bc.DeadLetterSubject())
 	// ready closes when Open has set b.js, because the connect handler can
 	// run before Open returns.
 	ready := make(chan struct{})
@@ -720,9 +723,9 @@ func durableName(queue string) string {
 }
 
 // streamSubjects returns the stream filters: the list from the subjects
-// option, plus a filter for the intake queue and the egress prefix when the
-// list does not capture them.
-func streamSubjects(list, intake, egress string) []string {
+// option, plus a filter for the intake queue, the egress prefix, and the
+// dead-letter subject of the intake when the list does not capture them.
+func streamSubjects(list, intake, egress, dead string) []string {
 	var subs []string
 	for _, s := range strings.Split(list, ",") {
 		if s = strings.TrimSpace(s); s != "" {
@@ -738,16 +741,42 @@ func streamSubjects(list, intake, egress string) []string {
 	if egress != "" {
 		subs = addFilter(subs, egress+".>")
 	}
+	if dead != "" {
+		subs = addFilter(subs, dead)
+	}
 	return subs
 }
 
 // addFilter adds the first token of the pattern followed by ">" when no
-// filter captures the pattern.
+// filter captures the pattern. A stream refuses two filters that overlap,
+// so when that wide filter overlaps one of the list, it adds the pattern
+// itself.
 func addFilter(subs []string, pattern string) []string {
 	if coveredByAny(subs, pattern) {
 		return subs
 	}
-	return append(subs, prefixFilter(pattern))
+	f := prefixFilter(pattern)
+	if slices.ContainsFunc(subs, func(s string) bool { return overlaps(s, f) }) {
+		f = pattern
+	}
+	return append(subs, f)
+}
+
+// overlaps reports whether some subject matches both filters.
+func overlaps(a, b string) bool {
+	at, bt := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; ; i++ {
+		if i == len(at) || i == len(bt) {
+			return len(at) == len(bt)
+		}
+		x, y := at[i], bt[i]
+		if x == ">" || y == ">" {
+			return true
+		}
+		if x != "*" && y != "*" && x != y {
+			return false
+		}
+	}
 }
 
 func prefixFilter(pattern string) string {

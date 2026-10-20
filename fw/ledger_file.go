@@ -4,8 +4,9 @@ package fw
 // Each run has a directory <root>/<run>/ with ledger.jsonl, one JSON event
 // per line. The driver only appends. It calls fsync after every approval
 // event, every terminal event, every record of a child in another process,
-// and every request to run a tool that is not idempotent. An event whose
-// tool intent has no readable classification counts as not idempotent.
+// every fw.run.queued of a run from the bus intake, and every request to
+// run a tool that is not idempotent. An event whose tool intent has no
+// readable classification counts as not idempotent.
 // Such a success also stands on the entries behind the file: the first
 // open of a run owes an fsync of
 // its directory and of the root, and the first new entry of the index
@@ -110,10 +111,18 @@ func keepsDone(done bool, typ string) bool {
 // idempotent, so no event can bypass the durable write. A record of a
 // child in another process needs it too: the kernel records a child
 // before the spawner creates its process, and a restart must know every
-// process that the spawner created.
+// process that the spawner created. So does fw.run.queued of a run from
+// the bus intake: the intake acknowledges the message when Append returns,
+// and from then on only the ledger holds the job.
 func needsIntentSync(typ string, data json.RawMessage) bool {
 	if typ == EvApprovalRequested || typ == EvApprovalDecided || typ == EvRunChild || IsTerminal(typ) {
 		return true
+	}
+	if typ == EvRunQueued {
+		var q struct {
+			Origin string `json:"origin"`
+		}
+		return json.Unmarshal(data, &q) == nil && q.Origin == OriginBus
 	}
 	if typ != EvToolRequested {
 		return false

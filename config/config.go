@@ -376,6 +376,9 @@ func validate(c *fw.Config, servers bool) error {
 	if c.MaxRuns < 0 {
 		p = append(p, fmt.Sprintf("maxRuns %d is negative", c.MaxRuns))
 	}
+	if c.Bus.IntakeRetries < 0 {
+		p = append(p, fmt.Sprintf("bus.intakeRetries %d is negative", c.Bus.IntakeRetries))
+	}
 	if len(p) > 0 {
 		return &ValidationError{Problems: p}
 	}

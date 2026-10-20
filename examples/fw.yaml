@@ -120,10 +120,12 @@ node: ""                       # the name of this process among the processes of
 bus:
   driver: mem                   # mem | nats | redis | kafka
   url: ""                       # nats://nats:4222, redis://redis:6379, kafka://broker:9092
-  intake: ""                    # queue to pull run requests from, for example fw.jobs.reviewer
+  intake: ""                    # queue to pull run requests from, for example fw.jobs.reviewer; a job is taken for a free run slot and acknowledged when its run is in the ledger
+  intakeRetries: 0              # times a failed job goes on the queue again as a new run; each retry spends model tokens. FW_BUS_INTAKE_RETRIES
+  deadLetter: true              # send a record of each failed or rejected job to <intake>.dead, for example fw.jobs.reviewer.dead. FW_BUS_DEAD_LETTER
   egress: ""                    # subject prefix to publish ledger events to, for example fw.events; the front of a fleet reads it
   egressTypes: []               # empty publishes every type
-  options: {}                   # driver options; FW_BUS_OPTIONS_<NAME>
+  options: {}                   # driver options; FW_BUS_OPTIONS_<NAME>; nats and redis take concurrency, the messages handled at a time (default: maxRuns, 1 under ax)
 
 tokens:                         # the tokens of people, from a broker outside this process (docs/ARCHITECTURE.md section 7.11)
   url: ""                       # the front of the workbench, for example http://fw-front.fw-fleet.svc:8080; empty keeps them off. FW_TOKENS_URL

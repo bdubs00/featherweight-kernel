@@ -82,6 +82,15 @@ type kernel struct {
 	sem      chan struct{} // one slot per active run, Config.MaxRuns slots
 	childSem chan struct{} // one slot per working child run, Config.Spawn.MaxRunning slots; nil for no limit
 
+	// slotMu guards rootDrivers and the admissions of the bus intake
+	// (intake.go). rootDrivers counts the drivers of top-level runs: each
+	// holds a slot of sem or waits for one. slotsChanged is closed and
+	// replaced when either count changes.
+	slotMu       sync.Mutex
+	rootDrivers  int
+	admitted     int
+	slotsChanged chan struct{}
+
 	lifeMu   sync.Mutex
 	draining bool
 	drainCh  chan struct{} // closed when shutdown starts
@@ -172,24 +181,25 @@ func (a *Agent) startKernel(ctx context.Context) error {
 	maxRuns := a.cfg.RunSlots()
 	kctx, cancel := context.WithCancel(context.Background())
 	k := &kernel{
-		atespace:  atespaceFromEnv(),
-		compactAt: a.cfg.Compaction.At,
-		runs:      map[string]*runState{},
-		idem:      map[string]string{},
-		overrides: map[string]*runOverride{},
-		kids:      map[string]int{},
-		remote:    map[string]childRef{},
-		children:  map[string][]*runState{},
-		records:   map[string][]*runState{},
-		remoteOf:  map[string]map[string]bool{},
-		reports:   map[string]*childReport{},
-		spent:     map[string]string{},
-		retrying:  map[string]bool{},
-		sem:       make(chan struct{}, maxRuns),
-		drainCh:   make(chan struct{}),
-		closedCh:  make(chan struct{}),
-		ctx:       kctx,
-		cancel:    cancel,
+		atespace:     atespaceFromEnv(),
+		compactAt:    a.cfg.Compaction.At,
+		runs:         map[string]*runState{},
+		idem:         map[string]string{},
+		overrides:    map[string]*runOverride{},
+		kids:         map[string]int{},
+		remote:       map[string]childRef{},
+		children:     map[string][]*runState{},
+		records:      map[string][]*runState{},
+		remoteOf:     map[string]map[string]bool{},
+		reports:      map[string]*childReport{},
+		spent:        map[string]string{},
+		retrying:     map[string]bool{},
+		sem:          make(chan struct{}, maxRuns),
+		drainCh:      make(chan struct{}),
+		slotsChanged: make(chan struct{}),
+		closedCh:     make(chan struct{}),
+		ctx:          kctx,
+		cancel:       cancel,
 	}
 	if n := a.cfg.Spawn.MaxRunning; n > 0 {
 		k.childSem = make(chan struct{}, n)
@@ -206,6 +216,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 	}
 	a.startFollow()
 	a.startEgress()
+	a.startOutcomes()
 	a.recover(rec)
 	a.resendCancels()
 	if !a.noResume {
@@ -1272,12 +1283,36 @@ func (a *Agent) launchLocked(rs *runState) {
 	ctx, cancel := context.WithCancel(k.ctx)
 	rs.active = true
 	rs.cancel, rs.drvCtx = cancel, ctx
+	if rs.depth == 0 {
+		k.addRootDriver(1)
+	}
 	go a.runDriver(ctx, cancel, rs)
 }
 
+// addRootDriver counts a driver of a top-level run that starts (1) or
+// ends (-1), and wakes the bus intake, which takes a job only for a free
+// slot of maxRuns (intake.go).
+func (k *kernel) addRootDriver(n int) {
+	k.slotMu.Lock()
+	k.rootDrivers += n
+	k.slotsChangedLocked()
+	k.slotMu.Unlock()
+}
+
+// slotsChangedLocked wakes every wait for a slot. The caller holds slotMu.
+func (k *kernel) slotsChangedLocked() {
+	close(k.slotsChanged)
+	k.slotsChanged = make(chan struct{})
+}
+
 // runDriver owns the run until it is idle, canceled, or the kernel drains.
+// A driver of a top-level run counts in rootDrivers until it ends, after
+// it gave its slot of maxRuns back.
 func (a *Agent) runDriver(ctx context.Context, cancel context.CancelFunc, rs *runState) {
 	defer a.k.wg.Done()
+	if rs.depth == 0 {
+		defer a.k.addRootDriver(-1)
+	}
 	defer cancel()
 	reason := a.driverBody(ctx, rs)
 	if reason == exitIdle {

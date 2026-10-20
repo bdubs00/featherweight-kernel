@@ -92,6 +92,9 @@ type Bus struct {
 //   - concurrency: the number of messages that one Consume handles at a time
 //     (default: the run slots of the agent, fw.Config.RunSlots, which is 1
 //     under ax)
+//
+// Each subject is a stream of its own, so the dead-letter subject of the
+// intake keeps its records with no setting.
 func Open(ctx context.Context, cfg *fw.Config) (*Bus, error) {
 	if cfg == nil {
 		return nil, errors.New("redis: no config")
