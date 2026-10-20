@@ -121,7 +121,7 @@ One Task from one profile file, without a front, takes one verb each. The verbs 
 ```
 fw ax render -f agents/reviewer.yaml --name reviewer --image <image@sha256:...>   # print the Workspace and the Task, with placeholders for secrets
 fw ax up -f agents/reviewer.yaml --name reviewer --image <image@sha256:...>       # apply, resume, and wait for /readyz through the router
-fw ax status --name reviewer                                                       # the phase, the egress rules, and GET /v1/status of the kernel
+fw ax status --name reviewer                                                       # the phase, the conditions, and GET /v1/status of the kernel
 fw ax events --name reviewer <run-id>                                              # the ledger of a run through the router
 fw ax down --name reviewer                                                         # delete the Task and its Workspace
 ```

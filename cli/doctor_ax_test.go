@@ -99,7 +99,7 @@ func TestDoctorAXReach(t *testing.T) {
 	for _, want := range []string{
 		"ax reach: 3 of 7 endpoints do not answer: ",
 		"bus " + host(answering.URL) + ", ",
-		"bus 127.0.0.1:4222 (the egress gateway carries only HTTP and TLS, not nats://)",
+		"bus 127.0.0.1:4222 (the egress gateway carries only HTTP and TLS)",
 		"tokens " + closed + " (no answer: ",
 		"mcp github " + host(denied.URL) + " (the egress gateway denies it)",
 		"fw ax render derives a rule for each endpoint",

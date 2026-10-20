@@ -166,14 +166,14 @@ func doctorAXReach(ctx context.Context, cfg *fw.Config, _ fw.Secrets, timeout ti
 // shows the way. A TLS endpoint gets a handshake, which the gateway ends
 // when no tls rule covers the name. No probe sends a credential.
 func probeAX(ctx context.Context, e axEndpoint, limit time.Duration) (bool, string) {
-	a, err := parseAXAddr(e.url)
+	a, err := parseAXURL(e.url)
 	if err != nil {
 		return false, fmt.Sprintf("(%v)", err)
 	}
-	name := a.String()
+	name := a.addr()
 	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
-	switch a.kind() {
+	switch a.kind {
 	case "http":
 		raw := e.url
 		if !strings.Contains(raw, "://") {
@@ -214,7 +214,14 @@ func probeAX(ctx context.Context, e axEndpoint, limit time.Duration) (bool, stri
 		_ = conn.Close()
 		return true, name
 	}
-	return false, fmt.Sprintf("%s (the egress gateway carries only HTTP and TLS, not %s://)", name, a.scheme)
+	return false, name + " (the egress gateway carries only HTTP and TLS)"
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // shortErr drops the operation and the address that a dial error repeats.

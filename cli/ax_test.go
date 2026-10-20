@@ -271,6 +271,7 @@ spec:
           intake: fw.jobs.reviewer
         tokens:
           url: http://fw-front.fw-fleet.svc.cluster.local:8080
+          subject: fw.connections
         tools:
           mcp:
             - name: github
@@ -393,7 +394,7 @@ func TestAXRenderRefuses(t *testing.T) {
 		{[]string{"-f", profile, "--name", "Not_A_Name", "--image", img}, "is not a name for ax"},
 		{[]string{"-f", "typo.yaml", "--name", "reviewer", "--image", img}, "field sytem not found"},
 		{[]string{"-f", "unknown.yaml", "--name", "reviewer", "--image", img}, "unknown key workbench"},
-		{[]string{"-f", profile, "--name", "reviewer", "--image", img, "--workspace-file", ".fw/fw.yaml=readme.txt"}, "renders .fw/fw.yaml itself"},
+		{[]string{"-f", profile, "--name", "reviewer", "--image", img, "--workspace-file", ".fw/fw.yaml=readme.txt"}, "other than .fw/fw.yaml, which fw ax renders"},
 		{[]string{"-f", profile, "--name", "reviewer", "--image", img, "--workspace-file", "../out=readme.txt"}, "path inside the workspace"},
 		{[]string{"-f", profile, "--name", "reviewer", "--image", img, "--egress", "a b"}, "--egress"},
 		{[]string{"-f", profile, "--name", "reviewer", "--image", img, "--env", "NOVALUE"}, "is not NAME=VALUE"},
@@ -414,6 +415,26 @@ func TestAXRenderRefuses(t *testing.T) {
 	}
 }
 
+// A header of a provider or an MCP server stays on this machine, because
+// it can hold a secret, and the output says so.
+func TestAXRenderDropsHeaders(t *testing.T) {
+	profile := axEnv(t)
+	t.Setenv("FW_PROVIDERS_OPENAI_HEADERS_X_ORG_KEY", "org-header-value")
+	t.Setenv("FW_TOOLS_MCP_GITHUB_HEADERS_X_TEAM", "team-header-value")
+	code, out, errOut := run(t, "", "ax", "render", "-f", profile, "--name", "reviewer", "--image", "registry.example/fw@sha256:0123")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, errOut)
+	}
+	if strings.Contains(out, "header-value") || strings.Contains(out, "headers:") {
+		t.Errorf("a header reached the output:\n%s", out)
+	}
+	for _, want := range []string{"# Warning: providers.openai: the headers stay on this machine", "# Warning: tools.mcp github: the headers stay on this machine"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
 // Each configured endpoint gets one egress rule: http for a plain URL and
 // tls for an https URL, with its port. One that no rule can carry gets a
 // warning instead.
@@ -425,21 +446,19 @@ func TestAXRules(t *testing.T) {
 	cfg.Bus = fw.BusConfig{Driver: "nats", URL: "nats://nats:4222,ws://nats-ws:8080"}
 	cfg.Tokens.URL = "http://front:8080"
 	cfg.Tools.MCP = []fw.MCPServerConfig{{Name: "git", Endpoint: "http://localhost:9000/mcp"}, {Name: "docs", Endpoint: "wss://docs.example"}, {Name: "local", Command: "mcp-local"}}
-	cfg.Tools.Peers = []fw.PeerConfig{{Name: "triage", AX: "default/triage"}}
-	cfg.Spawn.Driver = "ax"
-	cfg.AX.Router = "atenet-router.ate-system.svc.cluster.local"
 	env := map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://10.0.0.5:4318"}
-	rules, warnings, err := axRules(cfg, []string{"https:registry.npmjs.org", "tls:pypi.org:8443", "front:8080"}, func(n string) string { return env[n] })
+	r := &axRendered{}
+	rules, err := axRules(cfg, []string{"https:registry.npmjs.org", "tls:pypi.org:8443", "front:8080"}, func(n string) string { return env[n] }, r)
 	if err != nil {
 		t.Fatal(err)
 	}
+	warnings := r.warnings
 	var got []string
 	for _, r := range rules {
-		got = append(got, r.String())
+		got = append(got, r.kind+" "+r.addr())
 	}
 	want := []string{
 		"tls api.anthropic.com:443", "tls vllm.ai.svc:8443", "http nats-ws:8080", "http front:8080", "tls docs.example:443",
-		"http ax-server.ax-system.svc.cluster.local:8080", "http atenet-router.ate-system.svc.cluster.local:80",
 		"https registry.npmjs.org:443", "tls pypi.org:8443",
 	}
 	if !slices.Equal(got, want) {
@@ -459,7 +478,7 @@ func TestAXRules(t *testing.T) {
 		t.Errorf("%d warnings, want 3:\n%s", len(warnings), joined)
 	}
 	for _, bad := range []string{"", "tls:", "host:0", "ftp://x", "a/b:80"} {
-		if _, err := parseAXEgress(bad); err == nil {
+		if _, err := axRules(fw.DefaultConfig(), []string{bad}, func(string) string { return "" }, &axRendered{}); err == nil {
 			t.Errorf("--egress %q parsed", bad)
 		}
 	}
@@ -483,7 +502,7 @@ func TestAXUpStatusEventsDown(t *testing.T) {
 	if want := "default/reviewer is ready at http://" + router.host() + " with the header ate-target-actor: default/reviewer\n"; out != want {
 		t.Errorf("up stdout %q, want %q", out, want)
 	}
-	for _, want := range []string{"the ax API at " + api.addr + " (from --server)", "the router at " + router.host() + " (from --router)", "applied the Workspace default/reviewer-ws", "the Task is Running"} {
+	for _, want := range []string{"the ax API at " + api.addr + "\n", "the router at " + router.host() + "\n", "applied the Workspace default/reviewer-ws", "the Task is Running"} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("up stderr lacks %q:\n%s", want, errOut)
 		}
@@ -525,8 +544,7 @@ func TestAXUpStatusEventsDown(t *testing.T) {
 	}
 	for _, want := range []string{
 		"task      default/reviewer\n", "phase     Running\n", "condition Ready is True: TaskRunning, Task is running\n",
-		"egress    http ax-model.fw-fleet.svc.cluster.local on 8080\n", "          tls api.githubcopilot.com on 443\n",
-		"kernel    idle since 2026-10-20T09:14:31Z; 3 runs, 0 active, 1 waits for input; 120 prompt and 30 completion tokens\n",
+		`kernel    {"usage":{"promptTokens":120,"completionTokens":30},"pendingApproval":null,"runs":{"active":0,"inputRequired":1,"total":3},"idle":true,"idleSince":"2026-10-20T09:14:31Z"}` + "\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status lacks %q:\n%s", want, out)
@@ -544,7 +562,7 @@ func TestAXUpStatusEventsDown(t *testing.T) {
 	if code, out, _ := run(t, "", "ax", "events", "--name", "reviewer", "--router", router.host(), "--format", "text", "01RUN"); code != 0 || !strings.Contains(out, "fw.run.finished outcome=completed") {
 		t.Errorf("text events: exit %d\n%s", code, out)
 	}
-	if code, _, errOut := run(t, "", "ax", "events", "--name", "reviewer", "--router", router.host(), "01OTHER"); code == 0 || !strings.Contains(errOut, "answered 404: run not found") {
+	if code, _, errOut := run(t, "", "ax", "events", "--name", "reviewer", "--router", router.host(), "01OTHER"); code == 0 || !strings.Contains(errOut, "answered 404") || !strings.Contains(errOut, "run not found") {
 		t.Errorf("events of an unknown run: exit %d\n%s", code, errOut)
 	}
 
@@ -581,7 +599,7 @@ func TestAXUpRefusesBeforeApply(t *testing.T) {
 	profile := axEnv(t)
 	api := newAXFakeAPI(t)
 	args := []string{"ax", "up", "-f", profile, "--name", "reviewer", "--image", "registry.example/fw@sha256:0123", "--server", api.addr, "--router", closedAddr(t)}
-	if code, _, errOut := run(t, "", args...); code == 0 || !strings.Contains(errOut, "the Task needs GITHUB_MCP_TOKEN, which is not set here") {
+	if code, _, errOut := run(t, "", args...); code == 0 || !strings.Contains(errOut, "the Task needs GITHUB_MCP_TOKEN, not set here") {
 		t.Errorf("missing secret: exit %d\n%s", code, errOut)
 	}
 	if code, _, errOut := run(t, "", append(args, "--env", "GITHUB_MCP_TOKEN=x")...); code == 0 || !strings.Contains(errOut, "does not answer") || !strings.Contains(errOut, "port-forward svc/atenet-router") {
@@ -601,7 +619,7 @@ func TestAXUpTimesOut(t *testing.T) {
 	router.notReady = 1 << 30
 	code, _, errOut := run(t, "", "ax", "up", "-f", profile, "--name", "reviewer", "--image", "registry.example/fw@sha256:0123",
 		"--server", api.addr, "--router", router.host(), "--timeout", "50ms", "--env", "GITHUB_MCP_TOKEN=x")
-	if code == 0 || !strings.Contains(errOut, "the Task default/reviewer is Running and its /readyz did not answer within 50ms (TaskRunning: Task is running); ax -a default describe task reviewer shows why") {
+	if code == 0 || !strings.Contains(errOut, "the Task default/reviewer is Running and its /readyz did not answer within 50ms; ax -a default describe task reviewer shows why") {
 		t.Errorf("exit %d\n%s", code, errOut)
 	}
 
@@ -611,7 +629,7 @@ func TestAXUpTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code, out, _ := run(t, "", "ax", "status", "--name", "sleeper", "--server", api.addr, "--router", router.host()); code != 0 ||
-		!strings.Contains(out, "kernel    not read, because a request through the router wakes a Task that is Suspended") || !strings.Contains(out, "egress    none") {
+		!strings.Contains(out, "kernel    not read, because a request through the router wakes a Task that is Suspended") {
 		t.Errorf("status of a sleeping Task: exit %d\n%s", code, out)
 	}
 }
@@ -619,7 +637,7 @@ func TestAXUpTimesOut(t *testing.T) {
 // fw ax without a command prints its usage, and an unknown command fails.
 func TestAXUsage(t *testing.T) {
 	env(t)
-	if code, _, errOut := run(t, "", "ax"); code != exitUsage || !strings.Contains(errOut, "Usage: fw ax <command>") {
+	if code, _, errOut := run(t, "", "ax"); code != exitUsage || !strings.Contains(errOut, "Usage: fw ax <render|up|status|events|down>") {
 		t.Errorf("exit %d\n%s", code, errOut)
 	}
 	if code, _, errOut := run(t, "", "ax", "deploy"); code != exitUsage || !strings.Contains(errOut, `unknown command "deploy"`) {
