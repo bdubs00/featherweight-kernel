@@ -39,6 +39,7 @@ const bashSchema = `{
 
 const bashDescription = "Run a command in the persistent bash shell of this run. " +
 	"The working directory and exported variables carry over between the calls of the run, and another run never sees them. " +
+	"Each call starts with set -e, set -u, and pipefail off, and a failure under set -e ends that call, not the shell. " +
 	"The result holds stdout, then stderr, then the exit code. " +
 	"A non-zero exit code is a normal result. " +
 	"The output is cut at the output limit of the configuration. " +
@@ -287,9 +288,22 @@ func (t *bashTool) run(ctx context.Context, s *bashSession, command string) (fw.
 	// fails the command and leaves the shell running. The end mark is
 	// printed in two parts, so a trace with set -x or set -v does not
 	// contain it.
-	script := fmt.Sprintf("IFS= read -r -d '' __fw_cmd <<'%[1]s'\n%[2]s\n%[1]s\n"+
-		"eval \"$__fw_cmd\" </dev/null\n"+
-		"__fw_ec=$?\n"+
+	//
+	// Each call starts with set -e, set -u, and pipefail off, so an option
+	// of one call never stops the wrapper of the next. A failure under a
+	// set -e of the call ends the command, not the shell: the ERR trap
+	// returns from each function of the shell, and at the top it turns
+	// set -e off and leaves the loop around eval. The command keeps its
+	// exit code. A subshell exits as bash makes it exit. A command that
+	// sets its own ERR trap, or that reads an unset variable under set -u,
+	// can still end the shell, as it ends a script.
+	script := fmt.Sprintf("set +euo pipefail\n"+
+		"__fw_pid=$BASHPID __fw_fail=\n"+
+		"set -E\n"+
+		"trap '__fw_s=$?; if [[ $- == *e* && $BASHPID == \"$__fw_pid\" ]]; then if (( ${#FUNCNAME[@]} )); then return $__fw_s; fi; set +e; __fw_fail=$__fw_s; break 1000; fi' ERR\n"+
+		"IFS= read -r -d '' __fw_cmd <<'%[1]s' || true\n%[2]s\n%[1]s\n"+
+		"for __fw_once in 1; do eval \"$__fw_cmd\" </dev/null; done\n"+
+		"__fw_ec=${__fw_fail:-$?}\n"+
 		"printf '%%s%%s %%d\\n' __FW_END_ '%[3]s' \"$__fw_ec\"\n"+
 		"printf '%%s%%s\\n' __FW_END_ '%[3]s' >&2\n",
 		eof, command, mark)
