@@ -297,7 +297,10 @@ func (o *opencode) server(ctx context.Context, m modelConf) (*ocServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd := o.h.command(ctx, argv, root, extra...)
+	cmd, err := o.h.command(ctx, argv, root, extra...)
+	if err != nil {
+		return nil, err
+	}
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {

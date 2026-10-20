@@ -242,7 +242,10 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 	if m.baseURL != "" {
 		extra = append(extra, "ANTHROPIC_BASE_URL="+m.baseURL)
 	}
-	cmd := c.h.command(ctx, argv, dir, extra...)
+	cmd, err := c.h.command(ctx, argv, dir, extra...)
+	if err != nil {
+		return 0, err
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return 0, err

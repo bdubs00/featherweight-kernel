@@ -706,11 +706,13 @@ func (r *run) modelOf(ctx context.Context) (modelConf, error) {
 
 // command builds the command of a process of the harness. The process
 // runs as the tool user, with the environment of a tool process
-// (fw.ToolEnv) and the variables of tools.bash.env, in dir. HOME is the
-// home of the harness. extra comes last: the variables that the harness
-// needs on purpose, such as the key of its model, which the environment
-// of a tool process leaves out.
-func (h *host) command(ctx context.Context, argv []string, dir string, extra ...string) *exec.Cmd {
+// (fw.ToolEnv) and the variables of tools.bash.env, in dir, then the
+// changes of the linked packages (fw.ExtendToolEnv), such as the PATH of
+// the environment of section 18, whose error stops the process. HOME is
+// the home of the harness. extra comes last: the variables that the
+// harness needs on purpose, such as the key of its model, which the
+// environment of a tool process leaves out.
+func (h *host) command(ctx context.Context, argv []string, dir string, extra ...string) (*exec.Cmd, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cfg := h.a.Config()
@@ -721,12 +723,16 @@ func (h *host) command(ctx context.Context, argv []string, dir string, extra ...
 		}
 	}
 	sort.Strings(configured)
-	cmd.Env = fw.ToolEnv(fw.WithAgent(ctx, h.a), cfg, os.Environ(), configured)
+	actx := fw.WithAgent(ctx, h.a)
+	env := fw.ToolEnv(actx, cfg, os.Environ(), configured)
+	env, err := fw.ExtendToolEnv(actx, cfg, append(env, "HOME="+h.home, "FW_RUN_DIR="+dir))
+	if err != nil {
+		return nil, fmt.Errorf("harness: the environment of %s: %w", argv[0], err)
+	}
+	cmd.Env = append(env, extra...)
 	h.a.ToolUser().Apply(cmd)
-	cmd.Env = append(cmd.Env, "HOME="+h.home, "FW_RUN_DIR="+dir)
-	cmd.Env = append(cmd.Env, extra...)
 	procAttr(cmd)
-	return cmd
+	return cmd, nil
 }
 
 // logLines logs each line of the output of a process of the harness at
