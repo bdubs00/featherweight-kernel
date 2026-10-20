@@ -147,6 +147,11 @@ func TestClaudeCodeRun(t *testing.T) {
 				Type, URL, OnFailure string
 			}
 		}
+		DisableAllHooks     *bool    `json:"disableAllHooks"`
+		AllowedHTTPHookURLs []string `json:"allowedHttpHookUrls"`
+		Permissions         struct {
+			DefaultMode string `json:"defaultMode"`
+		} `json:"permissions"`
 	}
 	if err := json.Unmarshal([]byte(argOf(c.Args, "--settings")), &settings); err != nil {
 		t.Fatal(err)
@@ -154,6 +159,13 @@ func TestClaudeCodeRun(t *testing.T) {
 	h := settings.Hooks["PreToolUse"][0].Hooks[0]
 	if h.Type != "http" || !strings.HasPrefix(h.URL, "http://127.0.0.1:") || !strings.Contains(h.URL, hookPath) || h.OnFailure != "block" {
 		t.Fatalf("hook = %+v", h)
+	}
+	// A settings file of the repository cannot turn the hook off, block
+	// its URL, or change the permission mode.
+	allowed := settings.AllowedHTTPHookURLs
+	if settings.DisableAllHooks == nil || *settings.DisableAllHooks || len(allowed) != 1 || !strings.HasSuffix(allowed[0], hookPath+"*") ||
+		!strings.HasPrefix(h.URL, strings.TrimSuffix(allowed[0], "*")) || settings.Permissions.DefaultMode != "default" {
+		t.Fatalf("settings = %s", argOf(c.Args, "--settings"))
 	}
 
 	// A follow-up resumes the same session in a new process.

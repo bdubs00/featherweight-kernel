@@ -213,10 +213,7 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		delete(c.h.hooks, key)
 		c.h.mu.Unlock()
 	}()
-	settings := mustJSON(map[string]any{"hooks": map[string]any{"PreToolUse": []any{map[string]any{
-		"matcher": "*",
-		"hooks":   []any{map[string]any{"type": "http", "url": hook + key, "timeout": 120, "onFailure": "block"}},
-	}}}})
+	settings := mustJSON(hookSettings(hook, key))
 	argv := append([]string(nil), c.h.cfg.Command...)
 	if len(argv) == 0 {
 		argv = []string{"claude"}
@@ -441,6 +438,26 @@ func (c *claude) ended(ctx context.Context, r *run, rec *recorder, m *ccMapper, 
 		return 0, err
 	}
 	return ccFailed, r.fail(ctx, "claude: "+msg)
+}
+
+// hookSettings returns the settings of a process of claude: the hook and
+// the keys that keep it in force. The settings of --settings win over the
+// local and the project settings of the repository, which the model can
+// write. disableAllHooks false keeps a true there from turning the hook
+// off. allowedHttpHookUrls merges across the files, so the URL of the hook
+// stays allowed when a file of the repository limits the URLs. The
+// permission mode default keeps a mode such as acceptEdits or dontAsk of
+// a file of the repository from the calls that the hook does not decide.
+func hookSettings(hook, key string) map[string]any {
+	return map[string]any{
+		"disableAllHooks":     false,
+		"allowedHttpHookUrls": []string{hook + "*"},
+		"permissions":         map[string]any{"defaultMode": "default"},
+		"hooks": map[string]any{"PreToolUse": []any{map[string]any{
+			"matcher": "*",
+			"hooks":   []any{map[string]any{"type": "http", "url": hook + key, "timeout": 120, "onFailure": "block"}},
+		}}},
+	}
 }
 
 // ccResult is the result line of a process.
