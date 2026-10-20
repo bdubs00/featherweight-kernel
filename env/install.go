@@ -199,7 +199,8 @@ func (in *installer) install(ctx context.Context, digest string, prev *Failure) 
 		return nil
 	}
 	if serr == nil {
-		m.Seconds = time.Since(start).Round(time.Millisecond).Seconds()
+		m.Ready = time.Now().UTC()
+		m.Seconds = m.Ready.Sub(start).Round(time.Millisecond).Seconds()
 		if err := writeFile(in.s.markerPath(), m); err != nil {
 			serr = &stepError{step: "marker", err: err}
 		}
@@ -238,7 +239,7 @@ func (in *installer) materialize(ctx context.Context, digest string) (*Marker, *
 	if err := in.layout(); err != nil {
 		return nil, &stepError{step: "layout", err: err}
 	}
-	m := &Marker{Digest: digest, Placement: s.placement, Ready: time.Now().UTC(), Prepare: len(s.prepare)}
+	m := &Marker{Digest: digest, Placement: s.placement, Prepare: len(s.prepare)}
 	env := in.env(ctx, nil)
 	if s.python != "" {
 		if err := present(s.python, s.uvLock(), "uv lock"); err != nil {
@@ -373,8 +374,16 @@ func (in *installer) run(ctx context.Context, env []string, dir, name string, ar
 	cmd := in.command(ctx, env, dir, name, args...)
 	cmd.Stdout, cmd.Stderr = &out, &out
 	in.log.Debug("env: run", "command", name, "args", args)
-	err := cmd.Run()
+	err := missing(name, cmd.Run())
 	return out.end(), err
+}
+
+// missing says that the image must carry a manager that is not on PATH.
+func missing(name string, err error) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return fmt.Errorf("%s is not on PATH; the image must carry it, because fw does not download it: %w", name, err)
+	}
+	return err
 }
 
 // output runs a manager and returns its standard output, for JSON.
@@ -383,7 +392,7 @@ func (in *installer) output(ctx context.Context, env []string, dir, name string,
 	var stderr tail
 	cmd := in.command(ctx, env, dir, name, args...)
 	cmd.Stdout, cmd.Stderr = &limited{w: &stdout, n: jsonBytes}, &stderr
-	if err := cmd.Run(); err != nil {
+	if err := missing(name, cmd.Run()); err != nil {
 		if e := stderr.end(); e != "" {
 			return nil, fmt.Errorf("%w: %s", err, firstLine(e))
 		}

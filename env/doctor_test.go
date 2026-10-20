@@ -79,3 +79,13 @@ func TestDoctorImage(t *testing.T) {
 		t.Fatalf("image without manifests: %v %q", ok, line)
 	}
 }
+
+// An install without uv on PATH fails with a reason that names the image.
+func TestInstallWithoutManager(t *testing.T) {
+	f := newFixture(t, "python: pyproject.toml\n")
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
+	_, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "uv is not on PATH; the image must carry it") {
+		t.Fatalf("err = %v", err)
+	}
+}
