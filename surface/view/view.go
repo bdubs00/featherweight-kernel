@@ -567,6 +567,20 @@ func describe(e fw.Event) string {
 			}
 			return s
 		}
+	case fw.EvOutcomeEvaluated:
+		var d fw.OutcomeEvaluatedData
+		if e.Decode(&d) == nil {
+			s := fmt.Sprintf("graded %s in pass %d of %d", d.Verdict, d.Iteration, d.Iterations)
+			if d.Continue {
+				s += "; the run revises its answer"
+			}
+			if t := oneLine(d.Notes, 120); t != "" {
+				s += ": " + t
+			} else if d.Reason != "" {
+				s += " (" + oneLine(d.Reason, 120) + ")"
+			}
+			return s
+		}
 	case fw.EvLoopDetected:
 		var d fw.LoopDetectedData
 		if e.Decode(&d) == nil {

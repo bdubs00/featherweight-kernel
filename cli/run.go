@@ -568,6 +568,11 @@ func summarize(e fw.Event, tools map[string]string) string {
 		if e.Decode(&d) == nil {
 			add("tool=%s count=%d period=%d action=%s", d.Tool, d.Count, d.Period, d.Action)
 		}
+	case fw.EvOutcomeEvaluated:
+		var d fw.OutcomeEvaluatedData
+		if e.Decode(&d) == nil {
+			add("verdict=%s pass=%d/%d continue=%t grader=%s", d.Verdict, d.Iteration, d.Iterations, d.Continue, d.Grader)
+		}
 	case fw.EvError:
 		var d fw.ErrorData
 		if e.Decode(&d) == nil {
