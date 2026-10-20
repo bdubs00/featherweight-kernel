@@ -293,3 +293,9 @@ func answerOnly(f *fakeOC, p fakePrompt) {
 	f.part(sid, map[string]any{"id": "prt_f", "messageID": m, "type": "step-finish", "reason": "stop", "cost": 0, "tokens": tokens(10, 2)})
 	f.status(sid, "idle")
 }
+
+// silent is the script of a session that starts to work and then sends
+// nothing, not even a heartbeat.
+func silent(f *fakeOC, p fakePrompt) {
+	f.status(p.Session, "busy")
+}

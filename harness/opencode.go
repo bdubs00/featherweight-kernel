@@ -472,11 +472,15 @@ type ocQueue struct {
 	wake   chan struct{}
 	err    error
 	closed bool
+	last   time.Time // the latest event of the stream, a heartbeat included
 }
 
-func newQueue() *ocQueue { return &ocQueue{wake: make(chan struct{}, 1)} }
+func newQueue() *ocQueue { return &ocQueue{wake: make(chan struct{}, 1), last: time.Now()} }
 
 func (q *ocQueue) push(e ocEvent) {
+	q.mu.Lock()
+	q.last = time.Now()
+	q.mu.Unlock()
 	switch e.Type {
 	case "server.heartbeat", "message.part.delta":
 		return
@@ -485,6 +489,13 @@ func (q *ocQueue) push(e ocEvent) {
 	q.items = append(q.items, e)
 	q.mu.Unlock()
 	q.signal()
+}
+
+// silence returns the time since the latest event of the stream.
+func (q *ocQueue) silence() time.Duration {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return time.Since(q.last)
 }
 
 func (q *ocQueue) close(err error) {
@@ -506,9 +517,12 @@ func (q *ocQueue) signal() {
 // errLost means that the event stream or the server ended.
 var errLost = errors.New("harness: the event stream of opencode ended")
 
-// next returns the next event. It fails with errLost once the stream ended
-// and every event is taken.
-func (q *ocQueue) next(ctx context.Context) (ocEvent, error) {
+// errTick means that the tick of next came before an event.
+var errTick = errors.New("harness: no event before the tick")
+
+// next returns the next event, or errTick when tick fires first. It fails
+// with errLost once the stream ended and every event is taken.
+func (q *ocQueue) next(ctx context.Context, tick <-chan time.Time) (ocEvent, error) {
 	for {
 		q.mu.Lock()
 		if len(q.items) > 0 {
@@ -524,6 +538,8 @@ func (q *ocQueue) next(ctx context.Context) (ocEvent, error) {
 		}
 		select {
 		case <-q.wake:
+		case <-tick:
+			return ocEvent{}, errTick
 		case <-ctx.Done():
 			return ocEvent{}, ctx.Err()
 		}
@@ -660,7 +676,7 @@ func (o *opencode) drive(ctx context.Context, r *run) error {
 		case out == ocLost:
 			o.drop(r.hr.ID())
 			if tries >= 2 {
-				return r.fail(ctx, "harness: opencode stopped three times during the run")
+				return r.fail(ctx, "harness: opencode stopped, or sent no event for "+o.h.quiet.String()+", three times during the run")
 			}
 			o.h.log.Warn("opencode stopped during a run; it starts again", "run", r.hr.ID())
 			continue
@@ -818,9 +834,25 @@ func (o *opencode) abort(s *ocSession) {
 
 // follow maps the events of the session onto the run until the session is
 // idle, a permission waits, the run reaches its budget, or the stream ends.
+// A tick checks the budget, such as the deadline, also while no event
+// comes, and a stream without any event for the time quiet of the host,
+// a heartbeat included, counts as lost.
 func (o *opencode) follow(ctx context.Context, r *run, s *ocSession) (ocOutcome, error) {
+	tick := time.NewTicker(o.h.tick)
+	defer tick.Stop()
 	for {
-		e, err := s.queue.next(ctx)
+		e, err := s.queue.next(ctx, tick.C)
+		if errors.Is(err, errTick) {
+			if err := s.rec.check(ctx); err != nil {
+				return o.over(err)
+			}
+			if d := s.queue.silence(); d > o.h.quiet {
+				o.h.log.Warn("opencode sent no event; the session counts as lost", "run", r.hr.ID(), "silence", d.Round(time.Second))
+				o.abort(s)
+				return ocLost, nil
+			}
+			continue
+		}
 		if err != nil {
 			if errors.Is(err, errLost) {
 				return ocLost, nil

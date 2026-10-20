@@ -433,3 +433,50 @@ func TestOpencodeBranchFails(t *testing.T) {
 		t.Fatalf("prompts = %+v", f.prompts)
 	}
 }
+
+// TestOpencodeSilence follows a session that sends nothing: the driver
+// counts the stream as lost after the quiet time, starts again twice, and
+// fails the run.
+func TestOpencodeSilence(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, silent)
+	cfg := testConfig(t, d, ocBlock(d, f))
+	a := newAgent(t, cfg, fw.NewMemLedger())
+	h := a.Runner().(*host)
+	h.tick, h.quiet = 20*time.Millisecond, 200*time.Millisecond
+	r, err := a.Start(testCtx(t), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateFailed || !strings.Contains(r.Error, "sent no event") {
+		t.Fatalf("run = %+v", r)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.prompts) != 3 || len(f.aborts) != 3 {
+		t.Fatalf("prompts = %d, aborts = %d", len(f.prompts), len(f.aborts))
+	}
+}
+
+// TestOpencodeDeadlineWithoutEvents follows a session that sends nothing
+// until the deadline of the run passes: the tick stops the run.
+func TestOpencodeDeadlineWithoutEvents(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, silent)
+	cfg := testConfig(t, d, ocBlock(d, f))
+	l := fw.NewMemLedger()
+	a := newAgent(t, cfg, l)
+	a.Runner().(*host).tick = 20 * time.Millisecond
+	r, err := a.Start(testCtx(t), "hello", fw.WithRunBudget(fw.Budget{Deadline: 300 * time.Millisecond}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateFailed || !strings.Contains(r.Error, "deadline") {
+		t.Fatalf("run = %+v", r)
+	}
+	if n := len(ofType(events(t, l, r.ID), fw.EvBudgetExceeded)); n != 1 {
+		t.Fatalf("%d budget events", n)
+	}
+}

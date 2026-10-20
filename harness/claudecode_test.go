@@ -401,3 +401,63 @@ func TestClaudeCodeAskInABatch(t *testing.T) {
 		t.Fatalf("%d approvals", n)
 	}
 }
+
+// silentClaude returns the block harness of a claude that writes its first
+// line and then nothing.
+func silentClaude(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "claude")
+	script := `#!/bin/sh
+echo '{"type":"system","subtype":"init","model":"claude-test"}'
+exec sleep 30
+`
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd, _ := json.Marshal([]string{p})
+	return "kind: claude-code\ncommand: " + string(cmd) + "\n"
+}
+
+// TestClaudeCodeSilence stops a claude that writes no line for the quiet
+// time, and fails the run.
+func TestClaudeCodeSilence(t *testing.T) {
+	d := newDirs(t)
+	cfg := testConfig(t, d, silentClaude(t))
+	cfg.Model = "anthropic/claude-test"
+	a := newAgent(t, cfg, fw.NewMemLedger())
+	h := a.Runner().(*host)
+	h.mounts = 1
+	h.tick, h.quiet = 20*time.Millisecond, 200*time.Millisecond
+	r, err := a.Start(testCtx(t), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateFailed || !strings.Contains(r.Error, "wrote no line") {
+		t.Fatalf("run = %+v", r)
+	}
+}
+
+// TestClaudeCodeDeadlineWithoutLines stops a claude that writes nothing
+// until the deadline of the run passes.
+func TestClaudeCodeDeadlineWithoutLines(t *testing.T) {
+	d := newDirs(t)
+	cfg := testConfig(t, d, silentClaude(t))
+	cfg.Model = "anthropic/claude-test"
+	l := fw.NewMemLedger()
+	a := newAgent(t, cfg, l)
+	h := a.Runner().(*host)
+	h.mounts = 1
+	h.tick = 20 * time.Millisecond
+	r, err := a.Start(testCtx(t), "hello", fw.WithRunBudget(fw.Budget{Deadline: 300 * time.Millisecond}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateFailed || !strings.Contains(r.Error, "deadline") {
+		t.Fatalf("run = %+v", r)
+	}
+	if n := len(ofType(events(t, l, r.ID), fw.EvBudgetExceeded)); n != 1 {
+		t.Fatalf("%d budget events", n)
+	}
+}

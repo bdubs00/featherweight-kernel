@@ -379,12 +379,32 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 	}
 	m2 := &ccMapper{c: c, r: r, rec: rec, p: p, sub: map[string]fw.Usage{}}
 	var result *ccResult
+	// A tick checks the budget, such as the deadline, also while claude
+	// writes nothing, and a process that writes no line for the time quiet
+	// of the host counts as lost.
+	tick := time.NewTicker(c.h.tick)
+	defer tick.Stop()
+	last := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			kill()
 			return 0, ctx.Err()
+		case <-tick.C:
+			if err := rec.check(ctx); err != nil {
+				kill()
+				if errors.Is(err, errOver) {
+					return ccOver, nil
+				}
+				return 0, err
+			}
+			if d := time.Since(last); d > c.h.quiet {
+				c.h.log.Warn("claude wrote no line; fw stops it", "run", r.hr.ID(), "silence", d.Round(time.Second))
+				kill()
+				return c.ended(ctx, r, rec, m2, nil, fmt.Errorf("it wrote no line for %s, so fw stopped it", c.h.quiet))
+			}
 		case line, ok := <-out:
+			last = time.Now()
 			if !ok {
 				err := <-exited
 				return c.ended(ctx, r, rec, m2, result, err)

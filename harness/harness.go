@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 	"github.com/bdubs00/featherweight-kernel/surface/native"
@@ -88,6 +89,11 @@ type host struct {
 	home string
 	log  *slog.Logger
 	drv  driver
+	// tick is the period of the checks of the budget while a driver
+	// follows the harness, also when the harness sends nothing. quiet is
+	// the longest time without an event of the harness, after which the
+	// driver counts the harness as lost.
+	tick, quiet time.Duration
 
 	mu     sync.Mutex
 	hooks  map[string]*claudeProc // the running Claude Code processes, by the secret of their hook URL
@@ -120,15 +126,15 @@ func newHost(a *fw.Agent, c Config) (*host, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &host{a: a, cfg: c, home: home, log: a.Logger().With("harness", c.Kind), hooks: map[string]*claudeProc{}}
+	h := &host{a: a, cfg: c, home: home, log: a.Logger().With("harness", c.Kind), hooks: map[string]*claudeProc{}, tick: checkEvery}
 	switch c.Kind {
 	case KindOpencode:
-		h.drv = newOpencode(h)
+		h.drv, h.quiet = newOpencode(h), opencodeQuiet
 	case KindClaudeCode:
 		if c.Port != 0 {
 			return nil, errors.New("harness: port is a setting of opencode; remove harness.port for claude-code")
 		}
-		h.drv = &claude{h: h}
+		h.drv, h.quiet = &claude{h: h}, claudeQuiet
 	case "":
 		return nil, errors.New("harness: the block harness needs kind: opencode or claude-code")
 	default:
@@ -137,6 +143,17 @@ func newHost(a *fw.Agent, c Config) (*host, error) {
 	a.Observe(fw.ObserverFunc(h.observe))
 	return h, nil
 }
+
+// The checks while a driver follows the harness (host.tick, host.quiet).
+// opencode sends a heartbeat on its event stream every 30 seconds, so five
+// minutes without an event means a lost server or stream. Claude writes
+// nothing while a tool call runs, and a call of the Bash tool can take ten
+// minutes, so its bound is longer.
+const (
+	checkEvery    = 15 * time.Second
+	opencodeQuiet = 5 * time.Minute
+	claudeQuiet   = 30 * time.Minute
+)
 
 // observe tells the driver about a run that was canceled.
 func (h *host) observe(e fw.Event) {
