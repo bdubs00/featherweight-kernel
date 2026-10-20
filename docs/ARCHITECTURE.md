@@ -778,7 +778,7 @@ The kernel makes no title call. A title that a model writes comes from the workb
 
 #### Annotations
 
-`Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entries `idempotencyKey`, `fw.drift.system`, and `fw.drift.instructions` (section 12.5) are the kernel's and cannot change. A request cannot set them either, on any surface. The metadata after the merge must fit the bounds of `fw.CheckMetadata`. The entries that the kernel sets, also `fw.forkOf` and `fw.forkSeq` of a branch (section 4.7), do not count, so an entry of the kernel never makes a later annotation fail.
+`Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entries `idempotencyKey`, `fw.drift.system`, and `fw.drift.instructions` (section 12.5) are the kernel's and cannot change. A request cannot set them either, on any surface. The metadata after the merge must fit the bounds of `fw.CheckMetadata`. The entries that the kernel sets, also `fw.forkOf` and `fw.forkSeq` of a branch (section 4.7) and the `fw.intake.*` entries of a job from the bus intake (section 9.3), do not count, so an entry of the kernel never makes a later annotation fail.
 
 The kernel annotates a run itself when the text of its profile changed across a restart, with the keys `fw.drift.system` and `fw.drift.instructions` (section 12.5).
 
@@ -826,6 +826,22 @@ type Bus interface {
 
 `Subscribe` is fan-out. `Consume` is a durable queue with at-least-once delivery. The handler returns `nil` to acknowledge a message and an error to request redelivery. Every message on the bus is a CloudEvents JSON object with the envelope from section 4.1.
 
+A driver can also implement `GatedBus`, a queue consumer that asks a gate before it takes messages:
+
+```go
+type GatedBus interface {
+    Bus
+    ConsumeGated(ctx context.Context, queue string, g Gate, h func(Event) error) (stop func(), err error)
+}
+
+type Gate interface {
+    Admit(ctx context.Context, max int) (int, error)
+    Unused(n int)
+}
+```
+
+Before each read of the queue, the consumer calls `Admit` with the number of messages that it can handle at that moment, reads at most the admitted number, and gives back with `Unused` the admissions that it got no message for. A message that the consumer drops without the handler, such as one that does not decode, gives its admission back too. The owner of the gate frees the admission of a message when the handler returns. The messages that a consumer does not take stay on the queue for the other consumers. The bus intake uses it to take a job only for a free run slot (section 9.3). The `nats` and `redis` drivers implement it. The stop function of a gated consumer ends a wait in `Admit`.
+
 The bus has no other contract. An earlier revision let a driver keep the last event of each subject for the records of the fleet; the fleet reads the platforms now (the workbench architecture, section 4), so that contract went.
 
 ### 9.2 Drivers
@@ -839,7 +855,46 @@ The bus has no other contract. An earlier revision let a driver keep the last ev
 
 ### 9.3 Intake
 
-The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each message is a run request with the same body as `POST /v1/runs`. A request from the queue keeps the `principal` and the `principalKind` that it names, because the bus is a channel of the process, so the front of a fleet sends the work of a person to a worker and the run acts as that person (the workbench architecture, section 4.9). When the run reaches a terminal event, the handler acknowledges the message. The message id is the idempotency key, so a redelivered message does not start a second run. If the bus is out of reach when the process boots, the consumer does not start, and the kernel logs a warning and tries again in the background, with a pause that doubles up to 30 seconds, while the process serves its API and its health. A sandbox whose egress policy takes effect after the first packet, and a bus server that restarts, both need this.
+The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each message is a run request with the same body as `POST /v1/runs`. A request from the queue keeps the `principal` and the `principalKind` that it names, because the bus is a channel of the process, so the front of a fleet sends the work of a person to a worker and the run acts as that person (the workbench architecture, section 4.9). If the bus is out of reach when the process boots, the consumer does not start, and the kernel logs a warning and tries again in the background, with a pause that doubles up to 30 seconds, while the process serves its API and its health. A sandbox whose egress policy takes effect after the first packet, and a bus server that restarts, both need this.
+
+#### One job for each free run slot
+
+The intake takes a message only when a slot of `maxRuns` is free. Under ax that is one slot, so a Task holds one job at a time, and the other Tasks of the queue take the other jobs. The drivers of top-level runs fill the slots, and a driver that waits for a slot counts too. A run that waits for the decision of a person on a held tool call has no driver, so its slot is free, and the Task takes its next job while the person decides. A tool that waits for an answer inside its call keeps its driver and its slot. The intake consumes through `GatedBus` (section 9.1), so a message that the Task cannot start stays on the queue. A run that another surface starts at the same moment can take the free slot first. The job then waits in this process for the next slot. A bus driver without `GatedBus` hands over messages as fast as its consumer takes them, and their runs wait in the process for a slot.
+
+The option `concurrency` of the `nats` and `redis` drivers is the number of messages that one consumer handles at a time. Its default is `maxRuns`: 16 when the configuration leaves `maxRuns` at 0, and 1 under ax. `bus.options.concurrency` sets another value.
+
+#### The acknowledgement
+
+The handler acknowledges a message as soon as `fw.run.queued` of its run is in the ledger. The file ledger syncs that event of a run from the bus to the disk before the append returns. The handler does not wait for the end of the run. A run that waits for a person therefore holds no message, the front that suspends an idle Task leaves no message whose acknowledgement times out, and a shutdown waits for no handler.
+
+From then on the ledger holds the job, and the bus does not deliver the message again. A run that a shutdown, a suspend, or a crash interrupts resumes from the ledger at the next start of the same process (sections 4.5 and 11.5), and no other process starts a second run of it. The message id is the idempotency key when the request names none, so a message that comes back to the same process returns the first run. Two cases still deliver a message again. A message that arrives while the kernel shuts down starts no run, and the handler returns an error, so another process can take it. A process that stops between the append and the acknowledgement leaves the message on the queue, and another process can then start a second run of the job, because the idempotency key holds in one process only.
+
+#### Retries
+
+`bus.intakeRetries` is the number of times that the kernel puts a job on its queue again after the run of the job failed. The default is 0, because each retry spends model tokens again. A retry is a new message of the type `fw.run.request` on the same queue, so any process of the queue can take it. It carries the request of the failed run, with the bytes of its files read again from the workspace, an idempotency key of its own, `<failed run>.retry`, and two metadata entries: `fw.intake.attempt`, the number of the attempt, 2 for the first retry, and `fw.intake.retryOf`, the id of the failed run. A file that changed or went after the run started stops the retry, and the job goes to the dead letter with that error. A canceled run and a completed run get no retry.
+
+#### Dead letter
+
+The subject `<intake>.dead`, for example `fw.jobs.reviewer.dead`, receives a record for every job whose run failed after its last attempt, and for every request that cannot start: a message that is not a run request, a profile that does not exist, a run without a model, and every other refusal of the start. The record is the event `fw.intake.dead`, which is not a ledger event. Its data has these fields:
+
+| Field | Value |
+|---|---|
+| `queue` | The intake queue. |
+| `request` | The run request. For a failed run, the request as `fw.run.queued` recorded it, with the idempotency key and the attempt metadata, and with references in place of the bytes of its files. For a request that cannot start, the request as the message carried it, without the bytes of its files, or the data of the message when it is not a run request. |
+| `run` | The id of the failed run. A request that cannot start has none. |
+| `message` | The id of the bus message of a request that cannot start. |
+| `outcome` | `failed` for a run that failed after its last attempt, `rejected` for a request that cannot start. |
+| `error` | Why, such as `budget exceeded: deadline`. |
+| `attempts` | The attempts of the job, this one included. |
+| `node` | The process that sent the record (the key `node`). |
+
+The envelope has the same `node`, the run as `subject`, and the id `<run>.dead`, or `<message>.dead` for a request that cannot start, so a bus that drops a repeated message also drops a repeated record. A record costs nothing, so the dead letter is on by default, and `bus.deadLetter: false` turns it off. The `nats` driver adds the subject to its stream when the stream does not capture it already, so the stream stores the records. The `redis` driver keeps every subject in a stream of its own. A queue with a wildcard has no subject for a retry or a dead-letter record, and the kernel logs a warning when the intake starts.
+
+If the dead letter refuses the record of a request that cannot start, the handler returns an error, so the bus delivers the message again. Otherwise the handler acknowledges such a message, because the bus delivers it again and again until the handler does.
+
+#### What a failed job owes
+
+The intake marks each run that it starts with the metadata entry `fw.intake.queue`, the queue of the job. When the run fails, the kernel sends the retry or the record, and then annotates the run with `fw.intake.outcome`: `retried`, `dead-lettered`, or `dropped` when the dead letter is off. A failed run with `fw.intake.queue` and without `fw.intake.outcome` still owes its retry or its record. The kernel tries again while the bus refuses, with a pause that doubles up to 30 seconds, and a restart sends it from the ledger. A run from the bus of an older kernel has no `fw.intake.queue`, so an upgrade sends nothing for its old failures. A branch of a job (section 4.7) is no job: it gets no retry and no record. A request cannot set `fw.intake.outcome`, because the intake removes the entry. The `fw.intake.*` entries do not count against the bound of the metadata (section 8.2).
 
 ### 9.4 Egress
 
@@ -1020,7 +1075,7 @@ An A2A message or an MCP call to a suspended agent wakes it. An MCP request in r
 
 Agent Substrate v0.4.0 suspends an ax Task in three steps. It pauses the sandbox, saves `/workspace`, and then kills `fw` with `SIGKILL`. No `SIGTERM` comes first, although the ax runner document says so. `fw` therefore writes no `fw.run.suspended` event, and an event that `fw` writes after the save is lost. Later, Substrate restores `/workspace` into a fresh container.
 
-On resume, `fw` boots again, finds the markers, skips setup, and resumes runs from the ledger. A run that was waiting for an approval is still waiting. A run that was in the middle of a model call sends the call again. If the lost events include a tool call that ran, the resumed run asks the policy again and can run the call a second time. The working time of a run ends at the last event before the suspend (section 5.8). The deadline therefore does not count the time that the Task sleeps. A grant that `fw` refreshed after the save comes back as its old copy. The authorization server can then refuse it, and the person connects again (section 7.11).
+On resume, `fw` boots again, finds the markers, skips setup, and resumes runs from the ledger. A run that was waiting for an approval is still waiting. The bus intake acknowledged the job of each run when the run was queued (section 9.3), so the bus gives no job of a sleeping Task to another Task. A run that was in the middle of a model call sends the call again. If the lost events include a tool call that ran, the resumed run asks the policy again and can run the call a second time. The working time of a run ends at the last event before the suspend (section 5.8). The deadline therefore does not count the time that the Task sleeps. A grant that `fw` refreshed after the save comes back as its old copy. The authorization server can then refuse it, and the person connects again (section 7.11).
 
 `fw` still follows section 5.6 on `SIGTERM`. If the worker pod itself stops, Substrate sends `SIGTERM`. After a grace period of 30 minutes, it sends `SIGKILL`.
 
@@ -1666,6 +1721,8 @@ Each milestone ends with a working binary. As of 2026-10-13, every milestone bel
 - persistence of A2A push configurations across a restart
 - the Vault and Google Secret Manager drivers
 - the OpenAI Responses API transport
+
+The intake revision of 2026-10-20 changed the bus intake (section 9.3). The intake takes a job only for a free slot of `maxRuns`, through the new `fw.GatedBus` and `fw.Gate` of the `nats` and `redis` drivers, and the option `concurrency` of both drivers defaults to `maxRuns`, so one Task under ax holds one job. The handler acknowledges a job when `fw.run.queued` of its run is in the ledger, which the file ledger syncs, and no longer waits for the end of the run. A run that waits for a person therefore holds no message, a suspend gives no job to a second Task, and a shutdown with a job in flight does not hang. The configuration gained `bus.intakeRetries` (default 0) and `bus.deadLetter` (default on), the dead-letter subject `<intake>.dead` with the event `fw.intake.dead`, the metadata entries `fw.intake.queue`, `fw.intake.attempt`, `fw.intake.retryOf`, and `fw.intake.outcome`, and `Config.RunSlots`.
 
 The export revision of 2026-10-17 added the service `Export` of the package `telemetry` (section 10.5): with the standard `OTEL_EXPORTER_OTLP_*` variables, a process pushes its Prometheus series over OTLP, sends every ledger event as a log record with the trace of its run, and starts the trace projection, which no verb started before. The run counters gained the label `batch`, and `fw doctor` gained the line `telemetry`. The fleet gauges of the workbench and the Operator view of the page go, because Grafana reads the fleet from the collector.
 

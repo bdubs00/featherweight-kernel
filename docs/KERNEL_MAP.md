@@ -37,7 +37,7 @@ Arrows show calls or data flow, not Go imports. Dotted arrows show composition, 
 | Authentication and authorization | [`fw/surface.go`](../fw/surface.go): `RequireAuth`; [`fw/authz.go`](../fw/authz.go); [`authn/oidc/`](../authn/oidc/), [`authn/spiffe/`](../authn/spiffe/) |
 | Tool policy and external decisions | [`fw/policy.go`](../fw/policy.go), [`fw/external.go`](../fw/external.go), [`tools/mcp/decision.go`](../tools/mcp/decision.go) |
 | Transport surfaces and shared views | [`surface/native/`](../surface/native/), [`surface/a2a/`](../surface/a2a/), [`surface/view/`](../surface/view/) |
-| Queue intake and event egress | [`fw/busio.go`](../fw/busio.go): `handleIntake`, `egress`; [`bus/nats/`](../bus/nats/), [`bus/redis/`](../bus/redis/) |
+| Queue intake and event egress | [`fw/intake.go`](../fw/intake.go): `handleIntake`, `intakeGate`, `settleJob`; [`fw/busio.go`](../fw/busio.go): `egress`; [`bus/nats/`](../bus/nats/), [`bus/redis/`](../bus/redis/) |
 | Observability | [`surface/metrics/metrics.go`](../surface/metrics/metrics.go); [`telemetry/metrics.go`](../telemetry/metrics.go): `Attach`; [`telemetry/otlp.go`](../telemetry/otlp.go): `Export` |
 | Child execution and credentials | [`fw/spawn.go`](../fw/spawn.go): `SpawnChild`, `Spawner`, `Forker`; [`ax/spawn.go`](../ax/spawn.go); [`fw/connect.go`](../fw/connect.go); [`tokens/tokens.go`](../tokens/tokens.go) |
 
@@ -69,7 +69,7 @@ The sequence shows the main answer/tool paths. Refusal, output-token continuatio
 
 - Native SSE, A2A task streams, and CLI event output read or watch the ledger. The current model call uses `Model.Stream`, but `stepModel` discards deltas and records the full response. These surface streams are event streams, not live token streams.
 - Observers receive new events after the append and status update. They are synchronous callbacks and must return quickly. Startup does not replay all historical events to every observer. Metrics seed open-run state when attached; historical counters are not rebuilt.
-- Bus intake uses an idempotency key and acknowledges valid work after the run becomes terminal. Egress uses an ordered in-memory retry queue capped at 10,000 events. It is not a durable outbox: queue overflow, process loss, or a failed shutdown drain can lose forwarded events. The ledger retains the run record.
+- Bus intake takes a job only for a free `maxRuns` slot (`fw.GatedBus`) and acknowledges it once `fw.run.queued` is synced to the ledger; it never waits for the run. A failed job goes back on the queue up to `bus.intakeRetries` times and then to `<intake>.dead`, as does a request that cannot start (updated 2026-10-20). Egress uses an ordered in-memory retry queue capped at 10,000 events. It is not a durable outbox: queue overflow, process loss, or a failed shutdown drain can lose forwarded events. The ledger retains the run record.
 - The metrics surface exposes Prometheus. The `telemetry.Export` service sends configured OTLP metrics, event logs, and traces. Metrics export waits for the metrics surface to mount.
 
 ## 3. Deployment inside ax
