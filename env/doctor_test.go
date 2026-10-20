@@ -4,6 +4,7 @@ package env
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -51,5 +52,30 @@ func TestDoctor(t *testing.T) {
 	bad := newFixture(t, "pyhton: x")
 	if ok, line := doctor(ctx, bad.cfg, nil, time.Second); ok || !strings.Contains(line, "is not a key") {
 		t.Fatalf("bad: %v %q", ok, line)
+	}
+}
+
+// With placement image, the line compares the digest of the image with
+// the manifests of the workspace when the workspace holds them.
+func TestDoctorImage(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, "placement: image\ndir: "+filepath.Join(t.TempDir(), "img")+"\npython: pyproject.toml\n")
+	if ok, line := doctor(ctx, f.cfg, nil, time.Second); ok || !strings.Contains(line, "the image holds no environment") {
+		t.Fatalf("no marker: %v %q", ok, line)
+	}
+	if err := os.MkdirAll(f.s.dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(f.s.markerPath(), &Marker{Digest: "sha256:0000000000000000", Placement: PlacementImage}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, line := doctor(ctx, f.cfg, nil, time.Second); ok || !strings.Contains(line, "build the image again") {
+		t.Fatalf("stale image: %v %q", ok, line)
+	}
+	if err := os.Remove(f.s.python); err != nil {
+		t.Fatal(err)
+	}
+	if ok, line := doctor(ctx, f.cfg, nil, time.Second); !ok || !strings.Contains(line, "ready sha256:0000") {
+		t.Fatalf("image without manifests: %v %q", ok, line)
 	}
 }

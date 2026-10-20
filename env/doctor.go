@@ -34,7 +34,7 @@ func doctor(ctx context.Context, cfg *fw.Config, _ fw.Secrets, timeout time.Dura
 		if m.Seconds > 0 {
 			line += fmt.Sprintf(", installed %s in %.1fs", m.Ready.Format(time.DateOnly), m.Seconds)
 		}
-		if s.placement == PlacementImage && m.Digest != st.Digest {
+		if s.placement == PlacementImage && s.manifestsPresent() && m.Digest != st.Digest {
 			ok = false
 			line = fmt.Sprintf("the image holds %s, but the manifests give %s; build the image again with fw env dockerfile", short(m.Digest), short(st.Digest))
 		}
@@ -70,6 +70,17 @@ func doctor(ctx context.Context, cfg *fw.Config, _ fw.Secrets, timeout time.Dura
 		}
 	}
 	return ok, "environment: " + strings.Join(parts, "; ")
+}
+
+// manifestsPresent reports whether the workspace holds every manifest of
+// the block, so its digest can be compared with the digest of an image.
+func (s *spec) manifestsPresent() bool {
+	for _, p := range []string{s.python, s.tools} {
+		if p != "" && !exists(p) {
+			return false
+		}
+	}
+	return true
 }
 
 // managers names the managers that the block needs.
