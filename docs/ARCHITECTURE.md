@@ -2106,11 +2106,13 @@ The kernel cannot add an egress rule. A person adds the rules to the Task. A fai
 `fw env dockerfile --from <image>` prints a Dockerfile for `placement: image`, for the pools pipeline to build and pin. It builds nothing. The build context is the root of the workspace. The Dockerfile:
 
 1. Installs uv 0.13.1 and pixi 0.82.0 from their release URLs on GitHub (the static musl builds for amd64 and arm64), and checks the sha256 of each archive. A new version needs new checksums.
-2. Sets the variables of section 18.5 with `dir` inside the image.
+2. Sets the variables of section 18.5 with `dir` inside the image, except the caches: at run time the kernel gives a tool process the cache of the configuration.
 3. Copies the manifests and the lock files, and `.python-version` when it exists, to `<dir>/src/python` and `<dir>/src/tools`.
-4. Runs `uv sync --frozen --no-install-project` and `pixi install --frozen` with the caches in a BuildKit cache mount, so the caches stay out of the image.
+4. Runs `uv sync --frozen --no-install-project` and `pixi install --frozen`.
 5. Runs each `prepare` command in `dir`.
 6. Writes the marker with the digest and the versions.
+
+Steps 4 to 6 keep the caches in a BuildKit cache mount, so no cache lands in the image.
 
 A block with `placement: image` keeps its `dir`. A durable block gives `/opt/environment`, and the comment at the top of the file names the block that the image needs. The base image must have `/bin/sh`, `curl`, `tar`, and `sha256sum`, which `fw:toolbox` has. apt packages stay an image concern: add them to the file before the managers. When the workspace of the Task holds the manifests, `fw doctor` compares the digest of the marker in the image with the digest of those files, and fails when they differ.
 

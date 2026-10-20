@@ -71,9 +71,6 @@ func (s *spec) dockerfile(from string) (string, error) {
 	if img.placement != PlacementImage {
 		img.placement, img.dir = PlacementImage, imageDir
 	}
-	if !under(img.cache, volume) {
-		img.cache = axCache
-	}
 	if !safePath.MatchString(img.dir) {
 		return "", fmt.Errorf("env: environment.dir %s holds characters that a Dockerfile must quote", img.dir)
 	}
@@ -106,17 +103,22 @@ func (s *spec) dockerfile(from string) (string, error) {
 	p("    tar -xzf /tmp/pixi.tar.gz -C /usr/local/bin pixi; \\\n")
 	p("    rm /tmp/uv.tar.gz /tmp/pixi.tar.gz\n\n")
 
-	// The variables of the environment, as every tool process gets them,
-	// with the cache of the configuration for the runs of the Task.
+	// The variables of the environment, as every tool process gets them.
+	// The caches stay out: while the image builds they are in the cache
+	// mount, and at run time the kernel gives a tool process the cache of
+	// the configuration.
 	var vars []string
 	for _, kv := range img.vars(nil) {
-		if !strings.HasPrefix(kv, "UV_LINK_MODE=") {
+		name, _, _ := strings.Cut(kv, "=")
+		if name != "UV_LINK_MODE" && name != "UV_CACHE_DIR" && name != "PIXI_CACHE_DIR" {
 			vars = append(vars, kv)
 		}
 	}
 	vars = append(vars, "PATH="+strings.Join(img.paths(nil), ":")+":$PATH")
 	p("ENV %s\n\n", strings.Join(vars, " \\\n    "))
-	quiet := "UV_NO_PROGRESS=1 PIXI_NO_PROGRESS=true PIXI_COLOR=never"
+	// Every step after the install of the managers uses the cache mount,
+	// so no cache lands in the image.
+	build := fmt.Sprintf("UV_CACHE_DIR=%[1]s/uv PIXI_CACHE_DIR=%[1]s/pixi UV_LINK_MODE=copy UV_NO_PROGRESS=1 PIXI_NO_PROGRESS=true PIXI_COLOR=never", buildCache)
 	cacheMount := "--mount=type=cache,target=" + buildCache
 	var marker []string
 	if s.python != "" {
@@ -140,7 +142,7 @@ func (s *spec) dockerfile(from string) (string, error) {
 			files = append(files, rel)
 		}
 		p("COPY %s %s\n", strings.Join(files, " "), dst)
-		p("RUN %s \\\n    UV_CACHE_DIR=%s/uv UV_LINK_MODE=copy %s \\\n    uv sync --frozen --no-install-project --project %s\n\n", cacheMount, buildCache, quiet, strings.TrimSuffix(dst, "/"))
+		p("RUN %s \\\n    %s \\\n    uv sync --frozen --no-install-project --project %s\n\n", cacheMount, build, strings.TrimSuffix(dst, "/"))
 		marker = append(marker,
 			fmt.Sprintf(`py=$(uv pip list --format json --python %s)`, img.venv()),
 			fmt.Sprintf(`pyver=$(sed -n 's/^version_info = //p' %s/pyvenv.cfg)`, img.venv()))
@@ -157,7 +159,7 @@ func (s *spec) dockerfile(from string) (string, error) {
 		dst := filepath.Join(img.dir, "src", "tools")
 		manifest := filepath.Join(dst, filepath.Base(s.tools))
 		p("COPY %s %s %s/\n", src, lock, dst)
-		p("RUN %s \\\n    PIXI_CACHE_DIR=%s/pixi %s \\\n    pixi install --frozen --manifest-path %s\n\n", cacheMount, buildCache, quiet, manifest)
+		p("RUN %s \\\n    %s \\\n    pixi install --frozen --manifest-path %s\n\n", cacheMount, build, manifest)
 		marker = append(marker, fmt.Sprintf(`tools=$(pixi list --json --frozen --manifest-path %s)`, manifest))
 	}
 	for _, c := range s.prepare {
@@ -166,10 +168,10 @@ func (s *spec) dockerfile(from string) (string, error) {
 		enc.SetEscapeHTML(false)
 		// A prepare command runs in the root of the workspace at run time.
 		// The image has no workspace, so it runs in dir.
-		if err := enc.Encode([]string{"/bin/sh", "-c", "cd " + img.dir + " && " + c}); err != nil {
+		if err := enc.Encode([]string{"/bin/sh", "-c", "export " + build + "; cd " + img.dir + " && " + c}); err != nil {
 			return "", err
 		}
-		p("RUN %s", buf.String())
+		p("RUN %s %s", cacheMount, buf.String())
 	}
 	if len(s.prepare) > 0 {
 		p("\n")
@@ -187,7 +189,7 @@ func (s *spec) dockerfile(from string) (string, error) {
 		args = append(args, `"$tools"`)
 	}
 	doc += fmt.Sprintf(`,"prepare":%d}\n`, len(s.prepare))
-	p("RUN set -eu; \\\n")
+	p("RUN %s set -eu; export %s; \\\n", cacheMount, build)
 	for _, line := range marker {
 		p("    %s; \\\n", line)
 	}

@@ -34,7 +34,7 @@ func TestDockerfile(t *testing.T) {
 		"uv sync --frozen --no-install-project --project " + d + "/src/python\n",
 		"COPY pixi.toml pixi.lock " + d + "/src/tools/\n",
 		"pixi install --frozen --manifest-path " + d + "/src/tools/pixi.toml\n",
-		`RUN ["/bin/sh","-c","cd ` + d + ` && jq --version > prepared.txt && echo \"$VIRTUAL_ENV\" >> prepared.txt"]`,
+		`RUN --mount=type=cache,target=` + buildCache + ` ["/bin/sh","-c","export UV_CACHE_DIR=` + buildCache + `/uv PIXI_CACHE_DIR=` + buildCache + `/pixi UV_LINK_MODE=copy UV_NO_PROGRESS=1 PIXI_NO_PROGRESS=true PIXI_COLOR=never; cd ` + d + ` && jq --version > prepared.txt && echo \"$VIRTUAL_ENV\" >> prepared.txt"]`,
 		`"digest":"` + f.s.digest() + `","placement":"image"`,
 		"> " + d + "/.fw-env.json",
 		"#     placement: image\n#     dir: " + d + "\n",
@@ -45,6 +45,9 @@ func TestDockerfile(t *testing.T) {
 	}
 	if strings.Contains(text, f.root) {
 		t.Error("the Dockerfile names a path of the build machine")
+	}
+	if strings.Contains(text, "ENV UV_CACHE_DIR") || strings.Contains(text, "    PIXI_CACHE_DIR=/") {
+		t.Error("the image keeps a cache variable")
 	}
 	if err := writeDockerfile(f.cfg, "", &b); err == nil {
 		t.Error("an empty base image passed")
