@@ -612,6 +612,10 @@ func rulesOf(r *fw.Rules) *rulesBody {
 	return out
 }
 
+// budgetBody is fw.Budget in the shape that the native API takes. Of the
+// fields of the final report, only finalReport travels, and only when it
+// is off: a child makes no report where its parent makes none, and
+// the process of the child bounds the call with its own settings.
 type budgetBody struct {
 	MaxTurns        int     `json:"maxTurns,omitempty"`
 	MaxTokens       int     `json:"maxTokens,omitempty"`
@@ -620,6 +624,7 @@ type budgetBody struct {
 	MaxToolCalls    int     `json:"maxToolCalls,omitempty"`
 	MaxCallsPerTurn int     `json:"maxCallsPerTurn,omitempty"`
 	MaxRepeats      int     `json:"maxRepeats,omitempty"`
+	FinalReport     *bool   `json:"finalReport,omitempty"`
 }
 
 func budgetOf(b *fw.Budget) *budgetBody {
@@ -630,6 +635,10 @@ func budgetOf(b *fw.Budget) *budgetBody {
 		MaxToolCalls: b.MaxToolCalls, MaxCallsPerTurn: b.MaxCallsPerTurn, MaxRepeats: b.MaxRepeats}
 	if b.Deadline > 0 {
 		out.Deadline = b.Deadline.String()
+	}
+	if b.FinalReport != nil && !*b.FinalReport {
+		off := false
+		out.FinalReport = &off
 	}
 	return out
 }

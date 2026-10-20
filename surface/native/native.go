@@ -97,6 +97,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/runs/{id}", s.remote(s.getRun)},
 		{"GET /v1/runs/{id}/events", s.remote(s.runEvents)},
 		{"POST /v1/runs/{id}/messages", s.remote(s.sendMessage)},
+		{"PATCH /v1/runs/{id}/budget", s.remote(s.changeBudget)},
 		{"POST /v1/runs/{id}/approvals/{approval}", s.remote(s.decide)},
 		{"POST /v1/runs/{id}/cancel", s.remote(s.cancel)},
 		{"POST /v1/runs/{id}/fork", s.remote(s.fork)},
@@ -232,36 +233,57 @@ type rulesBody struct {
 	All     []rulesBody `json:"all"`
 }
 
-// budgetBody is fw.Budget with a deadline that is a Go duration string,
-// such as "90s", or a number of nanoseconds as in fw.Budget.
+// budgetBody is fw.Budget with a deadline and a report timeout that are Go
+// duration strings, such as "90s", or numbers of nanoseconds as in
+// fw.Budget. FinalReport, ReportMaxTokens, and ReportTimeout shape the
+// final report call at a limit of turns, tool calls, or working time.
 type budgetBody struct {
-	MaxTurns        int      `json:"maxTurns"`
-	MaxTokens       int      `json:"maxTokens"`
-	MaxCostUSD      float64  `json:"maxCostUSD"`
-	Deadline        duration `json:"deadline"`
-	MaxToolCalls    int      `json:"maxToolCalls"`
-	MaxCallsPerTurn int      `json:"maxCallsPerTurn"`
-	MaxRepeats      int      `json:"maxRepeats"`
+	MaxTurns        int             `json:"maxTurns"`
+	MaxTokens       int             `json:"maxTokens"`
+	MaxCostUSD      float64         `json:"maxCostUSD"`
+	Deadline        duration        `json:"deadline"`
+	MaxToolCalls    int             `json:"maxToolCalls"`
+	MaxCallsPerTurn int             `json:"maxCallsPerTurn"`
+	MaxRepeats      int             `json:"maxRepeats"`
+	FinalReport     *bool           `json:"finalReport"`
+	ReportMaxTokens int             `json:"reportMaxTokens"`
+	ReportTimeout   reportTimeoutIn `json:"reportTimeout"`
 }
 
+// duration is the deadline of a budget body.
 type duration time.Duration
 
 func (d *duration) UnmarshalJSON(b []byte) error {
+	v, err := parseDuration(b, "deadline")
+	*d = duration(v)
+	return err
+}
+
+// reportTimeoutIn is the report timeout of a budget body.
+type reportTimeoutIn time.Duration
+
+func (d *reportTimeoutIn) UnmarshalJSON(b []byte) error {
+	v, err := parseDuration(b, "reportTimeout")
+	*d = reportTimeoutIn(v)
+	return err
+}
+
+// parseDuration reads a duration string or a number of nanoseconds. The
+// field names the value in an error.
+func parseDuration(b []byte, field string) (time.Duration, error) {
 	var s string
 	if err := json.Unmarshal(b, &s); err == nil {
 		v, err := time.ParseDuration(s)
 		if err != nil {
-			return fmt.Errorf("deadline %q is not a duration such as \"90s\" or \"2h\"", s)
+			return 0, fmt.Errorf("%s %q is not a duration such as \"90s\" or \"2h\"", field, s)
 		}
-		*d = duration(v)
-		return nil
+		return v, nil
 	}
 	var n int64
 	if err := json.Unmarshal(b, &n); err != nil {
-		return errors.New("deadline is a duration string such as \"90s\" or a number of nanoseconds")
+		return 0, fmt.Errorf("%s is a duration string such as \"90s\" or a number of nanoseconds", field)
 	}
-	*d = duration(n)
-	return nil
+	return time.Duration(n), nil
 }
 
 // budget converts the body. The field names the budget in a problem, so
@@ -270,7 +292,8 @@ func (b *budgetBody) budget(field string) (*fw.Budget, error) {
 	if b == nil {
 		return nil, nil
 	}
-	if b.MaxTurns < 0 || b.MaxTokens < 0 || b.MaxCostUSD < 0 || b.Deadline < 0 || b.MaxToolCalls < 0 || b.MaxCallsPerTurn < 0 || b.MaxRepeats < 0 {
+	if b.MaxTurns < 0 || b.MaxTokens < 0 || b.MaxCostUSD < 0 || b.Deadline < 0 || b.MaxToolCalls < 0 || b.MaxCallsPerTurn < 0 || b.MaxRepeats < 0 ||
+		b.ReportMaxTokens < 0 || b.ReportTimeout < 0 {
 		return nil, fmt.Errorf("%s limits must not be negative", field)
 	}
 	return &fw.Budget{
@@ -281,6 +304,9 @@ func (b *budgetBody) budget(field string) (*fw.Budget, error) {
 		MaxToolCalls:    b.MaxToolCalls,
 		MaxCallsPerTurn: b.MaxCallsPerTurn,
 		MaxRepeats:      b.MaxRepeats,
+		FinalReport:     b.FinalReport,
+		ReportMaxTokens: b.ReportMaxTokens,
+		ReportTimeout:   time.Duration(b.ReportTimeout),
 	}, nil
 }
 
@@ -635,10 +661,13 @@ func (s *server) runEvents(w http.ResponseWriter, r *http.Request) {
 
 // messageBody is the body of POST /v1/runs/{id}/messages. Content is a
 // string or an array of content blocks. Content can be empty when the
-// message has files.
+// message has files. Budget changes the budget of the run with the message
+// (fw.WithSendBudget): each field that it sets replaces the same limit for
+// the work that follows.
 type messageBody struct {
 	Content json.RawMessage `json:"content"`
 	Files   []fileBody      `json:"files"`
+	Budget  *budgetBody     `json:"budget"`
 }
 
 func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -655,12 +684,56 @@ func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	blocks = append(blocks, attachments(body.Files)...)
+	budget, err := body.Budget.budget("budget")
+	if err != nil {
+		problem(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	var opts []fw.SendOption
+	if budget != nil {
+		opts = append(opts, fw.WithSendBudget(*budget))
+	}
 	id := r.PathValue("id")
-	if err := s.a.Send(r.Context(), id, fw.Message{Role: fw.RoleUser, Content: blocks}, fw.OriginHTTP); err != nil {
+	if err := s.a.Send(r.Context(), id, fw.Message{Role: fw.RoleUser, Content: blocks}, fw.OriginHTTP, opts...); err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	s.writeRun(w, r, http.StatusAccepted, id)
+}
+
+// budgetAnswer is the answer of PATCH /v1/runs/{id}/budget: the effective
+// budget of the run after the change and the run object.
+type budgetAnswer struct {
+	Budget fw.Budget `json:"budget"`
+	Run    *fw.Run   `json:"run"`
+}
+
+// changeBudget answers PATCH /v1/runs/{id}/budget: the body is a budget,
+// and each field that it sets replaces the same limit of the run for the
+// work that follows (fw.Agent.ChangeBudget). The caller needs the operator
+// role on the run, as for a decision.
+func (s *server) changeBudget(w http.ResponseWriter, r *http.Request) {
+	var body budgetBody
+	if !s.decode(w, r, &body) {
+		return
+	}
+	change, err := body.budget("the budget")
+	if err != nil {
+		problem(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := r.PathValue("id")
+	b, err := s.a.ChangeBudget(r.Context(), id, *change, fw.OriginHTTP)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	run, err := s.a.Get(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, budgetAnswer{Budget: b, Run: run})
 }
 
 // contentBlocks reads a string or an array of blocks.
