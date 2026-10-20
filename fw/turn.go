@@ -91,14 +91,38 @@ type cursor struct {
 	respAt     time.Time // the time of the latest response
 	noteAt     time.Time // the time of the latest time note
 	zone       string    // the zone that fw.run.started recorded
+
+	// The budget notes and the final report (budget.go).
+	noted      map[noteKey]int // the highest threshold that a budget note gave, by limit
+	changeSeq  uint64          // the latest fw.budget.changed
+	changeNote uint64          // the latest budget note about a change
+	answered   bool            // a model call of the run answered, a report call too
+	rep        *reportState    // the final report that is open, or nil
+	reportSeq  uint64          // the latest final report that answered or failed
+	report     string          // the text of that report
 }
 
 // analyze builds the cursor. It decodes only the events that it needs.
 func analyze(events []Event) *cursor {
 	c := &cursor{}
 	lastResp, prevResp := -1, -1
+	// The final report call is not a turn: its request and its response
+	// stay out of the turn logic, the loop guard, and the latest response.
+	reportReq, reportResp := map[int]bool{}, map[int]bool{}
+	reporting := false
 	for i, e := range events {
-		if e.Type == EvModelResponded {
+		switch e.Type {
+		case EvModelRequested:
+			var d struct {
+				Report bool `json:"report"`
+			}
+			reporting = e.Decode(&d) == nil && d.Report
+			reportReq[i] = reporting
+		case EvModelResponded:
+			if reporting {
+				reportResp[i] = true
+				continue
+			}
 			prevResp, lastResp = lastResp, i
 		}
 	}
@@ -121,17 +145,46 @@ func analyze(events []Event) *cursor {
 			c.terminal = false
 			c.unseen = true
 			var d MessageReceivedData
-			if e.Decode(&d) != nil || d.Origin != OriginKernel || d.Role != RoleSystem {
+			if e.Decode(&d) != nil {
 				break
 			}
-			switch {
-			case d.Note == NoteTime:
+			if d.Origin != OriginKernel {
+				c.reportInput(false)
+				break
+			}
+			if d.Role != RoleSystem {
+				break
+			}
+			switch d.Note {
+			case NoteTime:
 				c.noteAt = e.Time
-			case i > lastResp:
+			case NoteBudget:
+				c.budgetNote(e.Seq, d.Budget)
+			case NoteReport:
+				if c.rep != nil {
+					c.rep.noteSeq = e.Seq
+				}
+			default:
 				// Every other system message from the kernel is a loop
 				// warning. A ledger from before the time notes has no
 				// note kind on it.
-				c.warned = true
+				if i > lastResp {
+					c.warned = true
+				}
+			}
+		case EvBudgetChanged:
+			c.changeSeq = e.Seq
+			c.reportInput(true)
+		case EvBudgetExceeded:
+			var d BudgetExceededData
+			if e.Decode(&d) == nil && d.Report {
+				c.rep = &reportState{seq: e.Seq, data: d}
+			}
+		case EvError:
+			if c.rep != nil && c.rep.reqSeq > 0 && !c.rep.done {
+				// The final report call failed. It counts as the report,
+				// so a later stop without a change makes no second call.
+				c.reportDone(e.Seq, "")
 			}
 		case EvTurnStarted:
 			c.turns++
@@ -145,7 +198,20 @@ func analyze(events []Event) *cursor {
 			c.turnOpen, c.keptOpen = false, false
 		case EvModelRequested:
 			c.unseen = false
+			if reportReq[i] && c.rep != nil {
+				c.rep.reqSeq = e.Seq
+			}
 		case EvModelResponded:
+			c.answered = true
+			if reportResp[i] {
+				var d struct {
+					Content []Block `json:"content"`
+				}
+				_ = e.Decode(&d)
+				c.respAt = e.Time
+				c.reportDone(e.Seq, TextOf(d.Content))
+				continue
+			}
 			if c.keptOpen && e.Seq > c.queued.Kept {
 				c.keptTurns-- // the branch made the call of the turn that it kept open
 			}
@@ -260,6 +326,7 @@ func analyze(events []Event) *cursor {
 		case EvRunFinished:
 			c.terminal = true
 			c.turnOpen = false
+			c.rep = nil
 			open = nil
 		}
 	}
@@ -337,6 +404,9 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 			continue
 		case !c.started:
 			err = a.stepStart(ctx, rs, c)
+		case c.rep != nil:
+			// The run reached a limit and makes its final report.
+			err = a.stepReport(ctx, rs, c, len(evs))
 		case c.turnOpen && c.respSeq < c.turnSeq:
 			// The turn has no response yet: call the model, or call it
 			// again after a restart.
@@ -432,18 +502,11 @@ func (a *Agent) brief(ctx context.Context, rs *runState, tools []Tool) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// stepModel checks the budget, compacts the history when it is too long,
-// and calls the model once.
-func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
-	prof := a.profileOf(c.queued)
-	if o, over := a.overBudget(rs, c); over {
-		return a.stopOver(ctx, rs, o)
-	}
-	selector := a.selectorOf(c.queued, prof)
-	model, err := a.openModel(ctx, selector)
-	if err != nil {
-		return a.fail(ctx, rs, "model: "+err.Error())
-	}
+// callRequest builds the request of a model call of the run without its
+// messages: the system prompt, the tools, and the effort of a turn. It
+// returns the effort that the call asks for. The final report call takes
+// the same prefix, so it reads the prompt cache of the run.
+func (a *Agent) callRequest(ctx context.Context, rs *runState, c *cursor, prof AgentProfile) (*Request, string, error) {
 	tools, _ := a.runTools(ctx, rs, prof)
 	specs := make([]ToolSpec, 0, len(tools))
 	for _, t := range tools {
@@ -456,24 +519,43 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	if c.queued.Resolved != nil {
 		text, err := a.textOf(ctx, rs, c.queued)
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		prof.System, prof.Instructions = text.system, text.instructions
 	}
-	provider, name := SplitSelector(selector)
 	system := a.SystemPrompt(prof, c.queued.Instructions)
 	if c.brief != "" {
 		system += "\n\n" + c.brief
 	}
-	req := &Request{
+	return &Request{
 		System:    system,
 		Tools:     specs,
 		Effort:    effort,
 		EffortSet: c.queued.Resolved != nil,
 		MaxTokens: defaultMaxTokens,
 		Metadata:  map[string]string{"runId": rs.id, "agent": rs.agent},
+	}, effort, nil
+}
+
+// stepModel checks the budget, compacts the history when it is too long,
+// and calls the model once. A call that is in flight when the working time
+// reaches the deadline ends at the deadline.
+func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
+	prof := a.profileOf(c.queued)
+	if o, over := a.overBudget(rs, c); over {
+		return a.stopOver(ctx, rs, c, o)
 	}
-	extra := (len(req.System) + jsonSize(specs)) / bytesPerToken
+	selector := a.selectorOf(c.queued, prof)
+	model, err := a.openModel(ctx, selector)
+	if err != nil {
+		return a.fail(ctx, rs, "model: "+err.Error())
+	}
+	req, effort, err := a.callRequest(ctx, rs, c, prof)
+	if err != nil {
+		return err
+	}
+	provider, name := SplitSelector(selector)
+	extra := (len(req.System) + jsonSize(req.Tools)) / bytesPerToken
 	if !c.turnOpen {
 		before := *rs.usage()
 		if err := a.maybeCompact(ctx, rs, model, req, extra); err != nil {
@@ -483,12 +565,13 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		// again before the call of the turn.
 		if *rs.usage() != before {
 			if o, over := a.overBudget(rs, c); over {
-				return a.stopOver(ctx, rs, o)
+				return a.stopOver(ctx, rs, c, o)
 			}
 		}
 	}
 
 	note := a.timeNote(ctx, rs, c)
+	notes := a.budgetNotes(ctx, rs, c)
 
 	// The request and its event are one step, so a message that arrives now
 	// is either in this request or after its fw.model.requested.
@@ -501,6 +584,12 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	}
 	if note != "" {
 		if _, err := a.emitLocked(ctx, rs, EvMessageReceived, MessageReceivedData{Role: RoleSystem, Content: []Block{Text(note)}, Origin: OriginKernel, Note: NoteTime}); err != nil {
+			rs.emitMu.Unlock()
+			return err
+		}
+	}
+	for _, n := range notes {
+		if _, err := a.emitLocked(ctx, rs, EvMessageReceived, n); err != nil {
 			rs.emitMu.Unlock()
 			return err
 		}
@@ -518,9 +607,15 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		return err
 	}
 
+	mctx, cut := a.deadlineCut(ctx, rs)
 	start := time.Now()
-	resp, err := model.Stream(ctx, req, func(Delta) {})
+	resp, err := model.Stream(mctx, req, func(Delta) {})
 	latency := time.Since(start).Milliseconds()
+	if cut() && err != nil && ctx.Err() == nil {
+		// The working time reached the deadline while the call was in
+		// flight. The call has no answer to record; the run reports.
+		return a.stopAtDeadline(ctx, rs, c)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return errStopped
@@ -561,22 +656,6 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		Model:      name,
 	})
 	return err
-}
-
-// stopOver ends a run at the limit o: it appends fw.budget.exceeded and
-// finishes the run as failed. No run under the owner of a shared limit can
-// spend more, so the open ones stop now instead of at their next step.
-func (a *Agent) stopOver(ctx context.Context, rs *runState, o overrun) error {
-	if _, err := a.emit(ctx, rs, EvBudgetExceeded, o.data()); err != nil {
-		return err
-	}
-	if err := a.finish(ctx, rs, OutcomeFailed, "", "budget exceeded: "+o.text(rs.id)); err != nil {
-		return err
-	}
-	if o.shared() {
-		a.stopTree(o)
-	}
-	return nil
 }
 
 // stepResponse acts on the stop reason of the latest response.
@@ -737,33 +816,19 @@ func (a *Agent) overBudget(rs *runState, c *cursor) (overrun, bool) {
 	if o, over := a.treeSpent(rs); over {
 		return o, true
 	}
-	if worked, over := a.pastDeadline(rs); over {
-		return overrun{limit: "deadline", value: worked.Seconds(), owner: rs}, true
+	if d, over := a.pastDeadline(rs); over {
+		return d.overrun(rs), true
 	}
 	return overrun{}, false
 }
 
 // pastDeadline reports whether the run or one of its ancestors used up the
-// working time of its deadline, and returns the working time of that run.
+// working time of its deadline, and returns the deadline that is nearest.
 // The deadline counts working time (see WorkingTime), so a run that waited
 // for a person or for a follow-up still has its time.
-func (a *Agent) pastDeadline(rs *runState) (time.Duration, bool) {
-	now := a.now()
-	for _, r := range a.lineage(rs) {
-		b := a.ownBudget(r)
-		if b.Deadline <= 0 {
-			continue
-		}
-		evs, err := a.eventsOf(context.Background(), r)
-		if err != nil {
-			a.log.Warn("read run for its deadline", "run", r.id, "error", err)
-			continue
-		}
-		if worked := WorkingTime(evs, now); worked >= b.Deadline {
-			return worked, true
-		}
-	}
-	return 0, false
+func (a *Agent) pastDeadline(rs *runState) (deadlineUse, bool) {
+	d, ok := a.deadlineUse(context.Background(), rs, a.now())
+	return d, ok && d.left() <= 0
 }
 
 // timeNote returns the time note for the next model call, or "". A note
@@ -970,12 +1035,19 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 
 	// A run whose tree, or the tree of an ancestor, used up its tokens or
 	// its cost runs no more tools: each open call gets an error result,
-	// and the run stops at its next step.
+	// and the run stops at its next step. So does a run past its deadline,
+	// such as a run whose model answered just after the deadline.
+	why := ""
 	if o, spent := a.limitSpent(rs); spent && o.limit != "maxToolCalls" {
+		why = o.why()
+	} else if d, past := a.pastDeadline(rs); past {
+		why = d.why(rs)
+	}
+	if why != "" {
 		var plan []plannedCall
 		for _, u := range uses {
 			if rec := c.calls[u.ID]; rec != nil && !rec.responded {
-				plan = append(plan, plannedCall{use: u, result: ErrorResult("not run: " + o.why() + ". This run stops.")})
+				plan = append(plan, plannedCall{use: u, result: ErrorResult("not run: " + why + ". This run stops.")})
 			}
 		}
 		if err := a.execute(ctx, rs, plan); err != nil {

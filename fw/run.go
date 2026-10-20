@@ -43,6 +43,18 @@ func (s RunState) Terminal() bool {
 // MaxRepeats hold for each run alone, because they describe the shape of
 // one conversation. The deadline counts the working time of the run and of
 // each of its ancestors.
+//
+// The last three fields shape the final report (docs/ARCHITECTURE.md
+// section 5.2). When a run reaches MaxTurns, MaxToolCalls, or the
+// deadline and FinalReport is true, the kernel makes one more model call
+// with the instruction to report what the run did, what is left, and where
+// its work is. The text of that call becomes the output of the run, which
+// still fails with the budget error. ReportMaxTokens caps the output of
+// the call, and ReportTimeout bounds its time; zero takes
+// DefaultReportMaxTokens and DefaultReportTimeout, so the call is always
+// bounded. A run that reaches MaxTokens or MaxCostUSD gets no such call,
+// because that call spends past a limit of money. A nil FinalReport
+// means off; DefaultConfig sets it to true.
 type Budget struct {
 	MaxTurns        int           `yaml:"maxTurns,omitempty" json:"maxTurns,omitempty"`
 	MaxTokens       int           `yaml:"maxTokens,omitempty" json:"maxTokens,omitempty"`
@@ -51,6 +63,40 @@ type Budget struct {
 	MaxToolCalls    int           `yaml:"maxToolCalls,omitempty" json:"maxToolCalls,omitempty"`
 	MaxCallsPerTurn int           `yaml:"maxCallsPerTurn,omitempty" json:"maxCallsPerTurn,omitempty"`
 	MaxRepeats      int           `yaml:"maxRepeats,omitempty" json:"maxRepeats,omitempty"`
+	FinalReport     *bool         `yaml:"finalReport,omitempty" json:"finalReport,omitempty"`
+	ReportMaxTokens int           `yaml:"reportMaxTokens,omitempty" json:"reportMaxTokens,omitempty"`
+	ReportTimeout   time.Duration `yaml:"reportTimeout,omitempty" json:"reportTimeout,omitempty"`
+}
+
+// Defaults of the final report call (see Budget).
+const (
+	DefaultReportMaxTokens = 1024
+	DefaultReportTimeout   = 2 * time.Minute
+)
+
+// reportOn reports whether the final report is on.
+func (b Budget) reportOn() bool { return b.FinalReport != nil && *b.FinalReport }
+
+// reportTokens returns the output cap of the final report call.
+func (b Budget) reportTokens() int {
+	if b.ReportMaxTokens > 0 {
+		return b.ReportMaxTokens
+	}
+	return DefaultReportMaxTokens
+}
+
+// reportTimeout returns the time limit of the final report call.
+func (b Budget) reportTimeout() time.Duration {
+	if b.ReportTimeout > 0 {
+		return b.ReportTimeout
+	}
+	return DefaultReportTimeout
+}
+
+// negative reports whether a field of the budget is below zero.
+func (b Budget) negative() bool {
+	return b.MaxTurns < 0 || b.MaxTokens < 0 || b.MaxCostUSD < 0 || b.Deadline < 0 || b.MaxToolCalls < 0 ||
+		b.MaxCallsPerTurn < 0 || b.MaxRepeats < 0 || b.ReportMaxTokens < 0 || b.ReportTimeout < 0
 }
 
 // Merge returns b with every zero field taken from o.
@@ -76,6 +122,15 @@ func (b Budget) Merge(o Budget) Budget {
 	if b.MaxRepeats == 0 {
 		b.MaxRepeats = o.MaxRepeats
 	}
+	if b.FinalReport == nil {
+		b.FinalReport = o.FinalReport
+	}
+	if b.ReportMaxTokens == 0 {
+		b.ReportMaxTokens = o.ReportMaxTokens
+	}
+	if b.ReportTimeout == 0 {
+		b.ReportTimeout = o.ReportTimeout
+	}
 	return b
 }
 
@@ -83,7 +138,8 @@ func (b Budget) Merge(o Budget) Budget {
 // lowered to it. A limit that o leaves at zero stays as it is. The kernel
 // caps the budget of a child run by the budget of its parent, and the
 // budget of a child in another process by what the tree of the parent has
-// left (see Budget).
+// left (see Budget). A final report that o turns off is off in the result
+// too, so a child makes no report where its parent makes none.
 func (b Budget) Cap(o Budget) Budget {
 	capInt := func(v, limit int) int {
 		if limit > 0 && (v == 0 || v > limit) {
@@ -102,7 +158,21 @@ func (b Budget) Cap(o Budget) Budget {
 	if o.Deadline > 0 && (b.Deadline == 0 || b.Deadline > o.Deadline) {
 		b.Deadline = o.Deadline
 	}
+	if o.FinalReport != nil && !*o.FinalReport {
+		off := false
+		b.FinalReport = &off
+	}
+	b.ReportMaxTokens = capInt(b.ReportMaxTokens, o.ReportMaxTokens)
+	if o.ReportTimeout > 0 && (b.ReportTimeout == 0 || b.ReportTimeout > o.ReportTimeout) {
+		b.ReportTimeout = o.ReportTimeout
+	}
 	return b
+}
+
+// empty reports whether the budget sets no field.
+func (b Budget) empty() bool {
+	return b.FinalReport == nil && b.MaxTurns == 0 && b.MaxTokens == 0 && b.MaxCostUSD == 0 && b.Deadline == 0 &&
+		b.MaxToolCalls == 0 && b.MaxCallsPerTurn == 0 && b.MaxRepeats == 0 && b.ReportMaxTokens == 0 && b.ReportTimeout == 0
 }
 
 // AgentProfile is a named agent configuration.
@@ -312,6 +382,9 @@ type Run struct {
 	// keptTurn is true while a turn that the branch kept is open and no
 	// model call of it followed.
 	keptTurn bool
+	// budget holds the set fields of every fw.budget.changed of the run,
+	// a later change on top of an earlier one (see Agent.ChangeBudget).
+	budget Budget
 }
 
 // RunRequest describes a run to start.

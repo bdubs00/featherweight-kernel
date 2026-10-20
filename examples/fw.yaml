@@ -231,6 +231,13 @@ budget:                         # maxTokens, maxCostUSD, and maxToolCalls hold f
   maxToolCalls: 1000            # tool calls of the run and of its child runs together
   maxCallsPerTurn: 32           # tool calls in one model response
   maxRepeats: 5                 # the same call this many times in a row fails the run; a cycle of two or three calls counts
+  # The model gets a budget note at 75% and at 90% of each limit. The final report is one
+  # bounded model call past a limit of turns, tool calls, or working time, and never past
+  # a limit of tokens or cost: its text becomes the output of the run, which still fails.
+  # PATCH /v1/runs/{id}/budget, or a follow-up with a budget, gives a run more room.
+  finalReport: true             # false stops the run at once at every limit
+  reportMaxTokens: 1024         # the output cap of the report call; 0 is the default
+  reportTimeout: 2m             # the time limit of the report call; 0 is the default
 
 compaction:                     # a long run replaces its history with a summary (docs/ARCHITECTURE.md section 5.4)
   at: 150000                    # estimated tokens of context that start a summary; 0 is off. An overflow error from the model also starts one.

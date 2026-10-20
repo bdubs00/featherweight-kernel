@@ -148,11 +148,12 @@ func TestMaxCallsPerTurn(t *testing.T) {
 func TestMaxToolCalls(t *testing.T) {
 	ctx := testCtx(t)
 	var calls atomic.Int32
-	s := newScript(callTools(use("c1", "echo", `{"text":"1"}`), use("c2", "echo", `{"text":"2"}`), use("c3", "echo", `{"text":"3"}`)), endTurn("never"))
+	s := newScript(callTools(use("c1", "echo", `{"text":"1"}`), use("c2", "echo", `{"text":"2"}`), use("c3", "echo", `{"text":"3"}`)), endTurn("the report"))
 	a := newTestAgent(t, s.Model(), WithTools(echoTool(&calls)))
 	r, err := a.Run(ctx, "go", WithRunBudget(Budget{MaxToolCalls: 2}))
 	mustState(t, r, err, StateFailed)
-	if calls.Load() != 2 || r.Error != "budget exceeded: maxToolCalls" || r.Usage.ToolCalls != 2 || len(s.requests()) != 1 {
+	// The second model call is the final report, which runs no tool.
+	if calls.Load() != 2 || r.Error != "budget exceeded: maxToolCalls" || r.Usage.ToolCalls != 2 || len(s.requests()) != 2 || r.Output != "the report" {
 		t.Fatalf("calls = %d, run = %+v, model calls = %d", calls.Load(), r, len(s.requests()))
 	}
 }

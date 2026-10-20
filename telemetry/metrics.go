@@ -527,10 +527,11 @@ func (m *Metrics) Observe(e fw.Event) {
 			m.usage(d.Provider, d.Model, *d.Usage)
 		}
 		return
-	case fw.EvRunChild, fw.EvChildReported:
+	case fw.EvRunChild, fw.EvChildReported, fw.EvBudgetChanged:
 		// The record and the report of a child can arrive after its parent
 		// finished, and they never open the parent. The child counts its
-		// own usage.
+		// own usage. A change of the budget of a finished run opens nothing
+		// either.
 		return
 	}
 	// Every other event shows that the run is open: fw.run.started, a

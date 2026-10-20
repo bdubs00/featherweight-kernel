@@ -636,6 +636,7 @@ const (
 // serves, and refuses every run until `model`, FW_MODEL, or the profile
 // of the run names one. The changes of RegisterDefaults apply last.
 func DefaultConfig() *Config {
+	reportOn := true
 	c := &Config{
 		Listen:  ":8080",
 		Auth:    AuthConfig{Mode: "token", TokenEnv: "FW_API_TOKEN"},
@@ -668,6 +669,12 @@ func DefaultConfig() *Config {
 			MaxToolCalls:    DefaultMaxToolCalls,
 			MaxCallsPerTurn: DefaultMaxCallsPerTurn,
 			MaxRepeats:      DefaultMaxRepeats,
+			// The final report is one bounded model call past a limit of
+			// turns, tool calls, or working time, and never past a limit
+			// of tokens or cost (see Budget).
+			FinalReport:     &reportOn,
+			ReportMaxTokens: DefaultReportMaxTokens,
+			ReportTimeout:   DefaultReportTimeout,
 		},
 		Compaction: CompactionConfig{At: DefaultCompactAt},
 		Time:       TimeConfig{NoteAfter: DefaultNoteAfter},

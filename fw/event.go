@@ -44,6 +44,7 @@ const (
 	EvApprovalDecided   = "fw.approval.decided"
 	EvContextCompacted  = "fw.context.compacted"
 	EvBudgetExceeded    = "fw.budget.exceeded"
+	EvBudgetChanged     = "fw.budget.changed" // a person or a process changed the budget of the run; see BudgetChangedData
 	EvError             = "fw.error"
 	EvTurnFinished      = "fw.turn.finished"
 	EvRunSuspended      = "fw.run.suspended"
@@ -60,13 +61,14 @@ const (
 func IsTerminal(typ string) bool { return typ == EvRunFinished }
 
 // LeavesFinished reports whether an event of the type leaves a finished run
-// finished: fw.run.annotated, fw.run.child, and fw.child.reported add facts
-// to a run and do no work on it, so they can arrive after its end, for
-// example the report of a child that ends after its parent, or a branch of
-// a finished run in another process. Every other event after the end, such
-// as a follow-up message, works on the run again.
+// finished: fw.run.annotated, fw.run.child, fw.child.reported, and
+// fw.budget.changed add facts to a run and do no work on it, so they can
+// arrive after its end, for example the report of a child that ends after
+// its parent, a branch of a finished run in another process, or a larger
+// budget before a follow-up. Every other event after the end, such as a
+// follow-up message, works on the run again.
 func LeavesFinished(typ string) bool {
-	return typ == EvRunAnnotated || typ == EvRunChild || typ == EvChildReported
+	return typ == EvRunAnnotated || typ == EvRunChild || typ == EvChildReported || typ == EvBudgetChanged
 }
 
 // NewEvent builds an event for a run. Seq and Source are set by the ledger.
@@ -220,16 +222,38 @@ type MessageReceivedData struct {
 	Role    Role    `json:"role"`
 	Content []Block `json:"content"`
 	Origin  string  `json:"origin"`
-	// Note names the kind of a system message from the kernel: NoteLoop or
-	// NoteTime. It is empty for every other message.
+	// Note names the kind of a system message from the kernel: NoteLoop,
+	// NoteTime, NoteBudget, or NoteReport. It is empty for every other
+	// message.
 	Note string `json:"note,omitempty"`
+	// Budget says what a budget note (NoteBudget) is about, so a resume
+	// gives no note twice.
+	Budget *BudgetNoteData `json:"budget,omitempty"`
 }
 
 // Kinds of the system messages from the kernel.
 const (
-	NoteLoop = "loop" // the loop guard warns that the model repeats itself
-	NoteTime = "time" // a time note gives the time after a gap
+	NoteLoop   = "loop"   // the loop guard warns that the model repeats itself
+	NoteTime   = "time"   // a time note gives the time after a gap
+	NoteBudget = "budget" // a budget note: a limit is 75% or 90% used, or the budget changed
+	NoteReport = "report" // the instruction of the final report call at a limit
 )
+
+// BudgetNoteData is the subject of a budget note. A note about a limit
+// names the limit, such as maxTurns, the threshold that the usage passed,
+// 75 or 90, the usage, and the limit. Run names the run whose budget holds
+// the limit when that is not the run of the note: an ancestor, for a limit
+// that a tree shares or a deadline of the lineage. Each note comes once per
+// limit, limit value, run, and threshold, so a larger limit gets its own
+// notes. A note about a change of the budget sets Changed and no limit.
+type BudgetNoteData struct {
+	Limit   string  `json:"limit,omitempty"`
+	Percent int     `json:"percent,omitempty"`
+	Value   float64 `json:"value,omitempty"`
+	Max     float64 `json:"max,omitempty"`
+	Run     string  `json:"run,omitempty"`
+	Changed bool    `json:"changed,omitempty"`
+}
 
 // TurnData is the payload of fw.turn.started and fw.turn.finished.
 type TurnData struct {
@@ -238,11 +262,16 @@ type TurnData struct {
 
 // ModelRequestedData is the payload of fw.model.requested. Effort is
 // EffortDefault for a call that leaves the effort to the provider.
+//
+// Report is true for the final report call at a limit (see Budget). Its
+// response is the report and not a turn: the kernel runs no tool call of
+// it, and the run finishes after it.
 type ModelRequestedData struct {
 	Provider             string `json:"provider"`
 	Model                string `json:"model"`
 	Effort               string `json:"effort,omitempty"`
 	EstimatedInputTokens int    `json:"estimatedInputTokens,omitempty"`
+	Report               bool   `json:"report,omitempty"`
 }
 
 // ModelRespondedData is the payload of fw.model.responded.
@@ -341,13 +370,27 @@ type LoopDetectedData struct {
 // the limit itself, when the kernel recorded it. Scope is ScopeTree when
 // the usage of a run and of the runs under it reached a limit that holds
 // for the tree (see Budget), and Run then names the run whose budget holds
-// the limit: this run or one of its ancestors.
+// the limit: this run or one of its ancestors. Report is true when the
+// kernel makes the final report call before the run finishes (see Budget).
 type BudgetExceededData struct {
-	Limit string  `json:"limit"`
-	Value float64 `json:"value"`
-	Max   float64 `json:"max,omitempty"`
-	Scope string  `json:"scope,omitempty"`
-	Run   string  `json:"run,omitempty"`
+	Limit  string  `json:"limit"`
+	Value  float64 `json:"value"`
+	Max    float64 `json:"max,omitempty"`
+	Scope  string  `json:"scope,omitempty"`
+	Run    string  `json:"run,omitempty"`
+	Report bool    `json:"report,omitempty"`
+}
+
+// BudgetChangedData is the payload of fw.budget.changed. Budget holds the
+// fields that the change sets; each one replaces the same field of the
+// budget of the run for the work that follows, and a zero field keeps the
+// field as it was. By is the subject of the person who changed it, and
+// empty for the process itself. Origin is the surface of the change, such
+// as http or mcp.
+type BudgetChangedData struct {
+	Budget Budget `json:"budget"`
+	By     string `json:"by,omitempty"`
+	Origin string `json:"origin,omitempty"`
 }
 
 // ScopeTree is the scope of a fw.budget.exceeded event that a tree of runs

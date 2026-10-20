@@ -814,11 +814,8 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 			return fmt.Errorf("%w: the profile time zone %q is not an IANA name such as America/Chicago, or UTC", ErrInvalidRequest, p.TimeZone)
 		}
 	}
-	if p.Budget != nil {
-		b := *p.Budget
-		if b.MaxTurns < 0 || b.MaxTokens < 0 || b.MaxCostUSD < 0 || b.Deadline < 0 || b.MaxToolCalls < 0 || b.MaxCallsPerTurn < 0 || b.MaxRepeats < 0 {
-			return fmt.Errorf("%w: a budget limit is negative", ErrInvalidRequest)
-		}
+	if p.Budget != nil && p.Budget.negative() {
+		return fmt.Errorf("%w: a budget limit is negative", ErrInvalidRequest)
 	}
 	return nil
 }
@@ -866,8 +863,9 @@ func (a *Agent) Get(ctx context.Context, id string) (*Run, error) {
 
 // RunBudget returns the effective budget of a run: its own budget, merged
 // with the budget of its profile and of the configuration as the kernel
-// resolved them when it queued the run, and capped by the budget of its
-// parent. It authorizes the caller as Get does. A zero field has no limit.
+// resolved them when it queued the run, with every change of the budget
+// (ChangeBudget) on top, and capped by the budget of its parent. It
+// authorizes the caller as Get does. A zero field has no limit.
 // MaxTokens, MaxCostUSD, and MaxToolCalls hold for the run and every run
 // under it together, and the limits of each ancestor hold for its tree
 // too; Run.TreeUsage of a run tells what its tree used.
@@ -957,13 +955,34 @@ func (a *Agent) Events(ctx context.Context, id string, from uint64) (<-chan Even
 	return out, nil
 }
 
+// SendOption changes a follow-up message (see Send).
+type SendOption func(*sendOptions)
+
+type sendOptions struct {
+	budget *Budget
+}
+
+// WithSendBudget changes the budget of the run together with the message:
+// each field that b sets replaces the same field of the budget of the run
+// for the work that follows, as ChangeBudget does. A person continues a run
+// that stopped at a limit this way. Every limit still counts the whole
+// run: the turns, the tool calls, the tokens, the cost, and the working
+// time before the message count against the new limits.
+func WithSendBudget(b Budget) SendOption { return func(o *sendOptions) { o.budget = &b } }
+
 // Send appends a follow-up message to a run. A finished or idle run starts a
 // new turn. A run in the middle of a turn sends the message with its next
 // model call, after the tool results. A run that waits for an approval holds
-// the message until the decision.
-func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string) error {
+// the message until the decision. WithSendBudget changes the budget of the
+// run in the same step, before the message, so the turn that the message
+// starts has the new limits.
+func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string, opts ...SendOption) error {
 	if a.k.isDraining() {
 		return ErrClosed
+	}
+	var o sendOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
 	rs, err := a.k.lookup(id)
 	if err != nil {
@@ -984,6 +1003,11 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string)
 	if len(msg.Content) == 0 {
 		return fmt.Errorf("%w: a follow-up message has no content", ErrInvalidRequest)
 	}
+	if o.budget != nil {
+		if err := checkBudgetChange(*o.budget); err != nil {
+			return err
+		}
+	}
 	content, changes, err := a.keepFiles(msg.Content)
 	if err != nil {
 		return err
@@ -993,8 +1017,22 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string)
 			return err
 		}
 	}
-	if _, err := a.emit(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin}); err != nil {
+	// The change and the message are one step, so the driver never reads
+	// the message without the budget that came with it.
+	rs.emitMu.Lock()
+	if o.budget != nil {
+		if _, err := a.emitLocked(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: *o.budget, By: subjectOf(ctx), Origin: origin}); err != nil {
+			rs.emitMu.Unlock()
+			return err
+		}
+	}
+	_, err = a.emitLocked(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin})
+	rs.emitMu.Unlock()
+	if err != nil {
 		return err
+	}
+	if o.budget != nil {
+		a.budgetChanged(rs, *o.budget, origin)
 	}
 	rs.mu.Lock()
 	if !rs.active {
@@ -1002,6 +1040,76 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string)
 	}
 	rs.mu.Unlock()
 	return nil
+}
+
+// ChangeBudget changes the budget of a run that this process holds: each
+// field that change sets replaces the same field of the budget of the run
+// for the work that follows, and a zero field keeps the field as it was. A
+// running run reads the new budget at its next check, before its next model
+// call or tool calls. A finished run stays finished, and a follow-up starts
+// it with the new budget. Every limit counts the whole run, so the working
+// time, the turns, the tool calls, the tokens, and the cost before the
+// change count against the new limits. The budget of the parent of a child
+// run still caps the child.
+//
+// The kernel records the change as fw.budget.changed, with the subject of
+// the principal in ctx. With a principal, the caller needs the operator
+// role on the run, as for a decision. ChangeBudget returns the effective
+// budget of the run after the change (see RunBudget). A child in another
+// process changes its budget in its own process.
+func (a *Agent) ChangeBudget(ctx context.Context, id string, change Budget, origin string) (Budget, error) {
+	if a.k.isDraining() {
+		return Budget{}, ErrClosed
+	}
+	rs, err := a.k.lookup(id)
+	if err != nil {
+		if ref, ok := a.remoteChild(id); ok {
+			return Budget{}, fmt.Errorf("%w: run %s runs in %s; change its budget there", ErrInvalidRequest, id, ref.member)
+		}
+		return Budget{}, err
+	}
+	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
+		return Budget{}, err
+	}
+	if err := rs.drivable(); err != nil {
+		return Budget{}, err
+	}
+	if err := checkBudgetChange(change); err != nil {
+		return Budget{}, err
+	}
+	if _, err := a.emit(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: change, By: subjectOf(ctx), Origin: origin}); err != nil {
+		return Budget{}, err
+	}
+	a.budgetChanged(rs, change, origin)
+	return a.budgetOf(rs), nil
+}
+
+// checkBudgetChange validates a change of a budget with ErrInvalidRequest.
+func checkBudgetChange(b Budget) error {
+	if b.negative() {
+		return fmt.Errorf("%w: a budget limit is negative", ErrInvalidRequest)
+	}
+	if b.empty() {
+		return fmt.Errorf("%w: a budget change sets at least one field", ErrInvalidRequest)
+	}
+	return nil
+}
+
+// budgetChanged follows a change of the budget of rs: a stop of the tree of
+// rs that the old budget caused is over, so a later stop logs again.
+func (a *Agent) budgetChanged(rs *runState, change Budget, origin string) {
+	a.k.mu.Lock()
+	delete(a.k.spent, rs.id)
+	a.k.mu.Unlock()
+	a.log.Info("run budget changed", "run", rs.id, "origin", origin, "change", BudgetText(change))
+}
+
+// subjectOf returns the subject of the principal in ctx, or "".
+func subjectOf(ctx context.Context) string {
+	if p := PrincipalFrom(ctx); p != nil {
+		return p.Subject
+	}
+	return ""
 }
 
 // Decide answers a pending approval. The decider is d.Decider, or the
@@ -1449,6 +1557,14 @@ func (rs *runState) appliedThrough(ctx context.Context, seq uint64) (uint64, boo
 			return cur, false
 		}
 	}
+}
+
+// budgetChange returns the fields that the changes of the budget of the
+// run set (fw.budget.changed), a later change on top of an earlier one.
+func (rs *runState) budgetChange() Budget {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.run.budget
 }
 
 // queuedData returns the request of the run as fw.run.queued recorded it.

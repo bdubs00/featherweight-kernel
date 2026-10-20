@@ -212,7 +212,7 @@ func TestBranchWithoutWorkIsFinal(t *testing.T) {
 func TestBranchMidTurnCountsTheTurn(t *testing.T) {
 	ctx := testCtx(t)
 	a := newTestAgent(t, newScript(endTurn("first"), callTools(use("c1", "echo", `{"text":"a"}`)), endTurn("never")).Model(), WithTools(echoTool(nil)))
-	src, err := a.Run(ctx, "hello", WithRunBudget(Budget{MaxTurns: 1}))
+	src, err := a.Run(ctx, "hello", WithRunBudget(Budget{MaxTurns: 1, FinalReport: noReport()}))
 	mustState(t, src, err, StateCompleted)
 	var at uint64
 	for _, e := range ledgerEvents(t, a.Ledger(), src.ID) {

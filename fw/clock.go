@@ -370,34 +370,19 @@ func (a *Agent) eventsOf(ctx context.Context, rs *runState) ([]Event, error) {
 // timeLeft returns the working time that remains before the run or one of
 // its ancestors reaches its deadline, and whether any deadline applies.
 func (a *Agent) timeLeft(ctx context.Context, rs *runState, now time.Time) (time.Duration, bool) {
-	var left time.Duration
-	limited := false
-	for _, r := range a.lineage(rs) {
-		b := a.ownBudget(r)
-		if b.Deadline <= 0 {
-			continue
-		}
-		evs, err := a.eventsOf(ctx, r)
-		if err != nil {
-			a.log.Warn("read run for its deadline", "run", r.id, "error", err)
-			continue
-		}
-		l := b.Deadline - WorkingTime(evs, now)
-		if l < 0 {
-			l = 0
-		}
-		if !limited || l < left {
-			left, limited = l, true
-		}
+	d, ok := a.deadlineUse(ctx, rs, now)
+	if !ok {
+		return 0, false
 	}
-	return left, limited
+	return max(d.left(), 0), true
 }
 
 // ownBudget returns the budget of one run without the cap of its
 // ancestors: the request, then the profile, then the configuration. The
 // resolved profile of a run already holds the budget of the configuration
 // as it was when the kernel queued the run, so a later change of the
-// configuration does not reach the run.
+// configuration does not reach the run. The changes of the budget of the
+// run (fw.budget.changed) come on top: each field that a change sets wins.
 func (a *Agent) ownBudget(rs *runState) Budget {
 	q := rs.queuedData()
 	var b Budget
@@ -407,10 +392,10 @@ func (a *Agent) ownBudget(rs *runState) Budget {
 	if prof := a.profileOf(q); prof.Budget != nil {
 		b = b.Merge(*prof.Budget)
 	}
-	if q.Resolved != nil {
-		return b
+	if q.Resolved == nil {
+		b = b.Merge(a.cfg.Budget)
 	}
-	return b.Merge(a.cfg.Budget)
+	return rs.budgetChange().Merge(b)
 }
 
 // checkZones makes sure that every zone in the configuration resolves, so

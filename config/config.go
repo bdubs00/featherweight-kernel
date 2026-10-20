@@ -623,6 +623,8 @@ func checkBudget(key string, b fw.Budget) []string {
 		{"maxToolCalls", b.MaxToolCalls < 0, b.MaxToolCalls},
 		{"maxCallsPerTurn", b.MaxCallsPerTurn < 0, b.MaxCallsPerTurn},
 		{"maxRepeats", b.MaxRepeats < 0, b.MaxRepeats},
+		{"reportMaxTokens", b.ReportMaxTokens < 0, b.ReportMaxTokens},
+		{"reportTimeout", b.ReportTimeout < 0, b.ReportTimeout},
 	} {
 		if f.neg {
 			p = append(p, fmt.Sprintf("%s.%s %v is negative", key, f.name, f.val))

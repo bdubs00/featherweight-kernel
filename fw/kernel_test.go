@@ -419,18 +419,21 @@ func TestProfilePolicyTightens(t *testing.T) {
 	}
 }
 
+// TestBudgetMaxTurns stops a run at its limit of turns. The run makes no
+// second turn: its one more model call is the final report, whose text is
+// the output of the failed run.
 func TestBudgetMaxTurns(t *testing.T) {
 	ctx := testCtx(t)
-	s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)), endTurn("never"))
+	s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)), endTurn("the report"))
 	a := newTestAgent(t, s.Model(), WithTools(echoTool(nil)))
 	r, err := a.Run(ctx, "loop", WithRunBudget(Budget{MaxTurns: 1}))
 	mustState(t, r, err, StateFailed)
-	if r.Error != "budget exceeded: maxTurns" || len(s.requests()) != 1 {
+	if r.Error != "budget exceeded: maxTurns" || r.Output != "the report" || len(s.requests()) != 2 || r.Usage.Turns != 1 {
 		t.Fatalf("run = %+v, model calls = %d", r, len(s.requests()))
 	}
 	var d BudgetExceededData
 	firstOf(t, ledgerEvents(t, a.Ledger(), r.ID), EvBudgetExceeded, &d)
-	if d.Limit != "maxTurns" || d.Value != 1 {
+	if d.Limit != "maxTurns" || d.Value != 1 || !d.Report {
 		t.Fatalf("exceeded = %+v", d)
 	}
 }

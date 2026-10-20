@@ -551,6 +551,17 @@ func summarize(e fw.Event, tools map[string]string) string {
 			if d.Scope != "" {
 				add("scope=%s run=%s", d.Scope, d.Run)
 			}
+			if d.Report {
+				add("report=true")
+			}
+		}
+	case fw.EvBudgetChanged:
+		var d fw.BudgetChangedData
+		if e.Decode(&d) == nil {
+			add("%s", fw.BudgetText(d.Budget))
+			if d.By != "" {
+				add("by=%s", d.By)
+			}
 		}
 	case fw.EvLoopDetected:
 		var d fw.LoopDetectedData
