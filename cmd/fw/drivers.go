@@ -13,7 +13,7 @@ package main
 // driver each. Without a build tag the binary carries every driver. With
 // the tag lean it carries the core alone, and each driver comes back with
 // its own tag: nats, redis, anthropic, openai, gemini, spiffe, oidc,
-// metrics, and a2a. A worker image for one fleet therefore builds with, for
+// metrics, a2a, and harness. A worker image for one fleet therefore builds with, for
 // example, -tags lean,nats,openai,oidc (section 15).
 
 import (
