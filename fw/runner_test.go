@@ -166,9 +166,9 @@ func TestRunnerStopsAtTheEnd(t *testing.T) {
 
 func TestHostedFinishWaitsForAMessage(t *testing.T) {
 	ctx := testCtx(t)
-	var got *Hosted
+	var last atomic.Pointer[Hosted]
 	a := newTestAgent(t, newScript().Model(), WithRunner(runnerFunc(func(ctx context.Context, h *Hosted) (bool, error) {
-		got = h
+		last.Store(h)
 		if !ProjectRun(h.Events()).State.Terminal() && len(h.Events()) == 1 {
 			_, err := h.Emit(ctx, EvRunStarted, RunStartedData{})
 			return true, err
@@ -188,6 +188,7 @@ func TestHostedFinishWaitsForAMessage(t *testing.T) {
 	if _, err := a.WaitFor(ctx, r.ID, func(r *Run) bool { return r.Seq >= 3 }); err != nil {
 		t.Fatal(err)
 	}
+	got := last.Load()
 	if _, err := got.Emit(ctx, EvRunQueued, RunQueuedData{}); err == nil {
 		t.Fatal("a runner recorded fw.run.queued")
 	}
