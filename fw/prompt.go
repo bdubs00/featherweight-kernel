@@ -5,7 +5,9 @@ package fw
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 )
 
 // DefaultSystemPrompt is the system prompt of a profile that has none. It
@@ -28,7 +30,8 @@ const (
 // SystemPrompt composes the system prompt of a run: the system prompt of
 // the profile, or DefaultSystemPrompt when the profile has none, then the
 // instructions of the profile, then the instructions of the run, then the
-// list of the skills that the profile can use.
+// list of the skills that the profile can use, then the sections of the
+// linked packages (RegisterPromptSection).
 func (a *Agent) SystemPrompt(prof AgentProfile, instructions string) string {
 	var sb strings.Builder
 	system := strings.TrimSpace(prof.System)
@@ -49,7 +52,40 @@ func (a *Agent) SystemPrompt(prof AgentProfile, instructions string) string {
 		sb.WriteString(skillsIntro)
 		sb.WriteString(list)
 	}
+	for _, fn := range registeredPromptSections() {
+		if text := strings.TrimSpace(fn(a, prof)); text != "" {
+			sb.WriteString("\n\n")
+			sb.WriteString(text)
+		}
+	}
 	return sb.String()
+}
+
+// A PromptSection returns a section of the system prompt for a linked
+// package, with its own heading, such as the Environment section of the
+// package env (section 18), or "" for none. The kernel calls it at each
+// model call, so the text must stay the same while its facts stay the
+// same: then the cached prefix of the prompt stays valid. It must return
+// quickly and must not hold a secret.
+type PromptSection func(a *Agent, prof AgentProfile) string
+
+var promptSections struct {
+	mu   sync.RWMutex
+	list []PromptSection
+}
+
+// RegisterPromptSection adds a section that SystemPrompt puts after the
+// skills, in the order of registration. A package calls it in init.
+func RegisterPromptSection(fn PromptSection) {
+	promptSections.mu.Lock()
+	defer promptSections.mu.Unlock()
+	promptSections.list = append(promptSections.list, fn)
+}
+
+func registeredPromptSections() []PromptSection {
+	promptSections.mu.RLock()
+	defer promptSections.mu.RUnlock()
+	return slices.Clone(promptSections.list)
 }
 
 // joinInstructions returns the instructions of a profile as the system

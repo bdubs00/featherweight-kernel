@@ -1959,6 +1959,175 @@ The safeguards revision of 2026-10-13 came on top of the milestones. It added th
 - `fw` implements the ax runner contract itself instead of embedding the ax `runner` package (section 11.2).
 - NATS is the recommended bus. Redis is the zero-new-infrastructure choice on an ax cluster.
 
+## 18. Environments
+
+### 18.1 Why
+
+ax builds every actor template with the snapshot fidelity `VOLUMES`. At every resume, Agent Substrate cold-boots the container from its image and restores `/workspace` only. A `pip install` or an `apt-get install` of a run goes to the root file system of the sandbox, and the next suspend loses it. A run that needs a package therefore installs it again after each wake, and it spends its calls to find out what the Task holds.
+
+The package `env` puts the packages on the durable volume instead. The block `environment` of `fw.yaml` names the manifests of two managers that need no root: `uv` for Python, with its own interpreters, and `pixi` for everything else from conda-forge, such as Node, git, compilers, Ansible, and PostgreSQL. Each manifest has a lock file next to it. The kernel adds what the managers do not know: the durable placement, the lock enforcement, the install in the background, the variables of every tool process, the brief in the system prompt, the tool `env`, the Dockerfile, and the events.
+
+`uv` and `pixi` are single static binaries. The kernel never downloads them: the image must carry both on PATH. `fw:toolbox` does not carry them yet; build an image `FROM` it with both, as the first `RUN` of `fw env dockerfile` does (section 18.10). `fw doctor` says when one is missing.
+
+The package registers itself through the seams of section 12.6: `fw.RegisterExtension` for the block, `fw.RegisterService` for the install, `fw.RegisterTool` for the tool, `fw.RegisterToolEnv` for the variables, `fw.RegisterPromptSection` for the brief, `cli.RegisterDoctorCheck` for its line of `fw doctor`, and `fw.RegisterDefaults` for the tool list and the policy. The default binary links it. A lean build links it with the tag `env`, for example `-tags lean,nats,openai,env`.
+
+### 18.2 The block
+
+```yaml
+environment:
+  dir: /workspace/.environment     # under ax; elsewhere ./.environment in the root of the workspace
+  cache: /workspace/.cache         # under ax; elsewhere ./.cache in the root of the workspace
+  python: pyproject.toml           # optional; uv.lock must be next to it
+  tools: pixi.toml                 # optional; pixi.lock must be next to it
+  prepare:                         # optional; after the install, as the tool user, once per digest
+    - ansible-galaxy collection install community.general -p /workspace/.environment/ansible
+  placement: durable               # durable | image
+  brief: true                      # the Environment section of the system prompt
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dir` | `/workspace/.environment` when `/workspace` exists, else `.environment` in the root of the workspace; `/opt/environment` with `placement: image` | The directory of the environment |
+| `cache` | `/workspace/.cache` when `/workspace` exists, else `.cache` in the root of the workspace | The caches of uv and pixi |
+| `python` | none | A `pyproject.toml`, relative to the root of the workspace. `uv.lock` must be next to it. |
+| `tools` | none | A `pixi.toml`, or a `pyproject.toml` with a `[tool.pixi]` table. `pixi.lock` must be next to it. |
+| `prepare` | none | Shell commands (`/bin/sh -c`) that run in the root of the workspace after the install |
+| `placement` | `durable` | `durable` installs under `dir` at run time. `image` says that the image holds the environment at `dir`, built from `fw env dockerfile`; the kernel installs nothing then. |
+| `brief` | `true` | `false` leaves the Environment section out of the system prompt |
+
+The decision for `/workspace` is the one of `fw.DefaultHome`. A relative path is relative to the root of the workspace (`tools.files.root`). Another key in the block is an error, as everywhere in `fw.yaml`. The start stops when the block does not fit:
+
+- `dir` and `cache` must not be FW_HOME, a path under it, or a path above it. The environment is a sibling of FW_HOME, never part of it.
+- They must not hold the root of the workspace, and with `tools.files.perRun` they must not be under the directories of the runs, which move with each run.
+- Under ax, a durable `dir` must be under `/workspace`, because every suspend loses the rest.
+- With `placement: image`, `dir` must not be under `/workspace`, because the volume of the Task hides the image there.
+
+`placement: image` is the target for a heavy environment, such as PyTorch. A durable volume ships at every suspend and comes back at every resume. The lab measured 0.13 to 0.2 seconds for a small workspace; a 2 GiB environment on `/workspace` changes that cost. Measure on the homelab before you choose: the time of `uv sync` for `torch` from the CPU index with a cold and a warm cache, the size of the volume after it, and the suspend and resume time of the Task with that volume.
+
+### 18.3 The layout
+
+| Path | Owner | Use |
+|---|---|---|
+| `<dir>` | fw, mode `1775` with the group of the tool user | The tool user adds and removes its own entries, but the sticky bit keeps it from renaming a file of fw |
+| `<dir>/.fw-env.json` | fw | The marker of a ready environment |
+| `<dir>/.fw-env-failed.json` | fw | The last failure |
+| `<dir>/.fw-env.lock` | fw | The `flock(2)` lock of one installer |
+| `<dir>/venv` | tool user | The virtual environment: `UV_PROJECT_ENVIRONMENT` and `VIRTUAL_ENV` |
+| `<dir>/python` | tool user | The interpreters of uv: `UV_PYTHON_INSTALL_DIR` |
+| `<dir>/bin` | tool user | The links to those interpreters and the programs of `uv tool install`: `UV_PYTHON_BIN_DIR`, `UV_TOOL_BIN_DIR` |
+| `<dir>/uv-tools` | tool user | The tools of uv: `UV_TOOL_DIR` |
+| `<dir>/pixi` | tool user | `PIXI_HOME`, with the file `config.toml` that fw writes and the programs of `pixi global` |
+| `<dir>/pixi-envs` | tool user | The environments of pixi (`detached-environments`), so an environment lives under `dir` and not next to its manifest |
+| `<cache>/uv`, `<cache>/pixi` | tool user | `UV_CACHE_DIR`, `PIXI_CACHE_DIR` |
+
+Without a tool user, as under Agent Substrate today (section 7.12), every path belongs to the user of fw, and nothing changes owner. With a tool user, a state file that fw does not own counts as absent, because the tool user could have written it.
+
+### 18.4 The install
+
+The install runs these commands, each as the tool user, with the environment of a tool process (`fw.ToolEnv`, section 7.12) and the variables of section 18.5:
+
+1. `uv sync --frozen --no-install-project --project <dir of python>`, then `uv pip list --format json --python <dir>/venv` for the versions. `--frozen` installs the lock as it is and never resolves again. The interpreter comes from `requires-python` and `.python-version`. Without a Python in the image that fits, uv downloads one into `<dir>/python`.
+2. `pixi install --frozen --manifest-path <tools>`, then `pixi info --json` for the directory of the environment and `pixi list --json --frozen` for the versions.
+3. Each `prepare` command, with `/bin/sh -c`, in the root of the workspace, with the programs of steps 1 and 2 on PATH.
+
+The marker records the digest: the sha256 of the manifests, the lock files, and the prepare commands, with a label for each part. Another file does not count. A new digest, such as a lock file from a new revision of a pool, installs again, and the caches make it incremental. The marker also holds the versions, the directory of the pixi environment, and the time that the install took. An environment counts as ready when the marker holds the digest of the files now and its virtual environment and its pixi environment exist.
+
+The service of the package starts the install in the background when `fw serve` builds the agent, after the kernel starts, and never delays `/readyz`. A failure records the step, the error, and the last 4 KB of the output of the manager, and the next try comes after 5 seconds, doubling up to 5 minutes. A golden boot has no network, so its first try fails; the next tries succeed once the egress policy lands. A failure that an earlier process recorded is due at once, so the cold boot after a resume tries without waiting. The service ends when the environment is ready. The output in a failure loses every secret of the process (section 4.2) and the password of every URL, such as the token of a private index.
+
+A verb that starts no service, such as `fw run`, installs the environment in the first tool process of a run. A laptop therefore tests a profile with the packages of its Task before the Task exists: `fw run` and `fw serve` outside ax install the same environment under `./.environment`. The time limit of the tool call (`tools.limits.timeout`, 10 minutes) bounds that install. A cut install goes on from the cache at the next try.
+
+One lock file per environment keeps one installer at a time, across processes too. The lock is `flock(2)`, so it ends with its process. On a system without `flock(2)`, two processes can install at the same time.
+
+### 18.5 Tool processes
+
+`fw.RegisterToolEnv` adds a hook that `fw.ExtendToolEnv` applies after `fw.ToolEnv`. The shell of `bash` and a stdio MCP server call it, so both get the same environment:
+
+- `PATH` with these directories in front, in order: `<dir>/venv/bin`, the `bin` directory of the pixi environment, `<dir>/bin`, and `<dir>/pixi/bin`.
+- `VIRTUAL_ENV` and `UV_PROJECT_ENVIRONMENT` (with `python`), `CONDA_PREFIX` (with `tools`), `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_PYTHON_BIN_DIR`, `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, `PIXI_HOME`, and `PIXI_CACHE_DIR`.
+- `UV_LINK_MODE=copy` when `dir` and `cache` are on two file systems (the device numbers differ), because uv links the files of a package from its cache by default.
+
+A tool process of a run waits until the environment is ready, bounded by the context of its call. When the install of the current digest failed and its next try is not due, the process does not start, and the call returns an error that names the step, the error, the time of the next try, and the end of the output of the manager. A run therefore reports a broken environment instead of guessing. For a stdio MCP server, the error makes the listing of its tools fail, and the run goes on without them. A tool process outside a run, such as the listing of `fw tools`, gets the variables and waits for nothing.
+
+`UV_PROJECT_ENVIRONMENT` holds for every project. A `uv sync` in another project of the workspace therefore installs into the same environment. A shell unsets it for a project that needs a virtual environment of its own. pixi runs no activation script for a tool process: the process gets `PATH` and `CONDA_PREFIX` alone.
+
+### 18.6 Events
+
+The events of the environment belong to the agent, not to a run. As with `fw.connection.connected` (section 7.11), the package publishes them on the bus, on the subject `fw.environment`, and logs each one. The subject of the event is empty, and `node` names the process. The ledger of the run that changed the environment records its call of the tool `env`.
+
+| Type | Data | When |
+|---|---|---|
+| `fw.env.ready` | the marker: `digest`, `placement`, `ready`, `seconds`, `uv`, `pixi`, `python` (`manifest`, `version`, `env`, `packages`), `tools` (`manifest`, `prefix`, `packages`), `prepare` | an install succeeded |
+| `fw.env.failed` | `digest`, `time`, `step`, `error`, `output`, `attempt`, `retryAt` | an install failed; a retry that fails with the same error records no new event |
+| `fw.env.changed` | `digest`, `previous`, `manager`, `command`, `package`, `run`, `agent` | the tool `env` changed a manifest and installed the result |
+
+Each package is `name`, `version`, and `is_explicit`, the names of `uv pip list` and `pixi list`.
+
+### 18.7 The tool `env`
+
+The tool takes `command`: `list`, `add`, or `remove`. `add` and `remove` also take `manager`, `python` or `tools`, and `package`, a requirement such as `pyyaml>=6` or `nodejs>=22`. A package that starts with a dash is refused, so the model cannot pass an option to a manager.
+
+| Call | Runs |
+|---|---|
+| `add` with `python` | `uv add --no-sync --project <dir of python> -- <package>` |
+| `remove` with `python` | `uv remove --no-sync --project <dir of python> -- <package>` |
+| `add` with `tools` | `pixi add --no-install --manifest-path <tools> -- <package>` |
+| `remove` with `tools` | `pixi remove --no-install --manifest-path <tools> -- <package>` |
+
+The manager changes the manifest and the lock file. Then the tool installs the new digest under the lock of the environment and records `fw.env.changed`. A failure of the manager leaves the files as they were. With `placement: image`, `add` and `remove` refuse, because the next cold boot would lose the change: change the manifest and build the image again.
+
+The policy of section 7.5 names a tool and a field of its input. `env` is one tool, and its field `command` names the action, so a rule names an action with the field form:
+
+| Rule | Effect |
+|---|---|
+| `ask: ["env: command=add", "env: command=remove"]` | the default: a person allows each change of the packages, and `list` runs |
+| `deny: ["env: *"]` or `deny: [env]` | a locked profile: no call of the tool runs |
+| `ask: ["env: command=add"]` | ask before an add only |
+
+A dotted name such as `env.add` is a tool glob, and no tool has that name, so the rule matches nothing. The package adds the default rules to `policy.rules.ask` and `env` to `tools.builtin` through `fw.RegisterDefaults`. A file that sets `policy.rules.ask` or `tools.builtin` replaces the default list, so it names them again. Without the block, the tool is opt-in (section 7.1), and no profile gets it unless its tool list names it.
+
+### 18.8 The Environment section
+
+`fw.RegisterPromptSection` adds a function that `SystemPrompt` calls after the skills, at each model call. The section of the package reads the state files and runs no command. It names `dir`, the virtual environment, the manifests, the manager of each, the version of Python, and the packages with their versions: every Python package, and the pixi packages that the manifest names, 30 of each at most. It tells the model to call the tool `env` for a package, or, for a profile without the tool, that the packages are fixed. Inside a Task (`AX_TASK_YAML`), it also names what the Task does not have: a change outside `/workspace` is lost at the next suspend, apt and sudo are not available to a run, there is no GPU, so PyTorch runs on the CPU, and there is no init system or service manager.
+
+The text changes only when the state changes: once from installing to ready, or to failed. The cached prefix of the prompt therefore stays valid between those changes. A name or a version with characters other than those of a package name stays out of the text, because the state files are on a volume that other processes can write.
+
+### 18.9 `fw doctor`
+
+The line `environment` names:
+
+- the state: `none` without the block, not installed yet, `materializing`, `ready` with the digest and the time of the install, or `failed` with the step, the error, the attempt, and the next try;
+- whether `uv` and `pixi` are on PATH, with their versions, for the managers that the block needs;
+- the hosts that the egress policy of the Task must let through, from the URLs in the lock files: `tls pypi.org` for an https host, which needs a rule with tls passthrough, and `http deb.debian.org` for a plain http host. Without a lock file it names the default registry: `pypi.org` and `files.pythonhosted.org` for uv, `conda.anaconda.org` for pixi. Without `python3` on PATH it adds `releases.astral.sh`, where uv downloads a Python. `download.pytorch.org` appears when the lock of uv uses the PyTorch index.
+
+The kernel cannot add an egress rule. A person adds the rules to the Task. A failed state or a missing manager fails the line.
+
+### 18.10 `fw env dockerfile`
+
+`fw env dockerfile --from <image>` prints a Dockerfile for `placement: image`, for the pools pipeline to build and pin. It builds nothing. The build context is the root of the workspace. The Dockerfile:
+
+1. Installs uv 0.13.1 and pixi 0.82.0 from their release URLs on GitHub (the static musl builds for amd64 and arm64), and checks the sha256 of each archive. A new version needs new checksums.
+2. Sets the variables of section 18.5 with `dir` inside the image, except the caches: at run time the kernel gives a tool process the cache of the configuration.
+3. Copies the manifests and the lock files, and `.python-version` when it exists, to `<dir>/src/python` and `<dir>/src/tools`.
+4. Runs `uv sync --frozen --no-install-project` and `pixi install --frozen`.
+5. Runs each `prepare` command in `dir`.
+6. Writes the marker with the digest and the versions.
+
+Steps 4 to 6 keep the caches in a BuildKit cache mount, so no cache lands in the image.
+
+A block with `placement: image` keeps its `dir`. A durable block gives `/opt/environment`, and the comment at the top of the file names the block that the image needs. The base image must have `/bin/sh`, `curl`, `tar`, and `sha256sum`, which `fw:toolbox` has. apt packages stay an image concern: add them to the file before the managers. When the workspace of the Task holds the manifests, `fw doctor` compares the digest of the marker in the image with the digest of those files, and fails when they differ.
+
+### 18.11 What this is not
+
+It is not a container inside the container: gVisor does not nest. It is not a root shell: apt and system services stay out of a run. It does not replace the goal of a Workspace (section 11.3), which stays the fallback for an environment that nobody wrote down. No GPU reaches a Task, so a GPU package is not a reason for an environment.
+
+### 18.12 Limits
+
+- The `files` tool writes as the user of fw. With its root at `/workspace` and without `tools.files.perRun`, a run can therefore write the state files under `dir`. The brief takes only names and versions from them, in the characters of a package name.
+- A tool process of the tool user can change the environment, as `pip install` into the virtual environment does. The marker then no longer describes it, until the next install of a new digest.
+- The time of a long install in `fw run` counts against the time limit of the first tool call of the run.
+- On a system without `flock(2)`, two processes can install one environment at the same time.
+- No measurement of a heavy environment exists yet. Section 18.2 names the three numbers to take on the homelab before a default moves between `durable` and `image`.
+
 ## 20. Outcomes
 
 A run can claim work that nobody checked. Batch scenario1-a found pull request bodies with claims that no command showed. An outcome asks a second model context, the grader, to check the answer of a run against a rubric before the run finishes. When the grader finds a gap, the run gets one more turn to fix it. The kernel code is `fw/outcome.go`, and one call at the end of a successful run in `endTurn` (`fw/turn.go`) starts it.

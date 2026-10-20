@@ -321,6 +321,20 @@ maxRuns: 16                     # runs in flight at once; more wait in the queue
 # claims with fw.RegisterExtension (docs/ARCHITECTURE.md section 12.1). The
 # workbench claims the block "workbench". Any other unknown key is an error.
 
+# environment (section 18)
+# The packages of the agent on the durable volume, from the lock files of
+# uv and pixi. The image must carry uv and pixi on PATH. fw doctor names
+# the registry hosts that the egress policy of the Task must let through.
+# See examples/environment.
+# environment:
+#   dir: /workspace/.environment     # under ax; elsewhere ./.environment in the root of the workspace
+#   cache: /workspace/.cache          # under ax; elsewhere ./.cache in the root of the workspace
+#   python: pyproject.toml            # uv sync --frozen; uv.lock must be next to it
+#   tools: pixi.toml                  # pixi install --frozen; pixi.lock must be next to it
+#   prepare: []                       # shell commands after the install, as the tool user, once per digest
+#   placement: durable                # durable | image (built from fw env dockerfile --from <image>)
+#   brief: true                       # the Environment section of the system prompt
+
 # outcome (section 20)
 # A profile, and a request, can carry an outcome block. A grader run, a child
 # of the run with the same profile, checks the answer of each run of the

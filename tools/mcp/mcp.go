@@ -366,7 +366,11 @@ func (s *Server) connect(ctx context.Context) (*sdk.ClientSession, error) {
 	if cs != nil {
 		return cs, nil
 	}
-	cs, err := s.dial(ctx, s.transport())
+	tr, err := s.transport(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cs, err = s.dial(ctx, tr)
 	if err != nil {
 		return nil, err
 	}
@@ -434,19 +438,27 @@ func (s *Server) forget(cs *sdk.ClientSession) {
 	s.mu.Unlock()
 }
 
-// transport returns a new SDK transport for the entry.
-func (s *Server) transport() sdk.Transport {
+// transport returns a new SDK transport for the entry. A stdio server
+// gets the changes of the linked packages to its environment
+// (fw.ExtendToolEnv), whose error keeps it from starting.
+func (s *Server) transport(ctx context.Context) (sdk.Transport, error) {
 	if s.cfg.Command != "" {
 		cmd := exec.Command(s.cfg.Command, s.cfg.Args...)
 		cmd.Stderr = &logWriter{log: s.log}
+		env := os.Environ()
 		if s.user != nil {
 			cmd.Dir, _ = filepath.Abs(s.conf.WorkspaceRoot())
-			cmd.Env = fw.ToolEnv(context.Background(), s.conf, os.Environ(), nil)
-			s.user.Apply(cmd)
+			env = fw.ToolEnv(context.Background(), s.conf, env, nil)
 		}
-		return &sdk.CommandTransport{Command: cmd}
+		env, err := fw.ExtendToolEnv(ctx, s.conf, env)
+		if err != nil {
+			return nil, fmt.Errorf("mcp: server %s cannot start: %w", s.cfg.Name, err)
+		}
+		cmd.Env = env
+		s.user.Apply(cmd)
+		return &sdk.CommandTransport{Command: cmd}, nil
 	}
-	return &sdk.StreamableClientTransport{Endpoint: s.cfg.Endpoint, HTTPClient: s.client}
+	return &sdk.StreamableClientTransport{Endpoint: s.cfg.Endpoint, HTTPClient: s.client}, nil
 }
 
 // listChanged handles notifications/tools/list_changed. The next Tools call

@@ -18,7 +18,7 @@ Arrows show calls or data flow, not Go imports. Dotted arrows show composition, 
 - **Configuration:** [`config/`](../config/config.go) loads defaults, YAML, `FW_*` overrides, and profiles. CLI overrides follow the environment. Go callers can inject implementations with `fw.With*` options.
 - **Inbound access:** native and A2A operation routes use `Authn`, then the Agent API applies `Authz` to principal-bearing requests. Token, OIDC, SPIFFE, and explicit anonymous modes are implemented. The A2A card, health, and metrics routes are public. Bus intake is a trusted process channel.
 - **Execution policy:** `Authz` controls callers; `Policy` controls model tool calls. Profile and ancestor rules can tighten tool policy. An external MCP or bus decision point can supply the base policy.
-- **Extensions:** registries, services, observers, annotators, `native.Extend`, `PersonTokens`, `Spawner`, and `Forker` are the integration points. The token broker is an external service in this map. The kernel contains its client and the pause/resume primitive.
+- **Extensions:** registries, services, observers, annotators, tool environment hooks, prompt sections, `native.Extend`, `PersonTokens`, `Spawner`, and `Forker` are the integration points. The package `env` uses the hooks for packages on the durable volume (updated 2026-10-20). The token broker is an external service in this map. The kernel contains its client and the pause/resume primitive.
 - **Dependency direction:** public driver packages import `fw`; `fw` imports no driver. It does import `gopkg.in/yaml.v3` for configuration types, so the current package is not strictly standard-library-only.
 
 ### Source map
@@ -39,6 +39,7 @@ Arrows show calls or data flow, not Go imports. Dotted arrows show composition, 
 | Transport surfaces and shared views | [`surface/native/`](../surface/native/), [`surface/a2a/`](../surface/a2a/), [`surface/view/`](../surface/view/) |
 | Queue intake and event egress | [`fw/intake.go`](../fw/intake.go): `handleIntake`, `intakeGate`, `settleJob`; [`fw/busio.go`](../fw/busio.go): `egress`; [`bus/nats/`](../bus/nats/), [`bus/redis/`](../bus/redis/) |
 | Observability | [`surface/metrics/metrics.go`](../surface/metrics/metrics.go); [`telemetry/metrics.go`](../telemetry/metrics.go): `Attach`; [`telemetry/otlp.go`](../telemetry/otlp.go): `Export` |
+| Package environments (section 18) | [`env/`](../env/): `Start`, `toolEnv`, the tool `env`, `section`; [`fw/toolenv.go`](../fw/toolenv.go): `RegisterToolEnv`, `ExtendToolEnv`; [`fw/prompt.go`](../fw/prompt.go): `RegisterPromptSection`; [`cli/env.go`](../cli/env.go): `fw env dockerfile` |
 | Child execution and credentials | [`fw/spawn.go`](../fw/spawn.go): `SpawnChild`, `Spawner`, `Forker`; [`ax/spawn.go`](../ax/spawn.go); [`fw/connect.go`](../fw/connect.go); [`tokens/tokens.go`](../tokens/tokens.go) |
 
 ## 2. Run execution and durability
