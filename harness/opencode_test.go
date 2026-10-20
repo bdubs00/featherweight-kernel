@@ -302,3 +302,28 @@ func TestOpencodeCancelWhileWaiting(t *testing.T) {
 		return len(f.aborts) == 1 && f.aborts[0] == f.prompts[0].Session
 	})
 }
+
+// TestHarnessMissing fails the run with a message that names the program
+// when the image has no harness.
+func TestHarnessMissing(t *testing.T) {
+	for _, kind := range []string{KindOpencode, KindClaudeCode} {
+		d := newDirs(t)
+		cfg := testConfig(t, d, "kind: "+kind+"\ncommand: [/nonexistent/harness]\n")
+		if kind == KindClaudeCode {
+			cfg.Model = "anthropic/claude-test"
+		}
+		a := newAgent(t, cfg, fw.NewMemLedger())
+		if kind == KindClaudeCode {
+			// The hook route needs the native API.
+			a.Runner().(*host).mounts = 1
+		}
+		r, err := a.Start(testCtx(t), "hello")
+		if err != nil {
+			t.Fatal(err)
+		}
+		r = waitState(t, a, r.ID, terminal)
+		if r.State != fw.StateFailed || !strings.Contains(r.Error, "/nonexistent/harness") {
+			t.Fatalf("%s: run = %+v", kind, r)
+		}
+	}
+}
