@@ -415,6 +415,9 @@ func profileProblems(c *fw.Config, name string, prof fw.AgentProfile) []string {
 	if prof.Budget != nil {
 		p = append(p, checkBudget(key+".budget", *prof.Budget)...)
 	}
+	if err := fw.CheckOutcome(c, prof.Outcome); err != nil {
+		p = append(p, key+"."+strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
+	}
 	if prof.Access != nil {
 		p = append(p, checkEntries(key+".access.owners", prof.Access.Owners)...)
 		p = append(p, checkEntries(key+".access.operators", prof.Access.Operators)...)
