@@ -171,7 +171,9 @@ const MaxTitleRunes = 200
 // Profile is an inline profile that overlays the named profile of agent for
 // this run. Budget limits the run; a set field wins over the same limit of
 // the profile. Title names the work; it goes into the metadata key
-// fw.MetaTitle and wins over a title in metadata.
+// fw.MetaTitle and wins over a title in metadata. Outcome asks for a grade
+// of the answer by a grader run, and replaces the outcome of the profile
+// (fw.Outcome); the kernel checks it.
 type createBody struct {
 	Agent        string            `json:"agent"`
 	Input        string            `json:"input"`
@@ -182,6 +184,7 @@ type createBody struct {
 	Metadata     map[string]string `json:"metadata"`
 	Wait         bool              `json:"wait"`
 	Files        []fileBody        `json:"files"`
+	Outcome      *fw.Outcome       `json:"outcome"`
 	// Principal and PrincipalKind name the person that the run is for. Only
 	// a trusted caller, the static token or a workload, sets them; a parent
 	// in another process does, so the child acts as its person.
@@ -493,6 +496,7 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 		Budget:        budget,
 		Metadata:      body.Metadata,
 		Files:         attachments(body.Files),
+		Outcome:       body.Outcome,
 		Principal:     strings.TrimSpace(body.Principal),
 		PrincipalKind: strings.TrimSpace(body.PrincipalKind),
 	}
