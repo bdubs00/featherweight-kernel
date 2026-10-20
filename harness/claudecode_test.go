@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
@@ -258,5 +259,35 @@ func TestClaudeCodeNeedsAnthropic(t *testing.T) {
 	r = waitState(t, a, r.ID, terminal)
 	if r.State != fw.StateFailed || !strings.Contains(r.Error, "provider anthropic") {
 		t.Fatalf("run = %+v", r)
+	}
+}
+
+// TestClaudeCodeBlankFollowUp sends a blank follow-up: no process starts,
+// and the run finishes again at once.
+func TestClaudeCodeBlankFollowUp(t *testing.T) {
+	d := newDirs(t)
+	block := fakeClaude(t)
+	l := fw.NewMemLedger()
+	a := claudeAgent(t, d, block, l, nil)
+	r, err := a.Start(testCtx(t), "Create hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, r.ID, terminal)
+	if err := a.Send(testCtx(t), r.ID, fw.Message{Content: []fw.Block{fw.Text("\n")}}, fw.OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateCompleted || r.Output != "Done." {
+		t.Fatalf("run = %+v", r)
+	}
+	time.Sleep(200 * time.Millisecond)
+	n := len(events(t, l, r.ID))
+	time.Sleep(200 * time.Millisecond)
+	if m := len(events(t, l, r.ID)); m != n {
+		t.Fatalf("the run recorded %d events after its end", m-n)
+	}
+	if calls := fakeCalls(t, d.home); len(calls) != 1 {
+		t.Fatalf("%d processes of claude", len(calls))
 	}
 }

@@ -87,10 +87,43 @@ type state struct {
 }
 
 // message is a message of the run for the harness: the input of the run
-// or a follow-up.
+// or a follow-up. A message with an empty text gives the harness nothing,
+// such as a blank follow-up or a note of the kernel, but the harness still
+// got it, so the run can finish after it.
 type message struct {
 	seq  uint64
 	text string
+}
+
+// filesNote is the text of a message that holds attachments and no text,
+// when the attachments are not files of the workspace.
+const filesNote = "The person sent attachments without text. They do not reach this session. Ask the person for their content as text if you need it."
+
+// messageText returns the text of a message for the harness. A message
+// with attachments alone gets a text that names them: the kernel keeps
+// each file in the directory attachments of the directory of the run,
+// where the harness works, so the harness reads it with its tools.
+func messageText(blocks []fw.Block) string {
+	if t := strings.TrimSpace(fw.TextOf(blocks)); t != "" {
+		return t
+	}
+	var files []string
+	other := false
+	for _, b := range blocks {
+		switch {
+		case b.Type == fw.BlockFile && b.File != nil && b.File.Path != "":
+			files = append(files, path.Join(fw.AttachmentsDir, path.Base(b.File.Path)))
+		case b.Type != fw.BlockText:
+			other = true
+		}
+	}
+	switch {
+	case len(files) > 0:
+		return "The person sent files without text: " + strings.Join(files, ", ") + "."
+	case other:
+		return filesNote
+	}
+	return ""
 }
 
 // decision is an approval of the run and its decision.
@@ -118,19 +151,26 @@ func scan(evs []fw.Event) *state {
 		switch e.Type {
 		case fw.EvRunQueued:
 			var d fw.RunQueuedData
-			if e.Decode(&d) == nil && strings.TrimSpace(d.Input) != "" {
+			if e.Decode(&d) != nil {
+				continue
+			}
+			if strings.TrimSpace(d.Input) != "" {
 				msgs = append(msgs, message{seq: e.Seq, text: d.Input})
+			} else if t := messageText(d.Files); t != "" {
+				msgs = append(msgs, message{seq: e.Seq, text: t})
 			}
 		case fw.EvRunStarted:
 			s.started = true
 		case fw.EvMessageReceived:
+			// Every message counts, so prompted covers it once the harness
+			// got the messages before and after it (Hosted.Finish). Only a
+			// message of a person or a caller has a text for the harness.
+			m := message{seq: e.Seq}
 			var d fw.MessageReceivedData
-			if e.Decode(&d) != nil || d.Origin == fw.OriginKernel || (d.Role != fw.RoleUser && d.Role != fw.RoleSystem) {
-				continue
+			if e.Decode(&d) == nil && d.Origin != fw.OriginKernel && (d.Role == fw.RoleUser || d.Role == fw.RoleSystem) {
+				m.text = messageText(d.Content)
 			}
-			if t := strings.TrimSpace(fw.TextOf(d.Content)); t != "" {
-				msgs = append(msgs, message{seq: e.Seq, text: t})
-			}
+			msgs = append(msgs, m)
 		case EvEvent:
 			s.hosted = true
 			var d EventData
@@ -244,15 +284,28 @@ func (r *run) fail(ctx context.Context, msg string) error {
 }
 
 // prompt returns the text of the messages that the harness did not get,
-// and the sequence number of the latest one.
+// and the sequence number of the latest one. The text is empty when none
+// of them has a text.
 func (s *state) prompt() (string, uint64) {
 	var parts []string
 	var last uint64
 	for _, m := range s.unseen {
-		parts = append(parts, m.text)
+		if m.text != "" {
+			parts = append(parts, m.text)
+		}
 		last = m.seq
 	}
 	return strings.Join(parts, "\n\n"), last
+}
+
+// skip records that the harness got the messages up to through, which
+// hold no text, so nothing goes to the harness. The exchange ends at once
+// with its fw.idle, so no driver waits for the harness.
+func (r *run) skip(ctx context.Context, through uint64) error {
+	if err := r.mark(ctx, EventData{Kind: KindPrompt, Seq: through}); err != nil {
+		return err
+	}
+	return r.mark(ctx, EventData{Kind: KindIdle})
 }
 
 // restartNote is the message that continues a session that a restart

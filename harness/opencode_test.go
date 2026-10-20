@@ -356,3 +356,49 @@ func TestFailedRunEndsOnce(t *testing.T) {
 		closeAgent(a)
 	}
 }
+
+// TestOpencodeFollowUpWithoutText sends a blank follow-up and one with an
+// attachment alone. The blank one gives the session nothing, and the run
+// finishes again at once; the other one names the file.
+func TestOpencodeFollowUpWithoutText(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, writeHello)
+	cfg := testConfig(t, d, ocBlock(d, f))
+	l := fw.NewMemLedger()
+	a := newAgent(t, cfg, l)
+	r, err := a.Start(testCtx(t), "Create hello.txt with the text hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, r.ID, terminal)
+	if err := a.Send(testCtx(t), r.ID, fw.Message{Role: fw.RoleUser, Content: []fw.Block{fw.Text("   ")}}, fw.OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, terminal)
+	if r.State != fw.StateCompleted || r.Output != "Done." {
+		t.Fatalf("after a blank follow-up: %+v", r)
+	}
+	time.Sleep(200 * time.Millisecond)
+	n := len(events(t, l, r.ID))
+	time.Sleep(200 * time.Millisecond)
+	if m := len(events(t, l, r.ID)); m != n {
+		t.Fatalf("the run recorded %d events after its end", m-n)
+	}
+	f.mu.Lock()
+	prompts := len(f.prompts)
+	f.mu.Unlock()
+	if prompts != 1 {
+		t.Fatalf("the session got %d prompts", prompts)
+	}
+
+	f.script = answerOnly
+	if err := a.Send(testCtx(t), r.ID, fw.Message{Content: []fw.Block{fw.Attachment("notes.txt", []byte("some notes"))}}, fw.OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	r = waitState(t, a, r.ID, func(r *fw.Run) bool { return terminal(r) && r.Output == "Again." })
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.prompts) != 2 || f.prompts[1].Text != "The person sent files without text: attachments/notes.txt." {
+		t.Fatalf("prompts = %+v", f.prompts)
+	}
+}

@@ -119,6 +119,12 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 		case answered:
 		case open:
 			lines, through = []string{restartNote}, st.prompted
+		case through > st.prompted:
+			// The new messages hold no text: the session gets nothing.
+			if err := r.skip(ctx, through); err != nil {
+				return err
+			}
+			continue
 		case !st.terminal:
 			if done, err := r.hr.Finish(ctx, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: st.output}, st.prompted); err != nil || done {
 				return err

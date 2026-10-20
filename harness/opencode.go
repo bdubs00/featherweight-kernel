@@ -722,6 +722,12 @@ func (o *opencode) exchange(ctx context.Context, r *run, s *ocSession, fresh boo
 			}
 		case answered, st.openExchange():
 			// The session goes on after the answer, or it works.
+		case through > st.prompted:
+			// The new messages hold no text: the session gets nothing.
+			if err := r.skip(ctx, through); err != nil {
+				return 0, err
+			}
+			continue
 		case !st.terminal:
 			// The exchange ended, but the run did not record its end.
 			if done, err := r.hr.Finish(ctx, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: st.output}, st.prompted); err != nil || done {
