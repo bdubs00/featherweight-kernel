@@ -1473,6 +1473,11 @@ func (a *Agent) driverBody(ctx context.Context, rs *runState) exitReason {
 		return exitError
 	}
 	defer rs.releaseEvents()
+	if a.runner != nil {
+		if reason, ok := a.host(ctx, rs); ok {
+			return reason
+		}
+	}
 	return a.drive(ctx, rs)
 }
 

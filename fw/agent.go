@@ -80,6 +80,7 @@ type Agent struct {
 	decisionPoints []external // policy.external and the points of linked packages, see external.go
 
 	services   []io.Closer // what stops the services, see service.go
+	runner     Runner      // drives the runs in place of the turn loop, see runner.go
 	accessMode string      // AccessModeRules, AccessModeExternal, or AccessModeCustom
 
 	k *kernel // runtime state, see kernel.go
@@ -316,6 +317,14 @@ func New(opts ...Option) (*Agent, error) {
 	a.spawner = o.spawner
 	if a.spawner == nil && !o.noDefaults {
 		if a.spawner, err = newSpawner(ctx, cfg); err != nil {
+			return nil, err
+		}
+	}
+	// The runner exists before the kernel resumes the runs of the ledger,
+	// so a resumed run goes to it.
+	a.runner = o.runner
+	if a.runner == nil && !o.noDefaults {
+		if a.runner, err = newRunner(ctx, a); err != nil {
 			return nil, err
 		}
 	}
