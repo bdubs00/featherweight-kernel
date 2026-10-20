@@ -420,7 +420,7 @@ func TestBusIntakeRetriesAndDeadLetters(t *testing.T) {
 	cfg.Bus.IntakeRetries = 1
 	s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)), callTools(use("c2", "echo", `{"text":"b"}`)))
 	a := newTestAgent(t, s.Model(), WithConfig(cfg), WithBus(qb), WithTools(echoTool(nil)))
-	e := job(t, RunRequest{Input: "flaky job", Principal: "alice", Budget: &Budget{MaxTurns: 1}, Metadata: map[string]string{"ticket": "7", MetaBatch: "b1"}})
+	e := job(t, RunRequest{Input: "flaky job", Principal: "alice", Budget: failingBudget(), Metadata: map[string]string{"ticket": "7", MetaBatch: "b1"}})
 	if err := qb.Publish(ctx, queue, e); err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +477,7 @@ func TestBusIntakeDeadLettersTheFirstFailure(t *testing.T) {
 	dead := deadRecords(t, qb, queue)
 	s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)), endTurn("fine"))
 	a := newTestAgent(t, s.Model(), WithConfig(intakeConfig(queue)), WithBus(qb), WithTools(echoTool(nil)))
-	if err := qb.Publish(ctx, queue, job(t, RunRequest{Input: "fails", Budget: &Budget{MaxTurns: 1}})); err != nil {
+	if err := qb.Publish(ctx, queue, job(t, RunRequest{Input: "fails", Budget: failingBudget()})); err != nil {
 		t.Fatal(err)
 	}
 	_, d := nextRecord(t, dead)
@@ -585,7 +585,7 @@ func TestBusIntakeDeadLetterOff(t *testing.T) {
 	s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)))
 	a := newTestAgent(t, s.Model(), WithConfig(cfg), WithBus(qb), WithTools(echoTool(nil)))
 	bad := job(t, RunRequest{Input: "x", Agent: "missing"})
-	fails := job(t, RunRequest{Input: "fails", Budget: &Budget{MaxTurns: 1}})
+	fails := job(t, RunRequest{Input: "fails", Budget: failingBudget()})
 	for _, e := range []Event{bad, fails} {
 		if err := qb.Publish(ctx, queue, e); err != nil {
 			t.Fatal(err)
@@ -617,7 +617,7 @@ func TestBusIntakeSendsWhatAFailureOwesAfterARestart(t *testing.T) {
 	rb.refuse.Store(true)
 	s := newScript(callTools(use("c1", "echo", `{"text":"a"}`)))
 	a := newTestAgent(t, s.Model(), WithConfig(intakeConfig(queue)), WithBus(rb), WithLedger(l), WithTools(echoTool(nil)))
-	if err := qb.Publish(ctx, queue, job(t, RunRequest{Input: "fails", Budget: &Budget{MaxTurns: 1}})); err != nil {
+	if err := qb.Publish(ctx, queue, job(t, RunRequest{Input: "fails", Budget: failingBudget()})); err != nil {
 		t.Fatal(err)
 	}
 	waitUntil(t, "the failure", func() bool {
@@ -704,4 +704,12 @@ func TestDeadLetterSubject(t *testing.T) {
 	if (&Config{}).RunSlots() != defaultMaxRuns || (&Config{MaxRuns: 1}).RunSlots() != 1 {
 		t.Error("RunSlots")
 	}
+}
+
+// failingBudget makes a run fail at its first turn. The final report is
+// off, because these tests watch what the intake does with a failed run,
+// and the scripted model has no answer for a report call.
+func failingBudget() *Budget {
+	off := false
+	return &Budget{MaxTurns: 1, FinalReport: &off}
 }
