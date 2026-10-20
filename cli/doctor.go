@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bdubs00/featherweight-kernel/ax"
 	"github.com/bdubs00/featherweight-kernel/config"
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
@@ -71,6 +72,7 @@ func cmdDoctor(ctx context.Context, g *globals, args []string) int {
 	d := &doctor{g: g, timeout: *timeout}
 	cfg := d.checkConfig()
 	d.checkHome(cfg)
+	d.checkToolUser(cfg)
 	d.checkTime(cfg)
 	d.checkAuth(ctx, cfg)
 	d.checkTLS(ctx, cfg)
@@ -143,6 +145,25 @@ func (d *doctor) checkHome(cfg *fw.Config) {
 // checkTime prints the configured time zone, the current time in it, and
 // the gap that starts a time note. A zone that does not resolve fails the
 // line. The configuration check also names such a zone.
+// checkToolUser reports the user of the processes of tools (tools.user,
+// docs/ARCHITECTURE.md section 7.12), with the default of ax inside a
+// Task, as ax.ApplyToConfig sets it for fw serve.
+func (d *doctor) checkToolUser(cfg *fw.Config) {
+	spec := cfg.Tools.User
+	if spec == "" && ax.Detect() && os.Geteuid() == 0 {
+		spec = ax.DefaultToolUser
+	}
+	u, err := fw.LookupToolUser(spec)
+	switch {
+	case err != nil:
+		d.fail("tools user: %v", err)
+	case u == nil:
+		d.ok("tools user: none; the processes of tools run as the user of fw")
+	default:
+		d.ok("tools user: %s", u)
+	}
+}
+
 func (d *doctor) checkTime(cfg *fw.Config) {
 	loc, name, err := fw.LoadZone(cfg.Time.Zone)
 	if err != nil {

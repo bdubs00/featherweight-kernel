@@ -38,6 +38,7 @@ type Agent struct {
 	secrets   Secrets
 	redact    *redactor  // removes secrets from each event, see redact.go
 	files     *workspace // the workspace of the file tools, see workspace.go
+	toolUser  *ToolUser  // the user of the processes of tools, or nil, see tooluser.go
 	compactor Compactor
 	surfaces  []Surface
 	authn     Authn
@@ -189,14 +190,28 @@ func New(opts ...Option) (*Agent, error) {
 	if names := toolSecretNames(cfg.Tools.Bash.Env); len(names) > 0 {
 		a.log.Warn("tools.bash.env gives the shell variables with a secret name; every command of the shell can read them", "names", names)
 	}
+	if a.toolUser, err = LookupToolUser(cfg.Tools.User); err != nil {
+		return nil, err
+	}
 	files := o.files
 	if files == nil {
 		if files, err = DirFiles(cfg.WorkspaceRoot()); err != nil {
 			return nil, err
 		}
+		if u := a.toolUser; u != nil {
+			// The kernel writes as fw, so a file that it creates for a
+			// tool, such as an attachment, goes to the tool user.
+			files.(*dirFiles).owner = &fileOwner{uid: int(u.UID), gid: int(u.GID)}
+		}
 	}
 	if a.files, err = newWorkspace(files, cfg); err != nil {
 		return nil, err
+	}
+	if a.toolUser != nil {
+		if err := a.useToolUser(a.toolUser); err != nil {
+			return nil, err
+		}
+		a.log.Info("the processes of tools run as the tool user", "user", a.toolUser.String())
 	}
 	if a.ledger == nil {
 		if a.ledger, err = OpenLedger(ctx, cfg); err != nil {
@@ -348,6 +363,10 @@ func (a *Agent) Files() Files {
 
 // Config returns the resolved configuration.
 func (a *Agent) Config() *Config { return a.cfg }
+
+// ToolUser returns the user that runs the processes of tools (tools.user,
+// section 7.12), or nil when they run as the user of fw.
+func (a *Agent) ToolUser() *ToolUser { return a.toolUser }
 
 // Node returns the name of this process among the processes of a fleet
 // (Config.Node).

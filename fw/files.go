@@ -59,7 +59,15 @@ func DirFiles(dir string) (Files, error) {
 }
 
 // dirFiles is a directory on the local disk.
-type dirFiles struct{ dir string }
+type dirFiles struct {
+	dir string
+	// owner gets every file and directory that a write creates, when it is
+	// set: the tool user, because the kernel writes as fw (section 7.12).
+	owner *fileOwner
+}
+
+// fileOwner is the owner of the new files of a store.
+type fileOwner struct{ uid, gid int }
 
 // Dir returns the absolute directory.
 func (d *dirFiles) Dir() string { return d.dir }
@@ -134,11 +142,56 @@ func (d *dirFiles) WriteFile(name string, data []byte) error {
 	defer r.Close()
 	mode := d.mode()
 	if dir := filepath.Dir(local); dir != "." {
-		if err := r.MkdirAll(dir, mode); err != nil {
+		if err := d.mkdirAll(r, dir, mode); err != nil {
 			return err
 		}
 	}
-	return r.WriteFile(local, data, mode&^0o111)
+	if d.owner == nil {
+		return r.WriteFile(local, data, mode&^0o111)
+	}
+	// A new file goes to the owner through its descriptor, so a link that
+	// appears at the name meanwhile changes nothing.
+	f, err := r.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode&^0o111)
+	switch {
+	case err == nil:
+		if err := f.Chown(d.owner.uid, d.owner.gid); err != nil {
+			f.Close()
+			return err
+		}
+	case errors.Is(err, fs.ErrExist):
+		if f, err = r.OpenFile(local, os.O_WRONLY|os.O_TRUNC, 0); err != nil {
+			return err
+		}
+	default:
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// mkdirAll creates the directory dir under r and its parents. Each
+// directory that it creates goes to the owner of the store.
+func (d *dirFiles) mkdirAll(r *os.Root, dir string, mode fs.FileMode) error {
+	if d.owner == nil {
+		return r.MkdirAll(dir, mode)
+	}
+	cur := ""
+	for _, part := range strings.Split(filepath.ToSlash(dir), "/") {
+		cur = filepath.Join(cur, part)
+		err := r.Mkdir(cur, mode)
+		switch {
+		case err == nil:
+			if err := r.Lchown(cur, d.owner.uid, d.owner.gid); err != nil {
+				return err
+			}
+		case !errors.Is(err, fs.ErrExist):
+			return err
+		}
+	}
+	return nil
 }
 
 // mode returns the permissions of the directory, or 0755.
@@ -186,7 +239,7 @@ func (d *dirFiles) Rename(oldname, newname string) error {
 		return &fs.PathError{Op: "rename", Path: newname, Err: fs.ErrExist}
 	}
 	if dir := filepath.Dir(newLocal); dir != "." {
-		if err := r.MkdirAll(dir, d.mode()); err != nil {
+		if err := d.mkdirAll(r, dir, d.mode()); err != nil {
 			return err
 		}
 	}

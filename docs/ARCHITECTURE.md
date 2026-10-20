@@ -418,7 +418,7 @@ When the provider is Anthropic, `bash`, `files`, and `memory` use the Anthropic-
 
 ### 7.3 MCP client over HTTP and HTTPS
 
-MCP is the Model Context Protocol. The revision used here is 2026-07-28, in which every request is self-contained and there is no session. `fw` is an MCP client for every server under `tools.mcp` in `fw.yaml` and for every server in the ax Workspace field `spec.mcp.servers`. An entry with `endpoint` uses the Streamable HTTP transport. An entry with `command` and `args` uses the stdio transport. The client library is `github.com/modelcontextprotocol/go-sdk`.
+MCP is the Model Context Protocol. The revision used here is 2026-07-28, in which every request is self-contained and there is no session. `fw` is an MCP client for every server under `tools.mcp` in `fw.yaml` and for every server in the ax Workspace field `spec.mcp.servers`. An entry with `endpoint` uses the Streamable HTTP transport. An entry with `command` and `args` uses the stdio transport, and with a tool user that process runs as the tool user (section 7.12). The client library is `github.com/modelcontextprotocol/go-sdk`.
 
 #### Connection settings
 
@@ -697,7 +697,45 @@ A call that waits for a connection survives a restart. The service never saw the
 
 ### 7.12 Tool processes
 
-A tool process is a process that a tool starts and that a model drives, such as the shell of `bash`. It runs untrusted input: a file that a run reads can hold a prompt injection that asks for a command. This section says what such a process gets.
+A tool process is a process that a tool starts and that a model drives: the shell of `bash`, and a stdio MCP server (section 7.3). It runs untrusted input: a file that a run reads can hold a prompt injection that asks for a command. This section says what such a process gets.
+
+#### The tool user
+
+`tools.user` names the user that runs every tool process, `FW_TOOLS_USER` in the environment. The value is a user name or a uid, with an optional `:group` or `:gid`, such as `nonroot`, `65532`, or `65532:65532`. A name, a bare uid, and a group name must exist in `/etc/passwd` and `/etc/group`. A `uid:gid` with two numbers needs no entry. The user and the group must not be root.
+
+| Environment | Default |
+|---|---|
+| An ax Task, with `fw` as root | `65532`, the user `nonroot` of both images |
+| An ax boot without root, such as `fw serve --task-file` on a developer machine | the user of `fw`, with a warning in the log |
+| Every other process | the user of `fw`, as before |
+
+`none` runs the tool processes as the user of `fw` in every environment. A user that does not exist stops the start with an error that names `tools.user` and what to set. The start also stops when `fw` does not run as root, because only root starts a process as another user, and when the tool user is the user of `fw`, because that user keeps nothing from the tools. `fw` never falls back to its own user without a word. `fw doctor` names the tool user on the line `tools user`.
+
+A tool process of a tool user runs with the uid and the gid of that user and with no other group. It gets the `HOME`, `USER`, and `LOGNAME` of the user. The home comes from `/etc/passwd`, and it is `/` for a `uid:gid` without an entry. The process cannot read the memory of `fw`, its environment in `/proc/<pid>/environ`, or its open files, because the kernel of the sandbox checks the user for each of them. The `fw` binary also makes its process non-dumpable at start (`prctl PR_SET_DUMPABLE 0`), for every verb. Then a process of the same user without `CAP_SYS_PTRACE` cannot read these entries either, and `fw` writes no core file. A debugger therefore attaches only to an `fw` that it starts.
+
+A stdio MCP server of a tool user also gets the environment of a tool process and starts in the root of the workspace, so a server such as `server-filesystem` cannot read the state of `fw` either. Such a server gets no secret from the environment of `fw`. Give a credential to an MCP server over HTTP instead, through `auth.bearer` or `auth.oauth`: the kernel calls that server and keeps the credential. Without a tool user, a stdio server keeps the whole environment of `fw`, as before.
+
+The images create the user. `fw:static` has `nonroot`, uid and gid 65532, from its distroless base, and `Dockerfile.toolbox` creates the same user with the home `/home/nonroot`. The tool user cannot install packages: an agent that needs a toolchain gets it in an image built from `fw:toolbox`, and a bootstrap goal (section 11.3) cannot install system packages either.
+
+#### The home of fw and the workspace
+
+With a tool user, `fw` prepares the files at start, before it opens the ledger:
+
+1. The home directory of `fw` and the directory of the file ledger belong to the user of `fw` and have the mode `0700`. The tool user can neither read nor write the ledger, `fw.yaml`, the profile files under `agents`, the memory, the skills under the home, or the markers of the ax boot.
+2. Once, every file and directory of the workspace except those paths gets the tool user as its owner. The workspace is the root of the files tool, and under ax also `/workspace` and the path of each binding (`Config.Workspaces`). The walk follows no symbolic link and stays on one file system. A file with more than one hard link keeps its owner, because a link can lead to a file outside the workspace. The marker `$FW_HOME/tooluser` records the user, the roots, and the reserved paths, so a later start skips the walk. A change of any of them walks again, and so does an ax boot that prepared a workspace again, because the new files belong to `fw`.
+3. Each directory from a root of the workspace down to a path of `fw`, such as `/workspace` for `/workspace/.fw`, stays with the user of `fw` and gets the mode `1775` with the group of the tool user. So do the root of the files tool and the directories above it in the workspace. A tool process adds and removes its own files there, but the sticky bit keeps it from renaming or removing `.fw` or the root of the files tool. It therefore cannot put a home of its own in place for the next start, or a link to FW_HOME in place of the root that the `files` tool opens at each call.
+4. A configuration file in the workspace, such as `./fw.yaml`, gets the mode `0600` and the user of `fw`. A configuration file elsewhere must not be writable by the tool user.
+5. The start stops when the tool user cannot reach and write a root of the workspace, when it can rename a path of `fw` or a directory above it, or when it can read the file of the API token (below).
+
+The kernel writes as the user of `fw`, so every file and directory that it creates in the workspace for a tool, such as an attachment or a file of the `files` tool, goes to the tool user at once. A new file goes to that user through its descriptor, so a link that a shell puts at the name meanwhile changes nothing.
+
+The walk costs one `lstat` for each entry and one `lchown` for each entry that changes. In a container with runc on a local disk, it gave 200,000 files to the tool user in 1.1 seconds, so a checkout with a million files takes about 6 seconds. A file system call in gVisor costs several times more, so expect such a checkout to take from half a minute to a few minutes in an ax sandbox. The walk happens once per volume, because the marker and the owners are on the volume and survive a suspend. An ax Workspace that clones a large repository therefore pays it once, at the first start of its Task, and again only when the boot prepares that workspace again.
+
+#### What the tool user does not cover
+
+- A process that `fw` starts for the operator still runs as the user of `fw`: `spec.command` of a Task (section 11.3) and the processes of the guest services of `ax ssh` (section 11.12). A Task with `spec.debug: true` lets any caller that reaches port 80, a tool process included, start a process as the user of `fw`, which undoes the tool user.
+- With FW_HOME under the root of the files tool, as with `tools.files.root: /workspace` under ax, the `files` tool checks the real path of each name before it opens it. A shell that changes a directory into a link between the check and the open can lead the tool into FW_HOME. `fw` logs a warning at start for this layout. Put FW_HOME outside the root of the files tool for untrusted input.
+- Every tool process of one Task runs as the same user. A shell of one run reads and changes the files of another run of the Task. The boundary is the Task and the tool user.
 
 #### The environment
 
@@ -715,7 +753,7 @@ The metadata endpoints of section 11.1 answer every process in the sandbox. They
 
 #### The API token in a file
 
-The default `Secrets` reads `<NAME>` from the environment, then the file that `<NAME>_FILE` names (section 6.5). The static token can therefore come from a file: set `FW_API_TOKEN_FILE` instead of `FW_API_TOKEN`, or `<auth.tokenEnv>_FILE` for another name. Every reader of the token reads it this way: the `token` mode of `auth.mode`, the `ax` spawner, the token client of section 7.11, `fw doctor`, and the fleet of the workbench. A file keeps the token out of the environment of `fw` and out of a Task manifest. Make the file readable by the user of `fw` alone, with mode `0400` or `0600`.
+The default `Secrets` reads `<NAME>` from the environment, then the file that `<NAME>_FILE` names (section 6.5). The static token can therefore come from a file: set `FW_API_TOKEN_FILE` instead of `FW_API_TOKEN`, or `<auth.tokenEnv>_FILE` for another name. Every reader of the token reads it this way: the `token` mode of `auth.mode`, the `ax` spawner, the token client of section 7.11, `fw doctor`, and the fleet of the workbench. A file keeps the token out of the environment of `fw` and out of a Task manifest. Make the file readable by the user of `fw` alone, with mode `0400` or `0600`. With a tool user, `fw` refuses to start when the tool user can read the file, for example a file of a Kubernetes Secret volume with the default mode `0644`; set `defaultMode: 0400` on such a volume.
 
 ## 8. Surfaces
 
@@ -1008,14 +1046,14 @@ ax starts `/usr/local/bin/ax-task-runner` as PID 1 in every Task container. The 
 
 `fw` implements the contract itself instead of embedding the ax `runner` package. The reason is port 80. The ax runner owns the port 80 mux, and `fw` needs that port for its own surfaces. The `ax` package defines the manifest types from the YAML schema of the ax repository. `fw` therefore parses the same YAML that the stock runner parses, without an import of the ax module. The container image contains a symlink from `/usr/local/bin/ax-task-runner` to `/usr/local/bin/fw`.
 
-Two images are built. `fw:static` is `gcr.io/distroless/static` plus the binary, for agents that only use HTTP, MCP, and A2A. `fw:toolbox` is a Debian slim image with `git`, `curl`, and common build tools, for coding agents that use `bash`. The stock ax runner image installs Python and the Antigravity agent. `fw` needs neither.
+Two images are built. `fw:static` is `gcr.io/distroless/static` plus the binary, for agents that only use HTTP, MCP, and A2A. `fw:toolbox` is a Debian slim image with `git`, `curl`, and common build tools, for coding agents that use `bash`. Both images run `fw` as root and hold the tool user `nonroot`, uid and gid 65532, which runs the processes of tools under ax (section 7.12). The stock ax runner image installs Python and the Antigravity agent. `fw` needs neither.
 
 ### 11.3 Boot sequence under ax
 
 1. Read `AX_TASK_YAML` and `AX_WORKSPACES_YAML`. Set `FW_HOME` to `/workspace/.fw`.
 2. Listen on port 80. Answer `/healthz` with 200. Serve the metadata endpoints on `127.0.0.1:8099`, or on the port of `--metadata-port`. If the Task sets `spec.debug: true`, start the guest services of `ax ssh` (section 11.12).
 3. For each workspace binding, in order, write `spec.files`, clone `spec.git`, and create `spec.skills.path`. Skip a binding whose marker exists.
-4. Write the marker at `$FW_HOME/ax/initialized-<path>`.
+4. Write the marker at `$FW_HOME/ax/initialized-<path>`. With a tool user, the next step builds the agent, which gives the prepared files to that user once and keeps `$FW_HOME` to `fw` (section 7.12).
 5. If the binding has a `goal` and a model credential is present, run the `bootstrap` profile with that goal. The time limit comes from `AX_BOOTSTRAP_TIMEOUT`, default 10 minutes. The marker is written first, so a container killed during the goal does not run the goal again on resume.
 6. Answer `/readyz` with 200.
 7. Resume unfinished runs (section 4.5).
@@ -1142,11 +1180,11 @@ The package `ax/guest` puts the upstream services from `github.com/agent-substra
 
 If a request uses HTTP/2 and its content type starts with `application/grpc`, the listener sends it to the services. Every other request goes to the routes of section 8.1. The services start with the listener in step 2 of section 11.3, before the workspaces are ready. You can therefore inspect a boot that hangs on a clone or a goal. Until the first workspace exists, a process with no working directory starts in the closest parent directory that exists.
 
-A process starts in the first workspace by default. It gets `AX_METADATA_URL`, as the command of the Task does, and it inherits the rest of the environment of `fw`. Its output stays in `/var/log/ate-jobs` for about one hour after it exits. That directory is not on the durable volume. If `fw` cannot write to it, the output goes to `ate-jobs` under the temporary directory. A process stops after one hour or after the timeout of its request, and ten processes can run at the same time.
+A process starts in the first workspace by default. It gets `AX_METADATA_URL`, as the command of the Task does, and it inherits the rest of the environment of `fw`. It runs as the user of `fw`, not as the tool user of section 7.12. Its output stays in `/var/log/ate-jobs` for about one hour after it exits. That directory is not on the durable volume. If `fw` cannot write to it, the output goes to `ate-jobs` under the temporary directory. A process stops after one hour or after the timeout of its request, and ten processes can run at the same time.
 
 Each call writes the log line `fw: ax guest call` with the method, the process id, and the name of the program. A call that starts or signals a process, or reads or writes a file, logs at the info level. The line never holds the arguments, the input, or the output of a process, because they can hold a secret. The process service collects the exit status of its own processes at once. The zombie reaper of section 5.6 waits five seconds before it collects a child, so the two never take the same exit status.
 
-Do not set `spec.debug` on a Task whose environment or workspace holds data that other callers must not read. The services carry no authentication, as the runner contract expects, and `ax ssh` sends no credential. The authentication, the access roles, and the policy of `fw` do not apply to these calls. Any caller that reaches port 80 of the sandbox, directly or through the atenet router, can run a process. That process can read every `spec.env` entry and every key in the environment of `fw`. If the services are on, `fw` logs a warning at boot.
+Do not set `spec.debug` on a Task whose environment or workspace holds data that other callers must not read. The services carry no authentication, as the runner contract expects, and `ax ssh` sends no credential. The authentication, the access roles, and the policy of `fw` do not apply to these calls. Any caller that reaches port 80 of the sandbox, directly or through the atenet router, can run a process. That process can read every `spec.env` entry and every key in the environment of `fw`. A tool process inside the sandbox reaches port 80 too, so the guest services undo the tool user of section 7.12. If the services are on, `fw` logs a warning at boot.
 
 The `fw:static` image holds no shell, so `ax ssh <task>` with no command cannot start `/bin/sh`. The `fw` binary is on the PATH of both images, and `fw events` finds the ledger under `/workspace/.fw` without a flag. This command prints the ledger of a run in either image:
 
@@ -1501,7 +1539,7 @@ The actions `agent.create`, `agent.edit`, and `agent.delete` stay in the kernel,
 - Tool results are data, not instructions. The kernel passes them to the model as tool result blocks only.
 - Operator instructions use system messages. User and tool content never reach the system prompt.
 - Destructive tools ask by default. A deployment that wants no prompts sets the policy to allow, in writing, in `fw.yaml`.
-- The `files` tool is jailed to its root path and never opens the home directory of `fw`, the file ledger, or the configuration file. The `http` tool uses an allowlist. Sandboxing of `bash` belongs to the container runtime, which is ax under ax.
+- The `files` tool is jailed to its root path and never opens the home directory of `fw`, the file ledger, or the configuration file. The `http` tool uses an allowlist. The sandbox of the Task, which is ax under ax, keeps `bash` inside the Task. Inside the Task, the tool user keeps `bash` and the stdio MCP servers away from the state, the memory, and the secrets of `fw` (section 7.12). Under ax the tool user is on by default.
 - Annotations from an MCP server are hints. The policy trusts only the servers that `fw.yaml` lists as trusted.
 - Budgets cap every run. A run with no budget gets the profile budget. A profile with no budget gets the default: 200 turns, 2 hours of working time, 1000 tool calls, 32 calls per turn, and 5 repeats of one call.
 - Tool limits bound every call: 256 KB in, 100 KB out, and 10 minutes, per tool and per configuration. A large data source cannot flood the context window.

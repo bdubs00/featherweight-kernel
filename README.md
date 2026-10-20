@@ -105,6 +105,8 @@ curl -H 'ate-target-actor: default/reviewer' -H 'Content-Type: application/json'
      http://atenet-router.ate-system.svc.cluster.local/v1/runs
 ```
 
+Under ax, `fw` runs as root and starts `bash` and the stdio MCP servers as the tool user `nonroot`, uid 65532, which both images hold (`tools.user`). That user owns the workspace, but it cannot read or change `/workspace/.fw`, which holds the ledger and `fw.yaml`, and it cannot read the memory or the environment of `fw`. A shell gets no variable that holds a secret. Section 7.12 of the architecture has the rules.
+
 To inspect a sandbox with `ax ssh`, set `spec.debug: true` on the Task. `fw` then serves the guest services of `ax ssh` on port 80, during the boot and after it:
 
 ```

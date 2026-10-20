@@ -162,3 +162,29 @@ func TestIdentity(t *testing.T) {
 		t.Errorf("Identity(nil) = %q, %q", a, n)
 	}
 }
+
+// Under ax a process that runs as root starts its tools as the tool user
+// of the images, and the tool user owns the volume and every binding.
+func TestApplyToConfigToolUser(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	bindings := []Binding{{Ref: WorkspaceRef{Name: "a"}, Path: "/workspace/a"}, {Ref: WorkspaceRef{Name: "b"}, Path: "/src/b"}}
+	cfg := fw.DefaultConfig()
+	ApplyToConfig(cfg, &Task{}, bindings)
+	want := ""
+	if os.Geteuid() == 0 {
+		want = DefaultToolUser
+	}
+	if cfg.Tools.User != want {
+		t.Errorf("Tools.User = %q, want %q", cfg.Tools.User, want)
+	}
+	if !reflect.DeepEqual(cfg.Workspaces, []string{DefaultWorkspacePath, "/workspace/a", "/src/b"}) {
+		t.Errorf("Workspaces = %v", cfg.Workspaces)
+	}
+
+	cfg = fw.DefaultConfig()
+	cfg.Tools.User = fw.ToolUserNone
+	ApplyToConfig(cfg, &Task{}, bindings)
+	if cfg.Tools.User != fw.ToolUserNone {
+		t.Errorf("an explicit tools.user became %q", cfg.Tools.User)
+	}
+}

@@ -153,6 +153,11 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return exitUsage
 	}
 	g.setLogger(firstNonEmpty(g.log, os.Getenv("FW_TELEMETRY_LOG"), os.Getenv("FW_LOG"), "info"))
+	// The process holds the secrets of the agent in its memory and its
+	// environment, so no tool process can read them through /proc.
+	if err := undumpable(); err != nil {
+		slog.Warn("cli: the process stays dumpable", "error", err)
+	}
 	if SetBuildInfo != nil {
 		SetBuildInfo(Version, Commit)
 	}

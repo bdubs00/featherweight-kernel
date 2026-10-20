@@ -132,6 +132,8 @@ tokens:                         # the tokens of people, from a broker outside th
 
 tools:
   builtin: [bash, files, http, memory, skill, clock, ask_user, spawn_task, await_task]   # the workbench adds propose_agent
+  user: ""                      # the user of bash and of the stdio MCP servers: a name or uid, with :group or :gid; "none" is the user of fw.
+                                # Empty is 65532 (nonroot of the images) under ax with fw as root, else the user of fw. FW_TOOLS_USER (section 7.12)
   files:                        # the workspace of the files tool and bash (section 7.9)
     root: /workspace
     deny: [.env, ".env.*", "*.pem", "*.key", .netrc, "**/.git/config"]   # never read or written; .gitignore patterns

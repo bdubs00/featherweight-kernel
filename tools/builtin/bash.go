@@ -66,8 +66,9 @@ const sessionIdle = 30 * time.Minute
 type bashTool struct {
 	cfg     *fw.Config // nil for a tool without a configuration
 	dir     string
-	home    string   // FW_HOME of the shell
-	env     []string // the variables of tools.bash.env, as NAME=value
+	home    string       // FW_HOME of the shell
+	env     []string     // the variables of tools.bash.env, as NAME=value
+	user    *fw.ToolUser // the user of the shell (tools.user), or nil for the user of fw
 	timeout time.Duration
 
 	mu       sync.Mutex
@@ -101,6 +102,11 @@ func newBash(cfg *fw.Config) (fw.Tool, error) {
 		if cfg.Home != "" {
 			t.home = cfg.Home
 		}
+		u, err := fw.LookupToolUser(cfg.Tools.User)
+		if err != nil {
+			return nil, fmt.Errorf("builtin: bash: %w", err)
+		}
+		t.user = u
 	}
 	go t.reap()
 	return t, nil
@@ -253,7 +259,7 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 
 // start starts a new shell for a session. The caller holds its token.
 func (t *bashTool) start(ctx context.Context, s *bashSession) error {
-	sh, err := startShell(t.dir, t.shellEnv(ctx))
+	sh, err := startShell(t.dir, t.shellEnv(ctx), t.user)
 	if err != nil {
 		return fmt.Errorf("bash: the shell cannot start: %v", err)
 	}
@@ -382,12 +388,14 @@ type shell struct {
 	errClosed bool // the shell closed its stderr pipe
 }
 
-// startShell starts bash in dir with the environment env (shellEnv).
-func startShell(dir string, env []string) (*shell, error) {
+// startShell starts bash in dir with the environment env (shellEnv), as
+// the tool user u when u is not nil.
+func startShell(dir string, env []string, u *fw.ToolUser) (*shell, error) {
 	cmd := exec.Command("bash", "--noprofile", "--norc")
 	cmd.Dir = dir
 	cmd.Env = env
 	setGroup(cmd)
+	u.Apply(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

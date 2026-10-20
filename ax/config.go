@@ -24,6 +24,9 @@ const (
 	DefaultBootstrapTimeout = 10 * time.Minute
 	// EnvAtespace carries the atespace of the Task to the kernel.
 	EnvAtespace = "FW_ATESPACE"
+	// DefaultToolUser is tools.user under ax when fw runs as root: the
+	// user nonroot, uid and gid 65532, of the kernel images.
+	DefaultToolUser = "65532"
 )
 
 // BootstrapSystem is the system prompt of the bootstrap profile.
@@ -55,6 +58,13 @@ func BootstrapTimeout() time.Duration {
 //   - Tools.Files.Root is the first binding path when it is empty.
 //   - MaxRuns is 1 when it is 0, the default: a Task is one agent with
 //     one working copy, so one run at a time holds the workspace.
+//   - Tools.User is DefaultToolUser when it is empty and fw runs as root,
+//     as it does in an ax Task, so the processes of tools cannot read the
+//     state and the secrets of fw. A process that is not root, such as fw
+//     serve --task-file on a developer machine, keeps its tools with its
+//     own user and logs a warning.
+//   - Workspaces holds /workspace and the path of each binding, which the
+//     tool user owns.
 //   - Every spec.mcp.servers entry joins Tools.MCP unless an entry with the
 //     same name exists. The fw.yaml entry wins. spec.mcp.registries entries
 //     are logged and skipped.
@@ -76,6 +86,18 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 	}
 	if cfg.MaxRuns == 0 {
 		cfg.MaxRuns = 1
+	}
+	if cfg.Tools.User == "" {
+		if os.Geteuid() == 0 {
+			cfg.Tools.User = DefaultToolUser
+		} else {
+			log.Warn("ax: fw does not run as root, so the processes of tools run as the user of fw and can read its state; run fw as root for tools.user", "uid", os.Geteuid())
+		}
+	}
+	for _, p := range append([]string{DefaultWorkspacePath}, bindingPaths(bindings)...) {
+		if !slices.Contains(cfg.Workspaces, p) {
+			cfg.Workspaces = append(cfg.Workspaces, p)
+		}
 	}
 
 	have := make(map[string]bool, len(cfg.Tools.MCP))
@@ -137,6 +159,15 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 	if cfg.Node == "" && atespace != "" && name != "" {
 		cfg.Node = "ax:" + atespace + "/" + name
 	}
+}
+
+// bindingPaths returns the path of each binding.
+func bindingPaths(bindings []Binding) []string {
+	out := make([]string, 0, len(bindings))
+	for _, b := range bindings {
+		out = append(out, b.Path)
+	}
+	return out
 }
 
 // BootstrapInput returns the run input for a goal in dir.

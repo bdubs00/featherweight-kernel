@@ -47,6 +47,11 @@ type Config struct {
 	Telemetry  TelemetryConfig           `yaml:"telemetry" json:"telemetry"`
 	MaxRuns    int                       `yaml:"maxRuns" json:"maxRuns"`
 	Version    string                    `yaml:"-" json:"version,omitempty"`
+	// Workspaces lists more directories of the workspace than the root of
+	// the files tool, such as the volume and the bindings of an ax Task,
+	// which the package ax sets. With tools.user, the tool user owns them
+	// as it owns the root (section 7.12).
+	Workspaces []string `yaml:"-" json:"-"`
 	// ConfigFile is the configuration file that the loader read, or "".
 	ConfigFile string `yaml:"-" json:"-"`
 	// FileProfiles names the profiles that the loader read from the files
@@ -213,6 +218,12 @@ type BusConfig struct {
 // hold skills (see LoadSkills); the default is the skills directory under
 // the home directory.
 type ToolsConfig struct {
+	// User is the user that runs the processes of tools, such as the shell
+	// of bash and a stdio MCP server: a name or a uid, with an optional
+	// ":group" or ":gid" (LookupToolUser). Empty is the default of the
+	// environment: the user of fw, or 65532 under ax, which the package ax
+	// sets. "none" runs them as the user of fw.
+	User            string            `yaml:"user,omitempty" json:"user,omitempty"`
 	Builtin         []string          `yaml:"builtin" json:"builtin"`
 	Files           FilesToolConfig   `yaml:"files" json:"files"`
 	HTTP            HTTPToolConfig    `yaml:"http" json:"http"`

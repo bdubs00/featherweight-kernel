@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -898,8 +899,8 @@ func TestDoctorAllOK(t *testing.T) {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 15 {
-		t.Errorf("%d lines, want 15:\n%s", len(lines), out)
+	if len(lines) != 16 {
+		t.Errorf("%d lines, want 16:\n%s", len(lines), out)
 	}
 	timeLine := regexp.MustCompile(`(?m)^ok    time: America/Chicago, [A-Z][a-z]+day \d{4}-\d{2}-\d{2} \d{2}:\d{2} C[SD]T, notes after 10m$`)
 	if !timeLine.MatchString(out) {
@@ -908,6 +909,7 @@ func TestDoctorAllOK(t *testing.T) {
 	for _, want := range []string{
 		"ok    configuration: no fw.yaml",
 		"ok    home: " + home + " is writable",
+		"ok    tools user: none; the processes of tools run as the user of fw",
 		"ok    auth: modes token",
 		"ok    auth token: FW_API_TOKEN is not set; fw serve needs it, and fw run does not",
 		"ok    tls: off; the listener speaks plain HTTP",
@@ -1040,5 +1042,19 @@ func TestRunRefusesBadZone(t *testing.T) {
 	code, _, errOut := run(t, "", "run", "hello")
 	if code == 0 || !strings.Contains(errOut, "time.zone") {
 		t.Errorf("exit %d\n%s", code, errOut)
+	}
+}
+
+// Run makes the process non-dumpable, so a tool process cannot read the
+// memory or the environment of fw through /proc.
+func TestRunMakesTheProcessUndumpable(t *testing.T) {
+	var out, errOut bytes.Buffer
+	Run(context.Background(), []string{"help"}, strings.NewReader(""), &out, &errOut)
+	d, err := dumpable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d && runtime.GOOS == "linux" {
+		t.Fatal("the process is still dumpable")
 	}
 }

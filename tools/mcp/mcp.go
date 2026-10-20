@@ -16,7 +16,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"sort"
@@ -50,6 +52,10 @@ func init() {
 // connection of its own, and the model never sees a decision tool.
 func newSources(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) ([]fw.ToolSource, error) {
 	log := slog.Default().With("component", "mcp")
+	user, err := fw.LookupToolUser(cfg.Tools.User)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: %w", err)
+	}
 	seen := map[string]bool{}
 	out := make([]fw.ToolSource, 0, len(cfg.Tools.MCP))
 	for i, c := range cfg.Tools.MCP {
@@ -69,6 +75,11 @@ func newSources(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) ([]fw.T
 			return nil, err
 		}
 		s.useSPIFFESocket(cfg)
+		if c.Command != "" {
+			// A stdio server is a process that the model drives, as the
+			// shell is, so it runs as the tool user (section 7.12).
+			s.user, s.conf = user, cfg
+		}
 		out = append(out, s)
 	}
 	return out, nil
@@ -98,6 +109,11 @@ type Server struct {
 	// protocol pins the protocol version for tests. Empty means the SDK
 	// default: 2026-07-28 with a fallback to initialize.
 	protocol string
+	// user runs a stdio server as the tool user (tools.user), with the
+	// environment of a tool process in the workspace root; nil starts it
+	// as fw with the environment of fw.
+	user *fw.ToolUser
+	conf *fw.Config // the configuration for that environment
 
 	connMu    sync.Mutex // one connect at a time
 	refreshMu sync.Mutex // one tools/list at a time
@@ -423,6 +439,11 @@ func (s *Server) transport() sdk.Transport {
 	if s.cfg.Command != "" {
 		cmd := exec.Command(s.cfg.Command, s.cfg.Args...)
 		cmd.Stderr = &logWriter{log: s.log}
+		if s.user != nil {
+			cmd.Dir, _ = filepath.Abs(s.conf.WorkspaceRoot())
+			cmd.Env = fw.ToolEnv(context.Background(), s.conf, os.Environ(), nil)
+			s.user.Apply(cmd)
+		}
 		return &sdk.CommandTransport{Command: cmd}
 	}
 	return &sdk.StreamableClientTransport{Endpoint: s.cfg.Endpoint, HTTPClient: s.client}

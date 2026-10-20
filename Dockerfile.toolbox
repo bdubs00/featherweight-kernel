@@ -20,6 +20,14 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash ca-certificates curl git jq openssh-client procps \
  && rm -rf /var/lib/apt/lists/*
+# The tool user: under ax, fw starts the shell and the stdio MCP servers as
+# nonroot, uid and gid 65532, the user of the distroless base of fw:static
+# (tools.user, docs/ARCHITECTURE.md section 7.12). fw itself stays root, so
+# it can start a process as that user and keep /workspace/.fw to itself.
+# The tool user cannot install packages: an agent that needs a toolchain
+# gets it in an image built FROM this one.
+RUN groupadd --gid 65532 nonroot \
+ && useradd --uid 65532 --gid 65532 --create-home --home-dir /home/nonroot --shell /bin/bash nonroot
 COPY --from=build /out/ /
 EXPOSE 80 8080
 ENTRYPOINT ["/usr/local/bin/fw"]
