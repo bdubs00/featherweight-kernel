@@ -95,7 +95,8 @@ func TestOpencodeRun(t *testing.T) {
 	// The fake server answers before the command wrote its files.
 	waitFor(t, func() bool { _, err := os.Stat(filepath.Join(d.root, "oc-env")); return err == nil })
 	env := readFile(t, filepath.Join(d.root, "oc-env"))
-	for _, want := range []string{"HOME=" + d.home + "\n", "FW_TEST_MODEL_KEY=" + testKey + "\n", "OPENCODE_DISABLE_MODELS_FETCH=1", `"baseURL":"http://127.0.0.1:9/v1"`, `"apiKey":"{env:FW_TEST_MODEL_KEY}"`, `OPENCODE_PERMISSION={"*":"ask"`} {
+	for _, want := range []string{"HOME=" + d.home + "\n", "FW_TEST_MODEL_KEY=" + testKey + "\n", "OPENCODE_DISABLE_MODELS_FETCH=1", `"baseURL":"http://127.0.0.1:9/v1"`, `"apiKey":"{env:FW_TEST_MODEL_KEY}"`, `OPENCODE_PERMISSION={"*":"ask"`,
+		"FW_TEST_RUN_INFO=" + r.ID + "\n"} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("the environment of opencode lacks %q", want)
 		}
@@ -521,4 +522,37 @@ func TestOpencodeRubricSkipped(t *testing.T) {
 	if e := ofType(evs, fw.EvOutcomeEvaluated); len(e) != 1 || e[0].Decode(&od) != nil || od.Answer != ofType(evs, fw.EvModelResponded)[1].Seq {
 		t.Fatalf("outcome events = %v", e)
 	}
+}
+
+// TestOpencodeEnvironmentChange changes the environment of the processes
+// between two runs: the second run starts opencode serve again with the
+// new environment.
+func TestOpencodeEnvironmentChange(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, answerOnly)
+	cfg := testConfig(t, d, ocBlock(d, f))
+	a := newAgent(t, cfg, fw.NewMemLedger())
+	r, err := a.Start(testCtx(t), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, r.ID, terminal)
+	envFile := filepath.Join(d.root, "oc-env")
+	waitFor(t, func() bool {
+		b, _ := os.ReadFile(envFile)
+		return strings.Contains(string(b), "FW_TEST_ENV_MARK=a\n")
+	})
+	testEnvMark.Store("b")
+	t.Cleanup(func() { testEnvMark.Store("a") })
+	r, err = a.Start(testCtx(t), "hello again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r = waitState(t, a, r.ID, terminal); r.State != fw.StateCompleted {
+		t.Fatalf("run = %+v", r)
+	}
+	waitFor(t, func() bool {
+		b, _ := os.ReadFile(envFile)
+		return strings.Contains(string(b), "FW_TEST_ENV_MARK=b\n")
+	})
 }

@@ -141,6 +141,10 @@ func TestClaudeCodeRun(t *testing.T) {
 	if c.Env["CLAUDE_CONFIG_DIR"] != d.home || c.Env["HOME"] != d.home || c.Env["ANTHROPIC_API_KEY"] != testKey || c.Env["ANTHROPIC_BASE_URL"] != "http://127.0.0.1:9" || c.Cwd != d.ws {
 		t.Fatalf("env = %+v, cwd = %s", c.Env, c.Cwd)
 	}
+	// The hooks of the environment saw the run, as for a tool call.
+	if c.Env["FW_TEST_RUN_INFO"] != r.ID {
+		t.Fatalf("the hooks of the environment saw the run %q, not %s", c.Env["FW_TEST_RUN_INFO"], r.ID)
+	}
 	var settings struct {
 		Hooks map[string][]struct {
 			Hooks []struct {

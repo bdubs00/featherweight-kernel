@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,21 @@ import (
 
 // testKey is the key of the model in the tests. No event may hold it.
 const testKey = "sk-test-harness-0123456789abcdef"
+
+// testEnvMark is the value of FW_TEST_ENV_MARK, which the tool environment
+// hook of the tests adds to each process of a harness.
+var testEnvMark atomic.Value
+
+// The tool environment hook of the tests records the run of the run info
+// in FW_TEST_RUN_INFO, as the environment package reads it to wait for an
+// install, and adds FW_TEST_ENV_MARK.
+func init() {
+	testEnvMark.Store("a")
+	fw.RegisterToolEnv(func(ctx context.Context, _ *fw.Config, env []string) ([]string, error) {
+		mark, _ := testEnvMark.Load().(string)
+		return append(env, "FW_TEST_RUN_INFO="+fw.RunInfoFrom(ctx).RunID, "FW_TEST_ENV_MARK="+mark), nil
+	})
+}
 
 // testDirs are the directories of one test: the home of fw, the
 // workspace, and the home of the harness, which outlive a restart of the

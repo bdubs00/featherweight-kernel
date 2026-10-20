@@ -22,7 +22,7 @@ sid = arg("--session-id") or arg("--resume")
 resume = "--resume" in args
 state_path = os.path.join(home, "fake-" + sid + ".json")
 with open(os.path.join(home, "fake-calls.jsonl"), "a") as f:
-    env = {k: os.environ.get(k, "") for k in ("HOME", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "FW_RUN_DIR")}
+    env = {k: os.environ.get(k, "") for k in ("HOME", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "FW_RUN_DIR", "FW_TEST_RUN_INFO")}
     f.write(json.dumps({"args": args, "env": env, "cwd": os.getcwd()}) + "\n")
 
 hook = json.loads(arg("--settings"))["hooks"]["PreToolUse"][0]["hooks"][0]["url"]

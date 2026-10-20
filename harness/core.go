@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -910,17 +911,22 @@ func (r *run) modelOf(ctx context.Context) (modelConf, error) {
 	return m, nil
 }
 
-// command builds the command of a process of the harness. The process
-// runs as the tool user, with the environment of a tool process
-// (fw.ToolEnv) and the variables of tools.bash.env, in dir, then the
-// changes of the linked packages (fw.ExtendToolEnv), such as the PATH of
-// the environment of section 18, whose error stops the process. HOME is
-// the home of the harness. extra comes last: the variables that the
-// harness needs on purpose, such as the key of its model, which the
-// environment of a tool process leaves out.
-func (h *host) command(ctx context.Context, argv []string, dir string, extra ...string) (*exec.Cmd, error) {
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = dir
+// info returns the run info of a process that the harness starts for the
+// run, as a tool call of the run gets it. The hooks of the linked packages
+// read it (fw.ExtendToolEnv): the environment of section 18 waits for its
+// install, or fails, before such a process starts.
+func (r *run) info(dir string) fw.RunInfo {
+	q := r.hr.Queued()
+	return fw.RunInfo{RunID: r.hr.ID(), Agent: q.Agent, Principal: q.Principal, PrincipalKind: q.PrincipalKind, Dir: dir}
+}
+
+// environ returns the environment of a process of the harness that runs
+// in dir for the run of info: the environment of a tool process
+// (fw.ToolEnv) and the variables of tools.bash.env, HOME, the home of the
+// harness, and FW_RUN_DIR, then the changes of the linked packages
+// (fw.ExtendToolEnv), such as the PATH of the environment of section 18,
+// whose error stops the process. name names the program in the error.
+func (h *host) environ(ctx context.Context, info fw.RunInfo, dir, name string) ([]string, error) {
 	cfg := h.a.Config()
 	var configured []string
 	for name, v := range cfg.Tools.Bash.Env {
@@ -929,16 +935,33 @@ func (h *host) command(ctx context.Context, argv []string, dir string, extra ...
 		}
 	}
 	sort.Strings(configured)
-	actx := fw.WithAgent(ctx, h.a)
+	actx := fw.WithRunInfo(fw.WithAgent(ctx, h.a), info)
 	env := fw.ToolEnv(actx, cfg, os.Environ(), configured)
 	env, err := fw.ExtendToolEnv(actx, cfg, append(env, "HOME="+h.home, "FW_RUN_DIR="+dir))
 	if err != nil {
-		return nil, fmt.Errorf("harness: the environment of %s: %w", argv[0], err)
+		return nil, fmt.Errorf("harness: the environment of %s: %w", name, err)
 	}
-	cmd.Env = append(env, extra...)
+	return env, nil
+}
+
+// command builds the command of a process of the harness, which runs as
+// the tool user in dir with the environment env (environ). extra comes
+// last: the variables that the harness needs on purpose, such as the key
+// of its model, which the environment of a tool process leaves out.
+func (h *host) command(argv []string, dir string, env []string, extra ...string) *exec.Cmd {
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
+	cmd.Env = append(slices.Clip(env), extra...)
 	h.a.ToolUser().Apply(cmd)
 	procAttr(cmd)
-	return cmd, nil
+	return cmd
+}
+
+// envDigest returns the SHA-256 of an environment, in hex.
+func envDigest(env []string) string {
+	sorted := slices.Sorted(slices.Values(env))
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\x00")))
+	return hex.EncodeToString(sum[:])
 }
 
 // logLines logs each line of the output of a process of the harness at

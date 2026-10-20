@@ -48,6 +48,7 @@ type ocServer struct {
 	base   string
 	pass   string
 	models map[string]bool // the selectors that its configuration holds
+	env    string          // the digest of its environment (envDigest)
 	client *http.Client
 	done   chan struct{} // closed when the process exits
 }
@@ -244,19 +245,40 @@ func (o *opencode) models(cur modelConf) []modelConf {
 	return out
 }
 
-// server returns the running server, or starts one. A server whose
-// configuration lacks the model of the run starts again when no session
-// works.
-func (o *opencode) server(ctx context.Context, m modelConf) (*ocServer, error) {
+// server returns the running server, or starts one. The environment of
+// the server comes from the run r that needs it, so the hooks of the
+// linked packages wait for that run, such as for the install of the
+// environment of section 18. A server whose configuration lacks the model
+// of the run, or whose environment changed since it started, starts again
+// when no session works. A changed environment with a session at work
+// keeps the server as it is.
+func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, error) {
+	root, err := absRoot(o.h)
+	if err != nil {
+		return nil, err
+	}
+	argv := append([]string(nil), o.h.cfg.Command...)
+	if len(argv) == 0 {
+		argv = []string{"opencode", "serve"}
+	}
+	env, err := o.h.environ(ctx, r.info(r.dir), root, argv[0])
+	if err != nil {
+		return nil, err
+	}
+	digest := envDigest(env)
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	sel := m.provider + "/" + m.name
 	if s := o.srv; s != nil && !s.dead() {
-		if s.models[sel] {
+		busy := len(o.sessions) > 0
+		switch {
+		case s.models[sel] && (s.env == digest || busy):
 			return s, nil
-		}
-		if len(o.sessions) > 0 {
+		case busy:
 			return nil, fmt.Errorf("harness: the model %s is not in the configuration of the running opencode serve; name it in models of fw.yaml", sel)
+		}
+		if s.env != digest {
+			o.h.log.Info("the environment of opencode serve changed; it starts again")
 		}
 		stop(s.cmd, syscall.SIGTERM)
 		<-s.done
@@ -272,10 +294,6 @@ func (o *opencode) server(ctx context.Context, m modelConf) (*ocServer, error) {
 		if port, err = freePort(); err != nil {
 			return nil, err
 		}
-	}
-	argv := append([]string(nil), o.h.cfg.Command...)
-	if len(argv) == 0 {
-		argv = []string{"opencode", "serve"}
 	}
 	argv = append(argv, "--port", strconv.Itoa(port), "--hostname", "127.0.0.1")
 	pass := secret()
@@ -293,14 +311,7 @@ func (o *opencode) server(ctx context.Context, m modelConf) (*ocServer, error) {
 			extra = append(extra, mc.keyEnv+"="+mc.key)
 		}
 	}
-	root, err := absRoot(o.h)
-	if err != nil {
-		return nil, err
-	}
-	cmd, err := o.h.command(ctx, argv, root, extra...)
-	if err != nil {
-		return nil, err
-	}
+	cmd := o.h.command(argv, root, env, extra...)
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	if err := cmd.Start(); err != nil {
@@ -308,7 +319,7 @@ func (o *opencode) server(ctx context.Context, m modelConf) (*ocServer, error) {
 	}
 	go o.h.logLines(stdout, "stdout")
 	go o.h.logLines(stderr, "stderr")
-	s := &ocServer{cmd: cmd, base: "http://127.0.0.1:" + strconv.Itoa(port), pass: pass, models: map[string]bool{}, done: make(chan struct{}),
+	s := &ocServer{cmd: cmd, base: "http://127.0.0.1:" + strconv.Itoa(port), pass: pass, models: map[string]bool{}, env: digest, done: make(chan struct{}),
 		client: &http.Client{Transport: &http.Transport{Proxy: nil, DisableCompression: true}}}
 	for _, mc := range models {
 		s.models[mc.provider+"/"+mc.name] = true
@@ -651,7 +662,7 @@ func (o *opencode) drive(ctx context.Context, r *run) error {
 		return r.fail(ctx, err.Error())
 	}
 	for tries := 0; ; tries++ {
-		srv, err := o.server(ctx, m)
+		srv, err := o.server(ctx, r, m)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
