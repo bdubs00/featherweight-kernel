@@ -310,6 +310,9 @@ type ToolRequestedData struct {
 	// the current tool spec; this field does not pin the tool implementation
 	// or guarantee exactly-once effects.
 	Idempotent bool `json:"idempotent,omitempty"`
+	// Source records ToolSpec.Source: "builtin", the name of the MCP
+	// server or of the A2A peer, or empty for a tool of a Go option.
+	Source string `json:"source,omitempty"`
 }
 
 // ToolRespondedData is the payload of fw.tool.responded.

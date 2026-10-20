@@ -1265,7 +1265,7 @@ func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall)
 			outs[i] = callOutcome{res: p.result}
 			continue
 		}
-		if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input, Idempotent: p.spec.Idempotent}); err != nil {
+		if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input, Idempotent: p.spec.Idempotent, Source: p.spec.Source}); err != nil {
 			wg.Wait()
 			return err
 		}

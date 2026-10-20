@@ -1155,6 +1155,8 @@ The directory [examples/observability](../examples/observability/README.md) hold
 
 The `trace` projection emits OpenTelemetry spans. A run is one span. Each turn is a child span, and each model call and tool call is a child of its turn. The service `Export` of the package `telemetry` starts the projection when a collector is named (section 10.5). The exporter is OTLP, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` variable. The `traceparent` value travels in every ledger event, in every bus message, in the `spawn_task` environment, and in outbound A2A and MCP requests.
 
+The spans carry the attributes of the OpenTelemetry GenAI agent conventions, so a trace store that knows them, such as Grafana, Langfuse, or Braintrust, reads the traces without a mapping. The run span keeps the name `fw.run` and carries `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and `gen_ai.agent.id`, both the profile, and `gen_ai.conversation.id`, the run id. A model span, `chat <model>`, carries the chat attributes and the conversation. A tool span, `execute_tool <tool>`, carries `gen_ai.tool.name`, `gen_ai.tool.call.id`, the agent, the conversation, and `gen_ai.tool.type`: `function` for a built-in tool or a tool of a Go option, and `extension` for a tool of an MCP server or an A2A peer. `fw.tool.requested` names the source of the tool for this. A tool of an MCP server also carries `mcp.method.name` `tools/call`, and a call of the `skill` tool carries `gen_ai.skill.name`.
+
 ### 10.3 Logs
 
 Logs are JSON lines on standard error from `log/slog`, so that `fw-workbench mcp` keeps standard output for the protocol. Each line carries the `run`, `turn`, and `traceparent` that apply. `FW_LOG=debug` adds request and response bodies with secrets redacted.

@@ -2,9 +2,11 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,11 +25,16 @@ import (
 const instrumentationName = "github.com/bdubs00/featherweight-kernel/telemetry"
 
 // Span names. A model span is named "chat <model>" and a tool span
-// "execute_tool <tool>", after the OpenTelemetry GenAI conventions.
+// "execute_tool <tool>", after the OpenTelemetry GenAI conventions. The
+// run span keeps its name and carries the attributes of an invoke_agent
+// span of the GenAI agent conventions.
 const (
 	SpanRun  = "fw.run"
 	SpanTurn = "fw.turn"
 )
+
+// builtinSource is the ToolSpec.Source of the built-in tools (builtin.Source).
+const builtinSource = "builtin"
 
 // Tracer is the trace projection. It implements fw.Observer. A run is one
 // span from fw.run.started to fw.run.finished. Each turn is a child of the
@@ -46,6 +53,8 @@ type Tracer struct {
 }
 
 type runTrace struct {
+	id, agent string // the run, the conversation of the GenAI conventions, and its profile
+
 	ctx     context.Context // holds the run span
 	span    trace.Span
 	turnCtx context.Context // holds the turn span
@@ -161,6 +170,9 @@ func (t *Tracer) Observe(e fw.Event) {
 		var d fw.RunStartedData
 		if e.Decode(&d) == nil {
 			rt.span.SetAttributes(attribute.String("fw.model", d.Model), attribute.Int("fw.tools", len(d.Tools)))
+			if _, model := fw.SplitSelector(d.Model); model != "" {
+				rt.span.SetAttributes(attribute.String("gen_ai.request.model", model))
+			}
 		}
 	case fw.EvTurnStarted:
 		rt.endTurn(ts)
@@ -184,6 +196,7 @@ func (t *Tracer) Observe(e fw.Event) {
 				attribute.String("gen_ai.operation.name", "chat"),
 				attribute.String("gen_ai.provider.name", d.Provider),
 				attribute.String("gen_ai.request.model", d.Model),
+				attribute.String("gen_ai.conversation.id", rt.id),
 				attribute.String("fw.effort", d.Effort),
 				attribute.Int("fw.estimated_input_tokens", d.EstimatedInputTokens),
 			))
@@ -214,11 +227,7 @@ func (t *Tracer) Observe(e fw.Event) {
 		}
 		_, rt.tools[d.CallID] = t.tracer.Start(rt.parent(), "execute_tool "+d.Tool,
 			trace.WithTimestamp(ts),
-			trace.WithAttributes(
-				attribute.String("gen_ai.operation.name", "execute_tool"),
-				attribute.String("gen_ai.tool.name", d.Tool),
-				attribute.String("gen_ai.tool.call.id", d.CallID),
-			))
+			trace.WithAttributes(rt.toolAttributes(d)...))
 	case fw.EvToolResponded:
 		var d fw.ToolRespondedData
 		_ = e.Decode(&d)
@@ -273,15 +282,22 @@ func (t *Tracer) open(e fw.Event, ts time.Time) *runTrace {
 	if e.TraceParent != "" {
 		parent = propagation.TraceContext{}.Extract(parent, propagation.MapCarrier{"traceparent": e.TraceParent})
 	}
+	agent := agentOf(e.Source)
 	attrs := []attribute.KeyValue{
 		attribute.String("fw.run.id", e.Subject),
-		attribute.String("fw.agent", agentOf(e.Source)),
+		attribute.String("fw.agent", agent),
+		// A run is one invocation of the agent of its profile, and the run
+		// is the conversation, as the GenAI agent conventions name them.
+		attribute.String("gen_ai.operation.name", "invoke_agent"),
+		attribute.String("gen_ai.agent.name", agent),
+		attribute.String("gen_ai.agent.id", agent),
+		attribute.String("gen_ai.conversation.id", e.Subject),
 	}
 	if e.Type != fw.EvRunStarted {
 		attrs = append(attrs, attribute.String("fw.run.reopened_by", e.Type))
 	}
 	ctx, span := t.tracer.Start(parent, SpanRun, trace.WithTimestamp(ts), trace.WithAttributes(attrs...))
-	rt := &runTrace{ctx: ctx, span: span, tools: map[string]trace.Span{}}
+	rt := &runTrace{id: e.Subject, agent: agent, ctx: ctx, span: span, tools: map[string]trace.Span{}}
 	t.runs[e.Subject] = rt
 	return rt
 }
@@ -301,6 +317,38 @@ func (t *Tracer) endAll(ts time.Time) {
 		rt.span.SetAttributes(attribute.Bool("fw.run.open", true))
 		t.end(id, rt, ts)
 	}
+}
+
+// toolAttributes returns the attributes of an execute_tool span of the
+// GenAI conventions. A built-in tool, or a tool of a Go option, is a
+// function, and a tool of an MCP server or an A2A peer is an extension. A
+// tool of an MCP server, named <server>.<tool>, also carries the method of
+// the MCP call, and a call of the built-in skill tool the skill it loads.
+func (rt *runTrace) toolAttributes(d fw.ToolRequestedData) []attribute.KeyValue {
+	kind := "function"
+	if d.Source != "" && d.Source != builtinSource {
+		kind = "extension"
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("gen_ai.operation.name", "execute_tool"),
+		attribute.String("gen_ai.tool.name", d.Tool),
+		attribute.String("gen_ai.tool.call.id", d.CallID),
+		attribute.String("gen_ai.tool.type", kind),
+		attribute.String("gen_ai.agent.name", rt.agent),
+		attribute.String("gen_ai.conversation.id", rt.id),
+	}
+	if kind == "extension" && strings.HasPrefix(d.Tool, d.Source+".") {
+		attrs = append(attrs, attribute.String("mcp.method.name", "tools/call"))
+	}
+	if d.Tool == "skill" && d.Source == builtinSource {
+		var in struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(d.Input, &in) == nil && in.Name != "" {
+			attrs = append(attrs, attribute.String("gen_ai.skill.name", in.Name))
+		}
+	}
+	return attrs
 }
 
 // parent is the context of a new model or tool span: the turn when one is
