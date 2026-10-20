@@ -1414,7 +1414,7 @@ A hook is an observer (section 4.4), a policy (section 7.5), a run annotator, or
 
 ### 12.5 Profiles, instructions, and skills
 
-A profile is a named agent configuration. It holds a description, a system prompt, and a list of instruction texts. It also holds a skill allowlist, a tool allowlist with globs, a model selector, an effort level, a time zone, a policy, and a budget. Profiles live under `agents:` in `fw.yaml` or as one file each under `$FW_HOME/agents/`. The system prompt and each instruction entry is either the text or the path of a file that holds it. A request names a profile with `agent`. One binary serves many profiles, and the A2A card lists each one as a skill.
+A profile is a named agent configuration. It holds a description, a system prompt, and a list of instruction texts. It also holds a skill allowlist, a tool allowlist with globs, a model selector, an effort level, a time zone, a policy, and a budget. Profiles live under `agents:` in `fw.yaml` or as one file each under `$FW_HOME/agents/`. The system prompt and each instruction entry is either the text or the path of a file that holds it. The file must end in `.md` or `.txt` and must not be under `/proc`, `/sys`, or `/dev`, so a profile that arrives through the API or a rendered workspace cannot read a file of the process into its prompt. A request names a profile with `agent`. One binary serves many profiles, and the A2A card lists each one as a skill.
 
 Instructions reach the model in three layers, and every layer is a plain text:
 

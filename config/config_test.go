@@ -788,3 +788,26 @@ func TestLoadExtensionBlock(t *testing.T) {
 		t.Fatalf("unclaimed block: %v", err)
 	}
 }
+
+// TestPromptFileSuffix checks that a one-line prompt reads a file only when
+// the file ends in .md or .txt and is outside /proc, so a profile cannot
+// pull the environment of the process into its prompt.
+func TestPromptFileSuffix(t *testing.T) {
+	dir := t.TempDir()
+	secret := writeFile(t, filepath.Join(dir, "secret"), "the secret")
+	yaml := "model: openai/test\nagents:\n  a: {system: /proc/self/environ}\n  b: {system: " + secret + "}\n  c: {system: prompts/c.md}\n"
+	writeFile(t, filepath.Join(dir, "prompts", "c.md"), "from a markdown file")
+	cfg, err := Load(writeFile(t, filepath.Join(dir, "fw.yaml"), yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Agents["a"].System; got != "/proc/self/environ" {
+		t.Errorf("a: /proc/self/environ was read: %q", got)
+	}
+	if got := cfg.Agents["b"].System; got != secret {
+		t.Errorf("b: a file without .md or .txt was read: %q", got)
+	}
+	if got := cfg.Agents["c"].System; got != "from a markdown file" {
+		t.Errorf("c: the markdown file was not read: %q", got)
+	}
+}

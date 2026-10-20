@@ -265,7 +265,7 @@ prices: {}                      # "anthropic/claude-opus-5-5": { input: 4.00, ou
 agents:                         # profiles; also one file each under <home>/agents/; FW_AGENTS_<NAME>_MODEL and the other fields
   default:
     description: ""             # one line that a listing and a parent run see
-    system: prompts/default.md  # the text, or the path of a file that holds it
+    system: prompts/default.md  # the text, or the path of a .md or .txt file that holds it
     instructions: []            # more texts, or files, that follow the system prompt in order
     skills: null                # globs over skill names; null is every skill, [] is none
     tools: ["*"]                # globs over tool names; empty is every tool

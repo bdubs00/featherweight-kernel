@@ -219,7 +219,7 @@ func loadProfiles(cfg *fw.Config, configDir string, lookup lookupFunc) error {
 // relative to each non-empty directory in order and then as given. A value
 // that names no file is the prompt text itself.
 func resolvePrompt(s string, dirs ...string) (string, error) {
-	if s == "" || len(s) > maxSystemPath || strings.ContainsAny(s, "\n\r") {
+	if s == "" || len(s) > maxSystemPath || strings.ContainsAny(s, "\n\r") || !promptFile(s) {
 		return s, nil
 	}
 	var candidates []string
@@ -244,6 +244,26 @@ func resolvePrompt(s string, dirs ...string) (string, error) {
 		return string(b), nil
 	}
 	return s, nil
+}
+
+// promptFile reports whether s can name a prompt file: a path that ends
+// in .md or .txt, outside /proc, /sys, and /dev. Any other value is the
+// prompt text itself, so a profile that reaches the process through the
+// API or a rendered workspace cannot read a file of the process, such as
+// /proc/self/environ, into its prompt.
+func promptFile(s string) bool {
+	switch strings.ToLower(filepath.Ext(s)) {
+	case ".md", ".txt":
+	default:
+		return false
+	}
+	clean := filepath.Clean(s)
+	for _, p := range []string{"/proc/", "/sys/", "/dev/"} {
+		if strings.HasPrefix(clean, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // The allowed values of the enumerated keys.
