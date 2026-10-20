@@ -10,8 +10,22 @@ import (
 func init() {
 	fw.RegisterExtension(Block)
 	fw.RegisterService(Start)
+	fw.RegisterTool(Name, newTool)
 	fw.RegisterToolEnv(toolEnv)
+	fw.RegisterPromptSection(section)
+	fw.RegisterDefaults(func(c *fw.Config) {
+		c.Tools.Builtin = append(c.Tools.Builtin, Name)
+		// A change of the packages asks a person first. A profile that
+		// must keep its packages denies the tool: deny: ["env: *"].
+		c.Policy.Rules.Ask = append(c.Policy.Rules.Ask, AskRules...)
+	})
 }
+
+// AskRules are the rules that the default policy adds: a person allows
+// each add and each remove of a package. The tool env is one tool, and
+// its field command names the action, so these rules use the field form
+// of the policy (section 7.5 of the architecture).
+var AskRules = []string{"env: command=add", "env: command=remove"}
 
 // Start is the fw.Service of the environment. Without the block, or with
 // placement image, it starts nothing. Otherwise it installs the
