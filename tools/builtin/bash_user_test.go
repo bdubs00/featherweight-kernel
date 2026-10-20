@@ -17,8 +17,8 @@ import (
 // with its own HOME, and it cannot read the home directory of fw or the
 // environment of the fw process (section 7.12). The test needs root.
 func TestBashRunsAsToolUser(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root to start the shell as another user")
+	if os.Geteuid() != 0 || len(fw.MissingToolCaps()) > 0 {
+		t.Skip("needs root with the capabilities of tools.user to start the shell as another user")
 	}
 	ws := t.TempDir()
 	for d := ws; d != filepath.Dir(d); d = filepath.Dir(d) {
@@ -67,8 +67,8 @@ func TestBashRunsAsToolUser(t *testing.T) {
 // works in the directory of the run as the tool user, and the files tool
 // reads what the shell wrote.
 func TestToolUserWorksInTheDirectoryOfTheRun(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root to start the shell as another user")
+	if os.Geteuid() != 0 || len(fw.MissingToolCaps()) > 0 {
+		t.Skip("needs root with the capabilities of tools.user to start the shell as another user")
 	}
 	s := newScripted()
 	var results []string

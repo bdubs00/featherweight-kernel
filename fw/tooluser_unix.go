@@ -44,12 +44,15 @@ func (u *ToolUser) Apply(cmd *exec.Cmd) {
 }
 
 // canBecome reports why this process cannot start a process as u: only
-// root can, and a tool user that is the user of fw keeps nothing from the
-// tools.
+// root can, with the capabilities of MissingToolCaps, and a tool user that
+// is the user of fw keeps nothing from the tools.
 func canBecome(u *ToolUser) error {
 	euid := os.Geteuid()
 	switch {
 	case euid == 0:
+		if missing := MissingToolCaps(); len(missing) > 0 {
+			return fmt.Errorf("fw: fw runs as root without the capabilities %s, so it cannot start a process as tools.user %s; a sandbox can take them from root, as gVisor under Agent Substrate does. Give fw these capabilities, or set tools.user: none", strings.Join(missing, ", "), u)
+		}
 		return nil
 	case uint32(euid) == u.UID:
 		return fmt.Errorf("fw: tools.user %s is the user of fw itself, so the tools can read the home directory and the memory of fw; run fw as root, or set tools.user: none", u)

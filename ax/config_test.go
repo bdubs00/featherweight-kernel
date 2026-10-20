@@ -171,7 +171,7 @@ func TestApplyToConfigToolUser(t *testing.T) {
 	cfg := fw.DefaultConfig()
 	ApplyToConfig(cfg, &Task{}, bindings)
 	want := ""
-	if os.Geteuid() == 0 {
+	if os.Geteuid() == 0 && len(fw.MissingToolCaps()) == 0 {
 		want = DefaultToolUser
 	}
 	if cfg.Tools.User != want {

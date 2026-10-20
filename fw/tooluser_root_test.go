@@ -19,8 +19,8 @@ import (
 // /workspace is in an ax Task. It skips the test without root.
 func rootWorkspace(t *testing.T) (ws, home string) {
 	t.Helper()
-	if os.Geteuid() != 0 {
-		t.Skip("needs root to start a process as another user")
+	if os.Geteuid() != 0 || len(MissingToolCaps()) > 0 {
+		t.Skip("needs root with the capabilities of tools.user to start a process as another user")
 	}
 	ws = evalExisting(t.TempDir())
 	for d := ws; d != filepath.Dir(d); d = filepath.Dir(d) {
@@ -31,6 +31,19 @@ func rootWorkspace(t *testing.T) (ws, home string) {
 		}
 	}
 	return ws, filepath.Join(ws, ".fw")
+}
+
+// Root without a capability of tools.user, as in gVisor under Agent
+// Substrate, refuses a tool user with an error that names the capability.
+func TestToolUserNeedsCapabilities(t *testing.T) {
+	missing := MissingToolCaps()
+	if os.Geteuid() != 0 || len(missing) == 0 {
+		t.Skip("needs root without a capability of tools.user")
+	}
+	err := canBecome(&ToolUser{UID: freeID, GID: freeID})
+	if err == nil || !strings.Contains(err.Error(), missing[0]) || !strings.Contains(err.Error(), "set tools.user: none") {
+		t.Fatalf("canBecome = %v", err)
+	}
 }
 
 func ownerOf(t *testing.T, p string) (uid, gid uint32, mode fs.FileMode) {

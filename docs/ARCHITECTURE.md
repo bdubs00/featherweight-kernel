@@ -763,10 +763,20 @@ A tool process is a process that a tool starts and that a model drives: the shel
 | Environment | Default |
 |---|---|
 | An ax Task, with `fw` as root | `65532`, the user `nonroot` of both images |
+| An ax Task where root lacks a capability of the list below, such as gVisor under Agent Substrate | the user of `fw`, with a warning in the log |
 | An ax boot without root, such as `fw serve --task-file` on a developer machine | the user of `fw`, with a warning in the log |
 | Every other process | the user of `fw`, as before |
 
-`none` runs the tool processes as the user of `fw` in every environment. A user that does not exist stops the start with an error that names `tools.user` and what to set. The start also stops when `fw` does not run as root, because only root starts a process as another user, and when the tool user is the user of `fw`, because that user keeps nothing from the tools. `fw` never falls back to its own user without a word. `fw doctor` names the tool user on the line `tools user`.
+`none` runs the tool processes as the user of `fw` in every environment. A user that does not exist stops the start with an error that names `tools.user` and what to set. The start also stops when `fw` does not run as root, because only root starts a process as another user, and when the tool user is the user of `fw`, because that user keeps nothing from the tools.
+
+Root also needs these capabilities in its effective set, which `fw.MissingToolCaps` reads from `/proc/self/status`:
+
+- `CAP_CHOWN` gives files to the tool user.
+- `CAP_DAC_OVERRIDE` reads and writes the files of the tool user.
+- `CAP_KILL` stops a tool process at its time limit.
+- `CAP_SETGID` and `CAP_SETUID` start a process as the tool user.
+
+A sandbox can take these capabilities from root. The gVisor sandbox of Agent Substrate leaves root `CAP_KILL`, `CAP_NET_BIND_SERVICE`, and `CAP_AUDIT_WRITE` only, so a chown fails there, even in `/tmp`. If a capability is missing, an explicit `tools.user` stops the start with an error that names the capabilities. The ax default then gives the user of `fw`, with a warning that names them. On such a sandbox a shell can read FW_HOME, so a Task that reads untrusted input gets no shell. `fw` never falls back to its own user without a word. `fw doctor` names the tool user on the line `tools user`.
 
 A tool process of a tool user runs with the uid and the gid of that user and with no other group. It gets the `HOME`, `USER`, and `LOGNAME` of the user. The home comes from `/etc/passwd`, and it is `/` for a `uid:gid` without an entry. The process cannot read the memory of `fw`, its environment in `/proc/<pid>/environ`, or its open files, because the kernel of the sandbox checks the user for each of them. The `fw` binary also makes its process non-dumpable at start (`prctl PR_SET_DUMPABLE 0`), for every verb. Then a process of the same user without `CAP_SYS_PTRACE` cannot read these entries either, and `fw` writes no core file. A debugger therefore attaches only to an `fw` that it starts.
 

@@ -58,11 +58,13 @@ func BootstrapTimeout() time.Duration {
 //   - Tools.Files.Root is the first binding path when it is empty.
 //   - MaxRuns is 1 when it is 0, the default: a Task is one agent with
 //     one working copy, so one run at a time holds the workspace.
-//   - Tools.User is DefaultToolUser when it is empty and fw runs as root,
-//     as it does in an ax Task, so the processes of tools cannot read the
-//     state and the secrets of fw. A process that is not root, such as fw
-//     serve --task-file on a developer machine, keeps its tools with its
-//     own user and logs a warning.
+//   - Tools.User is DefaultToolUser when it is empty and fw runs as root
+//     with the capabilities of fw.MissingToolCaps, as it does in an ax
+//     Task on runc, so the processes of tools cannot read the state and
+//     the secrets of fw. A process that is not root, such as fw serve
+//     --task-file on a developer machine, and root without these
+//     capabilities, such as fw in gVisor under Agent Substrate, keep their
+//     tools with their own user and log a warning.
 //   - Workspaces holds /workspace and the path of each binding, which the
 //     tool user owns.
 //   - Tools.Files.PerRun is true when it is unset: each run gets a
@@ -91,10 +93,12 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 		cfg.MaxRuns = 1
 	}
 	if cfg.Tools.User == "" {
-		if os.Geteuid() == 0 {
-			cfg.Tools.User = DefaultToolUser
-		} else {
+		if os.Geteuid() != 0 {
 			log.Warn("ax: fw does not run as root, so the processes of tools run as the user of fw and can read its state; run fw as root for tools.user", "uid", os.Geteuid())
+		} else if missing := fw.MissingToolCaps(); len(missing) > 0 {
+			log.Warn("ax: fw runs as root without the capabilities of tools.user, so the processes of tools run as the user of fw and can read its state; give the sandbox these capabilities for tools.user", "missing", missing)
+		} else {
+			cfg.Tools.User = DefaultToolUser
 		}
 	}
 	if cfg.Tools.Files.PerRun == nil {
