@@ -722,7 +722,7 @@ The kernel checks `grant` and keeps the other keys for the package that keeps th
 |---|---|---|---|
 | `tokens.url` | `FW_TOKENS_URL` | The address of a token broker, the front of the workbench. Empty keeps the tokens of people off, unless a linked package sets them. | empty |
 | `tokens.credential` | `FW_TOKENS_CREDENTIAL` | The `Secrets` name of the bearer token that this process presents to the broker | `auth.tokenEnv` |
-| `tokens.subject` | `FW_TOKENS_SUBJECT` | The bus subject on which the broker announces a finished connection | `fw.connections` |
+| `tokens.subject` | `FW_TOKENS_SUBJECT` | The bus subject on which the broker announces a finished connection and a disconnect | `fw.connections` |
 
 #### How a call pauses
 
@@ -746,7 +746,9 @@ A grant has one holder, and a Task is the wrong holder: ax saves the volume of a
 
 The client sends `POST /v1/tokens` to the broker with the subject of the person, the server, and the id of the run in the context of the call. It presents the credential of `tokens.credential`, by default the static token of `auth.tokenEnv`, so the broker sees a member of the fleet and never a person. The broker finds the run in its fleet records, checks that the person started it, and answers with the token and its expiry. The client keeps the token until shortly before the expiry, and for five minutes at most. A refusal carries a reason: `not-connected` and `expired` become `ErrNotConnected` and `ErrConnectionExpired`, so the call asks the person to connect, and every other reason is an error for the model. `POST /v1/tokens/reject` drops a token that the service refused, and `POST /v1/tokens/forget` drops the grant when the service kept refusing.
 
-When a connection of a person ends at the broker, the broker publishes `fw.connection.connected` on the bus subject of `tokens.subject`, with the subject and the services that are now connected. The client of each member turns it into `Agent.Connected`, and the paused calls of that person go on. The refresh token never enters a Task. An access token does, and it lives an hour.
+When a connection of a person ends at the broker, the broker publishes `fw.connection.connected` on the bus subject of `tokens.subject`, with the subject and the services that are now connected. The client of each member turns it into `Agent.Connected`, and the paused calls of that person go on.
+
+A person can disconnect a service, and a service can keep refusing a grant. In both cases the grant ends, and the broker publishes `fw.connection.disconnected` on the same subject, with the subject and the services. The client of each member then drops every cached token of that person, because the services that share a grant lose it together. The next call of a run asks the broker again, and the run asks the person to connect. Without the notice, a Task kept acting for the person until the cached token expired. The refresh token never enters a Task. An access token does, and it lives an hour.
 
 #### Restarts
 

@@ -5,7 +5,8 @@
 // in tokens.url, and it defines the protocol of the broker, which the
 // workbench serves. A refresh token never enters this process. An access
 // token does, and the process keeps it until shortly before the broker says
-// it expires, or for five minutes at most.
+// it expires, or for five minutes at most, and drops it when the broker
+// announces that the person connected or disconnected a service.
 package tokens
 
 import (
@@ -36,6 +37,13 @@ const (
 // finished connection. Its data is a Connected. The subject is
 // fw.Config.Tokens.Subject.
 const EvConnected = "fw.connection.connected"
+
+// EvDisconnected is the type of the bus event with which a broker announces
+// that a person disconnected services, or that a grant ended because a
+// service kept refusing it. Its data is a Disconnected, on the same subject
+// as EvConnected. Each member then drops the cached tokens of the person,
+// so a run stops acting for the person at once instead of at the expiry.
+const EvDisconnected = "fw.connection.disconnected"
 
 // Reasons of a Refusal.
 const (
@@ -90,6 +98,14 @@ type Connected struct {
 	Servers []string `json:"servers"`
 }
 
+// Disconnected is the data of EvDisconnected: the person disconnected
+// Servers. A member drops every token of the person, because the services
+// that share a grant lose it together.
+type Disconnected struct {
+	Subject string   `json:"subject"`
+	Servers []string `json:"servers"`
+}
+
 func init() {
 	fw.RegisterService(Start)
 }
@@ -106,7 +122,8 @@ const (
 
 // Start is the fw.Service of the tokens. Without tokens.url, it starts
 // nothing. Otherwise it makes the Client the PersonTokens of the agent and
-// turns each notice of the broker on the bus into Agent.Connected.
+// turns each notice of the broker on the bus into Agent.Connected, or into
+// a drop of the cached tokens of a person who disconnected.
 func Start(ctx context.Context, a *fw.Agent) (io.Closer, error) {
 	cfg := a.Config()
 	if strings.TrimSpace(cfg.Tokens.URL) == "" {
@@ -124,15 +141,21 @@ func Start(ctx context.Context, a *fw.Agent) (io.Closer, error) {
 			subject = fw.DefaultTokensSubject
 		}
 		stop, err := b.Subscribe(context.WithoutCancel(ctx), subject, func(e fw.Event) error {
-			if e.Type != EvConnected {
-				return nil
+			switch e.Type {
+			case EvConnected:
+				var n Connected
+				if err := e.Decode(&n); err != nil || n.Subject == "" || len(n.Servers) == 0 {
+					return nil
+				}
+				c.forgetSubject(n.Subject)
+				a.Connected(n.Subject, n.Servers...)
+			case EvDisconnected:
+				var n Disconnected
+				if err := e.Decode(&n); err != nil || n.Subject == "" {
+					return nil
+				}
+				c.forgetSubject(n.Subject)
 			}
-			var n Connected
-			if err := e.Decode(&n); err != nil || n.Subject == "" || len(n.Servers) == 0 {
-				return nil
-			}
-			c.forgetSubject(n.Subject)
-			a.Connected(n.Subject, n.Servers...)
 			return nil
 		})
 		if err != nil {
@@ -299,7 +322,7 @@ func (c *Client) Forget(ctx context.Context, subject, server string) {
 }
 
 // forgetSubject drops the cached tokens of a person, so a new connection
-// gives new tokens at once.
+// gives new tokens at once, and a disconnected service gives none.
 func (c *Client) forgetSubject(subject string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

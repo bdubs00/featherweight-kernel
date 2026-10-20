@@ -115,6 +115,12 @@ func (b *fakeBroker) connect(subject string) {
 	b.connected[subject] = true
 }
 
+func (b *fakeBroker) disconnect(subject string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.connected, subject)
+}
+
 func (b *fakeBroker) count() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -199,6 +205,40 @@ func newAgent(t *testing.T, base string, src *ticketsSource) *fw.Agent {
 }
 
 var ada = &fw.Principal{Subject: "ada", Kind: fw.KindUser}
+
+// A disconnect at the broker reaches the member on the bus, and the member
+// stops using the token that it cached for the person.
+func TestDisconnectDropsTheCachedToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	b := newFakeBroker(t)
+	a := newAgent(t, b.URL, &ticketsSource{})
+	b.connect("ada")
+	tok, err := a.PersonTokens().Token(ctx, "ada", "tickets")
+	if err != nil || tok == "" {
+		t.Fatalf("Token = %q, %v", tok, err)
+	}
+	n := b.count()
+	if _, err := a.PersonTokens().Token(ctx, "ada", "tickets"); err != nil || b.count() != n {
+		t.Fatalf("the second token did not come from the cache: %v, requests %d -> %d", err, n, b.count())
+	}
+	b.disconnect("ada")
+	if err := a.Bus().Publish(ctx, fw.DefaultTokensSubject, fw.MustEvent("", EvDisconnected, Disconnected{Subject: "ada", Servers: []string{"tickets"}})); err != nil {
+		t.Fatal(err)
+	}
+	// The notice travels on the bus, so the drop takes a moment.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err = a.PersonTokens().Token(ctx, "ada", "tickets")
+		if errors.Is(err, fw.ErrNotConnected) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !errors.Is(err, fw.ErrNotConnected) {
+		t.Fatalf("Token after the disconnect = %v, want ErrNotConnected", err)
+	}
+}
 
 func TestRunPausesUntilTheBrokerSaysConnected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
