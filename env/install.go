@@ -93,7 +93,7 @@ func (in *installer) ready(ctx context.Context) error {
 		case StateReady:
 			return nil
 		case StateFailed:
-			if time.Now().Before(st.Failure.RetryAt) {
+			if !in.due(st.Failure) {
 				return failureError(st.Failure)
 			}
 		}
@@ -149,11 +149,22 @@ func (in *installer) attempt(ctx context.Context) (bool, *Failure, error) {
 		return true, nil, nil
 	}
 	prev := in.s.readFailure()
-	if prev != nil && prev.Digest == digest && time.Now().Before(prev.RetryAt) {
+	if prev != nil && prev.Digest == digest && !in.due(prev) {
 		return true, nil, nil
 	}
 	f := in.install(ctx, digest, prev)
 	return true, f, ctx.Err()
+}
+
+// due reports whether the next try after a failure is due: its time has
+// come, or the failure is older than this agent. A new process, such as
+// the cold boot after a resume, tries at once, because the egress policy
+// can have landed meanwhile.
+func (in *installer) due(f *Failure) bool {
+	if !time.Now().Before(f.RetryAt) {
+		return true
+	}
+	return in.a != nil && f.Time.Before(in.a.Started())
 }
 
 // lock waits for the lock, bounded by ctx.
@@ -454,8 +465,8 @@ func (in *installer) serve(ctx context.Context) {
 			}
 			return
 		case StateFailed:
-			if wait := time.Until(st.Failure.RetryAt); wait > 0 {
-				if !sleep(ctx, wait) {
+			if !in.due(st.Failure) {
+				if !sleep(ctx, time.Until(st.Failure.RetryAt)) {
 					return
 				}
 				continue

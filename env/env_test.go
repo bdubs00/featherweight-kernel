@@ -410,3 +410,28 @@ func TestMarkerOwner(t *testing.T) {
 		t.Fatal("ownedBySelf trusts a directory of root")
 	}
 }
+
+// A failure that an earlier process recorded is due at once in a new
+// process, such as the cold boot after a resume.
+func TestFailureOfEarlierProcess(t *testing.T) {
+	f := newFixture(t, fullBlock)
+	a := f.agent()
+	if err := os.MkdirAll(f.s.dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := &Failure{Digest: f.s.digest(), Time: a.Started().Add(-time.Minute), Step: "python", Error: "no network", Attempt: 7, RetryAt: time.Now().Add(5 * time.Minute)}
+	if err := writeFile(f.s.failurePath(), old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err != nil {
+		t.Fatalf("a failure of an earlier process held the new one: %v", err)
+	}
+	if f.s.state().Kind != StateReady {
+		t.Fatal("not ready")
+	}
+	// Without an agent the time of the next try counts.
+	in := &installer{s: f.s}
+	if in.due(&Failure{Time: time.Now().Add(-time.Hour), RetryAt: time.Now().Add(time.Minute)}) {
+		t.Fatal("a failure is due before its time without an agent")
+	}
+}
