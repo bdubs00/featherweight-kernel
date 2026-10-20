@@ -93,6 +93,9 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.run.suspended` | reason, totals (the usage of the run so far, section 8.2) |
 | `fw.run.resumed` | from seq |
 | `fw.run.finished` | outcome (`completed`, `failed`, `canceled`), output, error, totals (the usage of the run so far, section 8.2) |
+| `fw.outcome.evaluated` | verdict (`satisfied`, `needs_revision`, `max_iterations`, `unparsed`, `skipped`), notes, iteration, iterations, the grader run, whether the loop continues, reason (section 20) |
+| `fw.harness.event` | kind and a compact payload of one event of a hosted harness, with the markers of its session (section 19) |
+| `fw.env.ready`, `fw.env.failed`, `fw.env.changed` | the state of the environment of the durable volume: the digest, the versions, the time, or the failed step and its output. These belong to the agent, not to a run, so they go to the bus subject `fw.environment` and to the log, not to a ledger (section 18) |
 
 The raw provider blocks in `fw.model.responded` are stored unchanged. They include thinking blocks. The kernel sends them back to the same provider on the next turn, because the provider requires the blocks it produced.
 
