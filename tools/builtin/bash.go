@@ -263,7 +263,11 @@ func (t *bashTool) start(ctx context.Context, s *bashSession) error {
 	if dir == "" {
 		dir = t.dir
 	}
-	sh, err := startShell(dir, t.shellEnv(ctx, dir), t.user)
+	env, err := t.shellEnv(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("bash: the shell cannot start: %v", err)
+	}
+	sh, err := startShell(dir, env, t.user)
 	if err != nil {
 		return fmt.Errorf("bash: the shell cannot start: %v", err)
 	}

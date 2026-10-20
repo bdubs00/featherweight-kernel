@@ -31,12 +31,13 @@ func configEnv(cfg *fw.Config) []string {
 // shellEnv returns the environment of a new shell in dir: the process
 // environment and the variables of tools.bash.env through the rules of
 // fw.ToolEnv, so a model that runs "env" finds no secret of fw, then
-// FW_HOME and FW_RUN_DIR, the directory of the run.
-func (t *bashTool) shellEnv(ctx context.Context, dir string) []string {
+// FW_HOME and FW_RUN_DIR, the directory of the run, then the changes of
+// the linked packages (fw.ExtendToolEnv), whose error stops the shell.
+func (t *bashTool) shellEnv(ctx context.Context, dir string) ([]string, error) {
 	env := fw.ToolEnv(ctx, t.cfg, os.Environ(), t.env)
 	env = append(env, "FW_HOME="+t.home)
 	if dir == "" {
 		dir, _ = os.Getwd()
 	}
-	return append(env, "FW_RUN_DIR="+dir)
+	return fw.ExtendToolEnv(ctx, t.cfg, append(env, "FW_RUN_DIR="+dir))
 }
