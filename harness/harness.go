@@ -94,6 +94,10 @@ type host struct {
 	// the longest time without an event of the harness, after which the
 	// driver counts the harness as lost.
 	tick, quiet time.Duration
+	// private holds the paths that no tool call of a harness reaches: the
+	// home of the harness, the home of fw, and the reserved paths, also
+	// with their links resolved.
+	private []string
 
 	mu     sync.Mutex
 	hooks  map[string]*claudeProc // the running Claude Code processes, by the secret of their hook URL
@@ -139,6 +143,14 @@ func newHost(a *fw.Agent, c Config) (*host, error) {
 		return nil, errors.New("harness: the block harness needs kind: opencode or claude-code")
 	default:
 		return nil, fmt.Errorf("harness: unknown kind %q; use opencode or claude-code", c.Kind)
+	}
+	for _, p := range append([]string{home, a.Config().Home}, a.Config().Reserved()...) {
+		if abs, err := filepath.Abs(p); err == nil && p != "" {
+			h.private = append(h.private, abs)
+			if real := realPath(abs); real != abs {
+				h.private = append(h.private, real)
+			}
+		}
 	}
 	a.Observe(fw.ObserverFunc(h.observe))
 	return h, nil
@@ -238,6 +250,9 @@ func (h *host) Drive(ctx context.Context, hr *fw.Hosted) (bool, error) {
 	}
 	if err := h.prepare(); err != nil {
 		return true, r.fail(ctx, err.Error())
+	}
+	if abs, _, err := hr.Dir(); err == nil {
+		r.dir = abs
 	}
 	return true, h.drv.drive(ctx, r)
 }

@@ -480,3 +480,22 @@ func TestOpencodeDeadlineWithoutEvents(t *testing.T) {
 		t.Fatalf("%d budget events", n)
 	}
 }
+
+// TestOpencodeReadOfTheHome reads a file of the home of the harness with
+// the read tool, which the default policy allows: the kernel rejects it.
+func TestOpencodeReadOfTheHome(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, readAt("../.harness/.local/share/opencode/storage/session/info.json"))
+	cfg := testConfig(t, d, ocBlock(d, f))
+	a := newAgent(t, cfg, fw.NewMemLedger())
+	r, err := a.Start(testCtx(t), "Read the sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, r.ID, terminal)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.replies) != 1 || f.replies[0].Reply != "reject" || !strings.Contains(f.replies[0].Message, "inside the home of the harness") {
+		t.Fatalf("replies = %+v", f.replies)
+	}
+}

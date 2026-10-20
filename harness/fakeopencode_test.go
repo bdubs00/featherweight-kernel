@@ -299,3 +299,32 @@ func answerOnly(f *fakeOC, p fakePrompt) {
 func silent(f *fakeOC, p fakePrompt) {
 	f.status(p.Session, "busy")
 }
+
+// readAt returns the script of a session that reads the file p with the
+// read tool, which asks for the permission read.
+func readAt(p string) func(f *fakeOC, fp fakePrompt) {
+	return func(f *fakeOC, fp fakePrompt) {
+		sid := fp.Session
+		f.status(sid, "busy")
+		call := f.nextCall()
+		m := "msg_" + call
+		f.assistant(sid, m)
+		f.part(sid, map[string]any{"id": "prt_s", "messageID": m, "type": "step-start"})
+		input := map[string]any{"filePath": p}
+		tool := map[string]any{"id": "prt_" + call, "messageID": m, "type": "tool", "callID": call, "tool": "read",
+			"state": map[string]any{"status": "running", "input": input}}
+		f.part(sid, tool)
+		rep := f.ask(sid, "read", m, call)
+		if rep.lost {
+			return
+		}
+		if rep.Reply == "once" {
+			tool["state"] = map[string]any{"status": "completed", "input": input, "output": "contents"}
+		} else {
+			tool["state"] = map[string]any{"status": "error", "input": input, "error": "rejected: " + rep.Message}
+		}
+		f.part(sid, tool)
+		f.part(sid, map[string]any{"id": "prt_f", "messageID": m, "type": "step-finish", "reason": "stop", "cost": 0, "tokens": tokens(10, 2)})
+		f.status(sid, "idle")
+	}
+}

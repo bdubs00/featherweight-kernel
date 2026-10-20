@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -240,5 +241,53 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("the condition did not hold within ten seconds")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestPrivatePath denies a tool call with a path inside the home of the
+// harness, the home of fw, or a reserved path, with or without a link,
+// and passes a path of the workspace and a file of cut tool output.
+func TestPrivatePath(t *testing.T) {
+	d := newDirs(t)
+	if err := os.Symlink(d.home, filepath.Join(d.ws, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for kind, cases := range map[string][]struct {
+		tool, input string
+		denied      bool
+	}{
+		KindClaudeCode: {
+			{"read", `{"file_path":"` + d.home + `/projects/p/s.jsonl"}`, true},
+			{"read", `{"file_path":"../.harness/settings.json"}`, true},
+			{"read", `{"file_path":"~/settings.json"}`, true},
+			{"read", `{"file_path":"link/projects/p/s.jsonl"}`, true},
+			{"read", `{"file_path":"` + d.fwHome + `/ledger.db"}`, true},
+			{"notebookread", `{"notebook_path":"` + d.home + `/n.ipynb"}`, true},
+			{"write", `{"file_path":"` + d.home + `/settings.json","content":"{}"}`, true},
+			{"grep", `{"pattern":"secret","path":"` + d.home + `"}`, true},
+			{"glob", `{"pattern":"` + d.home + `/**/*.jsonl"}`, true},
+			{"grep", `{"pattern":"` + d.home + `/.*"}`, false},
+			{"read", `{"file_path":"notes.txt"}`, false},
+			{"read", `{"file_path":"` + d.ws + `/src/main.go"}`, false},
+			{"read", `{"file_path":"` + d.home + `/projects/p/s/tool-results/toolu_1.txt"}`, false},
+			{"glob", `{"pattern":"*","path":"` + d.home + `/projects/p/s/tool-results"}`, true},
+			{"grep", `{"pattern":"x","path":"` + d.home + `/projects/p/s/tool-results"}`, true},
+		},
+		KindOpencode: {
+			{"read", `{"filePath":"` + d.home + `/.local/share/opencode/storage/session/x.json"}`, true},
+			{"list", `{"path":"` + d.home + `"}`, true},
+			{"read", `{"filePath":"` + d.home + `/.local/share/opencode/tool-output/tool_1"}`, false},
+			{"list", `{"path":"` + d.home + `/.local/share/opencode/tool-output"}`, true},
+			{"edit", `{"filePath":"src/main.go","oldString":"a","newString":"b"}`, false},
+		},
+	} {
+		cfg := testConfig(t, d, "kind: "+kind)
+		a := newAgent(t, cfg, fw.NewMemLedger())
+		r := &run{h: a.Runner().(*host), dir: d.ws}
+		for _, c := range cases {
+			if got := r.privatePath(c.tool, json.RawMessage(c.input)) != ""; got != c.denied {
+				t.Errorf("%s: %s %s: denied = %v, want %v", kind, c.tool, c.input, got, c.denied)
+			}
+		}
 	}
 }

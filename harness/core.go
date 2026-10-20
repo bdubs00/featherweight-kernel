@@ -246,9 +246,10 @@ func scan(evs []fw.Event) *state {
 
 // run is one call of Drive.
 type run struct {
-	h  *host
-	hr *fw.Hosted
-	st *state
+	h   *host
+	hr  *fw.Hosted
+	st  *state
+	dir string // the absolute directory of the run, where the harness works
 }
 
 // rescan reads the events again.
@@ -532,12 +533,138 @@ func readOnly(name string) bool {
 	return false
 }
 
-// decide asks the policy of the run about a tool call of the harness.
+// decide asks the policy of the run about a tool call of the harness. A
+// call with a path inside a private path of the host gets a deny first,
+// whatever the policy says, as the file tracker skips those paths: the
+// home of the harness holds the transcripts of every run.
 func (r *run) decide(ctx context.Context, callID, tool string, input json.RawMessage) fw.Decision {
 	if len(input) == 0 || !json.Valid(input) {
 		input = json.RawMessage(`{}`)
 	}
+	if p := r.privatePath(tool, input); p != "" {
+		return fw.Decision{Verdict: fw.VerdictDeny, Reason: "the path " + p + " is inside the home of the harness, the home of fw, or a path that fw keeps for itself"}
+	}
 	return r.hr.Decide(ctx, fw.ToolCall{CallID: callID, Spec: toolSpec(tool), Input: input})
+}
+
+// pathFields are the fields of the input of a tool of opencode or Claude
+// Code that name a file or a directory.
+var pathFields = []string{"file_path", "filePath", "path", "notebook_path", "notebookPath"}
+
+// privatePath returns the first path of a tool input that resolves inside
+// a private path of the host, or "". A relative path starts in the
+// directory of the run, ~ is the home of the harness, and the links of
+// the part of the path that exists are resolved. The pattern of glob
+// counts when it is absolute; the pattern of grep is a regular
+// expression and does not.
+func (r *run) privatePath(tool string, input json.RawMessage) string {
+	var in map[string]any
+	if json.Unmarshal(input, &in) != nil {
+		return ""
+	}
+	var paths []string
+	for _, k := range pathFields {
+		if s, ok := in[k].(string); ok && strings.TrimSpace(s) != "" {
+			paths = append(paths, s)
+		}
+	}
+	if s, ok := in["pattern"].(string); ok && tool == "glob" && (filepath.IsAbs(s) || strings.HasPrefix(s, "~")) {
+		if i := strings.IndexAny(s, "*?[{"); i >= 0 {
+			s = filepath.Dir(s[:i] + "x")
+		}
+		paths = append(paths, s)
+	}
+	for _, p := range paths {
+		abs := strings.TrimSpace(p)
+		if abs == "~" || strings.HasPrefix(abs, "~/") {
+			abs = filepath.Join(r.h.home, abs[1:])
+		}
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(r.dir, abs)
+		}
+		abs = realPath(filepath.Clean(abs))
+		if r.h.cutOutput(tool, abs) {
+			continue
+		}
+		for _, priv := range r.h.private {
+			if within(abs, priv) {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// cutOutput reports whether a call reads one file in which the harness
+// keeps the full output of a tool call that it cut, and tells the model to
+// read: projects/<project>/<session>/tool-results/<file> of Claude Code,
+// and .local/share/opencode/tool-output/<file> of opencode, under the home
+// of the harness. The name of such a file holds the id of the call, so a
+// session cannot guess the files of another session. A call that lists or
+// searches the directory itself gets no such pass.
+func (h *host) cutOutput(tool, p string) bool {
+	if tool == "glob" || tool == "list" || tool == "ls" {
+		return false
+	}
+	for _, home := range []string{h.home, realPath(h.home)} {
+		var rel string
+		var err error
+		var want []string
+		switch h.cfg.Kind {
+		case KindClaudeCode:
+			rel, err = filepath.Rel(filepath.Join(home, "projects"), p)
+			want = []string{"", "", "tool-results", ""}
+		case KindOpencode:
+			rel, err = filepath.Rel(filepath.Join(home, ".local", "share", "opencode", "tool-output"), p)
+			want = []string{""}
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if err != nil || len(parts) != len(want) || parts[0] == ".." {
+			continue
+		}
+		ok := true
+		for i, w := range want {
+			if parts[i] == "" || parts[i] == "." || parts[i] == ".." || (w != "" && parts[i] != w) {
+				ok = false
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+// realPath returns the absolute path p with the links of its longest part
+// that exists resolved. A link whose target does not exist yet is followed
+// too.
+func realPath(p string) string {
+	for hops := 0; hops < 40; hops++ {
+		rest, next := "", ""
+		for q := p; ; q = filepath.Dir(q) {
+			if real, err := filepath.EvalSymlinks(q); err == nil {
+				return filepath.Join(real, rest)
+			}
+			if fi, err := os.Lstat(q); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+				if target, err := os.Readlink(q); err == nil {
+					if !filepath.IsAbs(target) {
+						target = filepath.Join(filepath.Dir(q), target)
+					}
+					next = filepath.Join(target, rest)
+				}
+				break
+			}
+			if q == filepath.Dir(q) {
+				return p
+			}
+			rest = filepath.Join(filepath.Base(q), rest)
+		}
+		if next == "" {
+			return p
+		}
+		p = next
+	}
+	return p
 }
 
 // recheck decides a call that a person allowed: a deny that the policy of
