@@ -42,11 +42,11 @@ func TestRefusedCancelsDoNotLoseAChildThatAnswers(t *testing.T) {
 	if n := sp.readsIn(100 * time.Millisecond); n < 3 {
 		t.Fatalf("a child that answers was read %d times in 100ms", n)
 	}
+	// The wait between two tries doubles from cancelRetryFirst, so at this
+	// point the next try can be 800 ms away or more. A fixed window shorter
+	// than that wait made this test fail now and then.
 	before := sp.cancelsOf(child.ID)
-	time.Sleep(400 * time.Millisecond)
-	if sp.cancelsOf(child.ID) <= before {
-		t.Fatalf("the cancel of the child is no longer tried: %d cancels", sp.cancelsOf(child.ID))
-	}
+	eventually(t, "the cancel of the child is tried again", func() bool { return sp.cancelsOf(child.ID) > before })
 }
 
 // TestCancelCutByAShutdownIsSentOnTheNextStart proves that a cancel of a
