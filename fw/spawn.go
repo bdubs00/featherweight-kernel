@@ -539,7 +539,26 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		}
 		err = fmt.Errorf("fw: the spawner started another child than %s", req.ID)
 	}
+	if err != nil && k.ctx.Err() != nil {
+		// The kernel context ended during the start: a shutdown or a
+		// storage failure cut it, not the spawner. The child can have
+		// taken its run in its process before the cut, so this process
+		// keeps that process and records nothing, because the ledger is
+		// closing or failing. The record before the start stays the truth:
+		// the look after the restart finds the child and follows it, or
+		// records it as lost and abandons its process (section 11.9).
+		a.log.Warn("the process ended during the start of a child; the next start looks for the child", "run", parent, "child", req.ID, "member", member, "error", err)
+		k.mu.Lock()
+		close(start.done)
+		k.mu.Unlock()
+		if werr := k.writeError(); werr != nil {
+			return nil, werr
+		}
+		return nil, err
+	}
 	if err != nil {
+		// The spawner refused the start, or Cancel ended it. Only such a
+		// start abandons the process that the planner named.
 		where := member
 		if where == "" {
 			where = "another process"
@@ -570,9 +589,11 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		k.mu.Unlock()
 		return nil, fmt.Errorf("fw: record the start of the child %s in %s: %w", req.ID, got, err)
 	}
-	if sctx.Err() != nil {
+	if sctx.Err() != nil && k.ctx.Err() == nil {
 		// Cancel ended the start after the child took its run. The child is
-		// recorded, and the cancel goes on to it.
+		// recorded, and the cancel goes on to it. A start that the end of
+		// the kernel context cut keeps its child running: the next start
+		// of this process follows it.
 		cctx, cancel := context.WithTimeout(k.ctx, time.Minute)
 		if err := a.spawner.Cancel(cctx, got, req.ID); err != nil {
 			a.log.Warn("cancel a child whose start was canceled", "run", parent, "child", req.ID, "member", got, "error", err)

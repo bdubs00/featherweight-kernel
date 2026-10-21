@@ -70,7 +70,7 @@ func cmdServe(ctx context.Context, g *globals, args []string) int {
 	if sa.port > 0 {
 		cfg.Listen = ":" + strconv.Itoa(sa.port)
 	}
-	a, err := newAgent(ctx, cfg, modeServe)
+	a, err := newServeAgent(ctx, cfg, ledgerLockWait)
 	if err != nil {
 		return g.fail("serve", err)
 	}
@@ -318,7 +318,7 @@ func (g *globals) bootAX(ctx context.Context, b *axBoot, listen string) error {
 	if path != "" {
 		log.Info("fw: ax boot: configuration loaded", "path", path)
 	}
-	b.agent, err = newAgent(ctx, cfg, modeServe)
+	b.agent, err = newServeAgent(ctx, cfg, ledgerLockWait)
 	if err != nil {
 		return err
 	}
@@ -334,6 +334,51 @@ func (g *globals) bootAX(ctx context.Context, b *axBoot, listen string) error {
 		_ = ax.Bootstrap(ctx, b.agent, r.Goal, r.Path, ax.BootstrapTimeout())
 	}
 	return nil
+}
+
+// ledgerLockWait is how long a serving process waits at boot for the
+// writer lock of its file ledger (newServeAgent).
+const ledgerLockWait = 30 * time.Second
+
+// Pacing of the wait of newServeAgent: a try every half second, and a log
+// line every five seconds.
+const (
+	ledgerLockRetry = 500 * time.Millisecond
+	ledgerLockLog   = 5 * time.Second
+)
+
+// newServeAgent builds the agent of fw serve and of the ax boot. Another
+// fw process can hold the writer lock of the file ledger for a while, for
+// example fw run that a person started through ax ssh during a slow boot
+// with spec.debug. A process that serves, which is PID 1 under ax, then
+// tries the open again for up to wait, with a log line every few seconds,
+// and fails after that with a message that names the other holder. The
+// verbs fw run and fw replay beside a server still fail at once.
+func newServeAgent(ctx context.Context, cfg *fw.Config, wait time.Duration) (*fw.Agent, error) {
+	log := slog.Default()
+	began := time.Now()
+	deadline, nextLog := began.Add(wait), began
+	for {
+		a, err := newAgent(ctx, cfg, modeServe)
+		if err == nil || !errors.Is(err, fw.ErrLedgerLocked) {
+			return a, err
+		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return nil, fmt.Errorf("cli: another fw process still holds the writer lock of the ledger after %s, so this server cannot own the ledger; stop that process, such as fw run started through ax ssh, then start the server again: %w", wait, err)
+		}
+		if !now.Before(nextLog) {
+			log.Warn("fw: serve: another fw process holds the writer lock of the ledger; waiting for it", "waited", now.Sub(began).Round(time.Second).String(), "limit", wait.String(), "error", err)
+			nextLog = now.Add(ledgerLockLog)
+		}
+		t := time.NewTimer(ledgerLockRetry)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, fmt.Errorf("cli: wait for the writer lock of the ledger: %w", ctx.Err())
+		case <-t.C:
+		}
+	}
 }
 
 // runTaskCommand runs step 7 of the boot sequence and returns when the

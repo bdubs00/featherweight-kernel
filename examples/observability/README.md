@@ -75,6 +75,7 @@ The file `alerts.yml` holds these rules:
 
 | Alert | Fires when |
 |---|---|
+| `FwStorageBlocked` | A storage failure stopped an fw process for 1 minute (`fw_storage_blocked` is 1). Repair the storage and restart the process. |
 | `FwTargetDown` | Prometheus cannot scrape an fw process for 5 minutes. |
 | `FwApprovalWaiting` | An approval waits for more than 1 hour on a scraped process. |
 | `FwRunFailuresRising` | More than 25% of the runs of an agent fail in 30 minutes, with 3 failures or more. |
@@ -120,7 +121,7 @@ the existing Prometheus registry and its OTLP bridge, not a second meter.
 |---|---|
 | Verified completion | `fw_task_completions_total{execution,grader_judgment}` counts every **own terminal episode**, including failures and cancellations. `fw_task_verifications_total{result}` counts one final application receipt per completed episode. Only `result="satisfied"` is external verification. `accepted` means application-reported human acceptance; `rejected` and `unknown` are explicit final observations. No receipt means unverified. |
 | Operator interventions | `fw_operator_interventions_total{kind}` counts concrete actions. `fw_operator_interventions_per_run{coverage}` is a histogram at each own finish, including zero-action, failed and canceled episodes. A follow-up begins another completion episode of the same run. |
-| Recovery | `fw_recovery_duration_seconds{result}` measures a resume to first model response, tool response, or tool progress, or to a finish/suspend before progress. Results are `progress`, `completed`, `failed`, `canceled`, `interrupted`. Suspended downtime before resume is excluded. |
+| Recovery | `fw_recovery_duration_seconds{result}` measures a resume of a run that was queued or running to first model response, tool response, or tool progress, to an approval request, or to a finish/suspend before progress. Results are `progress`, `input_required`, `completed`, `failed`, `canceled`, `interrupted`. Suspended downtime before resume is excluded. A run that waits for a decision at the interruption gets no sample, so the time that people take to decide never counts. |
 | Duplicate effects | `fw_confirmed_duplicate_effects_total` counts **additional committed external effects** reported by trusted applications. `fw_ambiguous_tool_retries_total` separately counts another request for an outstanding call id. It never asserts another external effect. |
 | Cost per successful task | `fw_successful_task_cost_usd{basis}` is a histogram of own episode model cost for final `accepted` or externally `satisfied` receipts, only with complete prices and usage. Its `_count` is the price-complete successful-task denominator. `fw_successful_task_cost_excluded_total{reason}` records `unpriced_tokens` or `missing_usage` exclusions. |
 
@@ -275,6 +276,11 @@ Logs keep run, sequence and trace ids plus quality facts. Traces label model
 judgments with `fw.outcome.basis="grader_judgment"` and application observations
 with `fw.quality.basis="trusted_application"`. A late receipt gets a short
 `fw.quality.observation` span in the run's trace, not a reopened execution span.
+That span names its run in `gen_ai.conversation.id` and the receipt id only as
+`fw.quality.receipt_sha256`, its SHA-256. A grader judgment carries the boolean
+`fw.outcome.graded`, not the id of the grader run. A decision and a budget
+change carry `fw.approval.decider_kind` and `fw.budget.by_kind`, a kind such as
+`person`, `parent`, `token`, or `workload`, never the subject.
 Recovery ends add `fw.recovery` span events with result and duration. Trace/log
 ids can be sensitive operational data; they are never metric labels.
 

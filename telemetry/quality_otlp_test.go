@@ -55,6 +55,10 @@ func TestQualityMeasuresOnOTLPWire(t *testing.T) {
 			t.Fatalf("wire histogram %s=%v", name, d)
 		}
 	}
+	// The fail-stop gauge goes out like the others, as 0 for a healthy process.
+	if x := got["fw_storage_blocked"]; x == nil || x.GetGauge() == nil || len(x.GetGauge().DataPoints) != 1 || x.GetGauge().DataPoints[0].GetAsDouble() != 0 {
+		t.Fatalf("wire gauge fw_storage_blocked=%v", x)
+	}
 	for _, a := range got["fw_task_verifications_total"].GetSum().DataPoints[0].Attributes {
 		if a.Key == "result" && a.Value.GetStringValue() == "satisfied" {
 			return

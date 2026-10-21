@@ -50,6 +50,10 @@ type Tracer struct {
 	// the events up to it are copies of its source, whose trace has their
 	// spans.
 	kept map[string]uint64
+	// waiting holds the approval that a run waits for, also across the end
+	// of its span at a suspend, so a resume of a run that waits for input
+	// starts no recovery clock. A decision or the finish removes the entry.
+	waiting map[string]string
 }
 
 type runTrace struct {
@@ -106,7 +110,7 @@ func NewTracer(ctx context.Context, serviceName string) (*Tracer, func(context.C
 // NewTracerFrom builds the trace projection on a tracer provider that the
 // caller owns.
 func NewTracerFrom(tp trace.TracerProvider) *Tracer {
-	return &Tracer{tracer: tp.Tracer(instrumentationName), runs: map[string]*runTrace{}, kept: map[string]uint64{}}
+	return &Tracer{tracer: tp.Tracer(instrumentationName), runs: map[string]*runTrace{}, kept: map[string]uint64{}, waiting: map[string]string{}}
 }
 
 // Observe implements fw.Observer.
@@ -115,6 +119,14 @@ func (t *Tracer) Observe(e fw.Event) {
 	defer t.mu.Unlock()
 	ts := eventTime(e)
 	rt := t.runs[e.Subject]
+	// The copies of a branch count here, because a branch can begin by
+	// waiting for a decision.
+	waiting := t.waiting[e.Subject] != ""
+	if p := pendingAfter(t.waiting[e.Subject], e); p != "" {
+		t.waiting[e.Subject] = p
+	} else {
+		delete(t.waiting, e.Subject)
+	}
 	if k := t.kept[e.Subject]; e.Seq != 0 && e.Seq <= k {
 		// A copy of an event of the source opens no span and counts no
 		// usage again: the trace of the source holds it.
@@ -132,7 +144,7 @@ func (t *Tracer) Observe(e fw.Event) {
 		}
 	}
 	if rt != nil {
-		traceRecovery(rt, e, ts)
+		traceRecovery(rt, e, ts, waiting)
 	}
 	switch e.Type {
 	case fw.EvRunQueued:
@@ -163,7 +175,7 @@ func (t *Tracer) Observe(e fw.Event) {
 			if e.Type == fw.EvBudgetChanged {
 				var d fw.BudgetChangedData
 				_ = e.Decode(&d)
-				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(attribute.String("fw.budget.by", d.By), attribute.String("fw.budget.origin", d.Origin)))
+				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(attribute.String("fw.budget.by_kind", actorKind(d.By)), attribute.String("fw.budget.origin", d.Origin)))
 			} else if len(attrs) == 0 {
 				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts))
 			}
@@ -183,7 +195,7 @@ func (t *Tracer) Observe(e fw.Event) {
 		// fw.run.started opens the run span. A resume or a follow-up after
 		// fw.run.finished opens a new run span in the same trace.
 		rt = t.open(e, ts)
-		traceRecovery(rt, e, ts)
+		traceRecovery(rt, e, ts, waiting)
 	}
 	switch e.Type {
 	case fw.EvRunStarted:
@@ -280,7 +292,7 @@ func (t *Tracer) Observe(e fw.Event) {
 		var d fw.ApprovalDecidedData
 		_ = e.Decode(&d)
 		rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(
-			attribute.String("fw.approval.id", d.ApprovalID), attribute.String("fw.approval.decision", d.Decision), attribute.String("fw.approval.decider", d.Decider)))
+			attribute.String("fw.approval.id", d.ApprovalID), attribute.String("fw.approval.decision", d.Decision), attribute.String("fw.approval.decider_kind", actorKind(d.Decider))))
 	case fw.EvError:
 		var d fw.ErrorData
 		_ = e.Decode(&d)

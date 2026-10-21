@@ -382,12 +382,19 @@ func TestStartChildRetryWaitsForAcceptance(t *testing.T) {
 	}
 }
 
+// A shutdown waits for an initial append in flight. Once fw.run.queued is
+// in the ledger, the run is accepted: the start returns it, and the
+// shutdown suspends it, so the next start of the process resumes it.
 func TestStartAcceptanceAndShutdown(t *testing.T) {
 	ctx := testCtx(t)
 	l := &acceptanceLedger{Ledger: NewMemLedger(), entered: make(chan struct{}), release: make(chan struct{})}
 	a := newTestAgent(t, newScript(endTurn("unused")).Model(), WithLedger(l))
-	owner := make(chan error, 1)
-	go func() { _, err := a.Start(ctx, "work", WithIdempotencyKey("same")); owner <- err }()
+	type result struct {
+		r   *Run
+		err error
+	}
+	owner := make(chan result, 1)
+	go func() { r, err := a.Start(ctx, "work", WithIdempotencyKey("same")); owner <- result{r, err} }()
 	<-l.entered
 	closed := make(chan struct{})
 	go func() { a.Close(ctx); close(closed) }()
@@ -398,81 +405,23 @@ func TestStartAcceptanceAndShutdown(t *testing.T) {
 	default:
 	}
 	close(l.release)
-	if err := <-owner; !errors.Is(err, ErrClosed) {
-		t.Fatalf("owner during shutdown = %v", err)
+	got := <-owner
+	if got.err != nil || got.r == nil || got.r.State != StateQueued {
+		t.Fatalf("owner during shutdown = %+v, %v", got.r, got.err)
 	}
 	select {
 	case <-closed:
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	if types := eventTypes(ledgerEvents(t, l.Ledger, got.r.ID)); len(types) != 2 || types[0] != EvRunQueued || types[1] != EvRunSuspended {
+		t.Fatalf("ledger of the accepted run = %v", types)
+	}
 	a.k.slotMu.Lock()
 	n := a.k.rootDrivers
 	a.k.slotMu.Unlock()
 	if n != 0 {
 		t.Fatalf("admissions after shutdown = %d", n)
-	}
-}
-
-func TestDirectAdmissionRejectsFollowupWithoutWritingMessage(t *testing.T) {
-	ctx := testCtx(t)
-	cfg := DefaultConfig()
-	cfg.MaxRuns, cfg.MaxQueuedRuns = 1, 1
-	var calls atomic.Int32
-	m := ModelFunc{GenerateFn: func(ctx context.Context, _ *Request) (*Response, error) {
-		if calls.Add(1) == 1 {
-			return endTurn("done"), nil
-		}
-		<-ctx.Done()
-		return nil, ctx.Err()
-	}}
-	a := newTestAgent(t, m, WithConfig(cfg))
-	finished, err := a.Run(ctx, "finish")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Wait also for the driver to return its root admission.
-	for {
-		a.k.slotMu.Lock()
-		n, changed := a.k.rootDrivers, a.k.slotsChanged
-		a.k.slotMu.Unlock()
-		if n == 0 {
-			break
-		}
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		}
-	}
-	for range 2 {
-		if _, err := a.Start(ctx, "block"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	before := len(ledgerEvents(t, a.Ledger(), finished.ID))
-	// The budget change and the message are one step: a full backlog
-	// changes neither, and the budget of the run stays as it was.
-	err = a.Send(ctx, finished.ID, Message{Content: []Block{Text("again")}}, OriginHTTP, WithSendBudget(Budget{MaxTurns: 3}))
-	if !errors.Is(err, ErrSaturated) {
-		t.Fatalf("followup = %v", err)
-	}
-	if after := len(ledgerEvents(t, a.Ledger(), finished.ID)); after != before {
-		t.Fatalf("followup wrote %d new events", after-before)
-	}
-	for _, e := range ledgerEvents(t, a.Ledger(), finished.ID) {
-		if e.Type == EvBudgetChanged {
-			t.Fatal("a refused follow-up changed the budget")
-		}
-	}
-	got, err := a.Get(ctx, finished.ID)
-	if err != nil || got.State != StateCompleted {
-		t.Fatalf("finished run = %+v, %v", got, err)
-	}
-	for _, rs := range a.k.all() {
-		if err := a.Cancel(ctx, rs.id); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 

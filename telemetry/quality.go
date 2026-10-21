@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -10,9 +11,17 @@ import (
 
 // qualityMetrics keeps only open episodes. Receipts carry their own bounded
 // cost snapshot, so late verification needs no completed-run cache.
+//
+// The kernel notifies the observers inside the append of an event, so
+// observe does a fixed amount of work for each event. A run that observe
+// does not track and that has history, such as a follow-up of a finished
+// run, gets its facts from the ledger in the background (seedLater). The
+// events of the run wait in its backlog until the seed is in place.
 type qualityMetrics struct {
+	mu            *sync.Mutex // the mutex of Metrics; observe runs with it held
 	ledger        fw.Ledger
 	runs          map[string]*qualityRun
+	seeds         sync.WaitGroup // the background seeds that run now
 	completions   *prometheus.CounterVec
 	verifications *prometheus.CounterVec
 	interventions *prometheus.CounterVec
@@ -30,21 +39,30 @@ type qualityRun struct {
 	complete              bool
 	origin, parent, grade string
 	interventions         int
-	recovering            time.Time
-	last                  time.Time // last ledger evidence of activity, not restart time
+	// pending is the id of the approval that the run waits for, or "". A
+	// run that waits for input at an interruption gets no recovery clock.
+	pending    string
+	recovering time.Time
+	last       time.Time // last ledger evidence of activity, not restart time
 	// Only outstanding requests are retained. A request for the same call id
 	// after resume is ambiguous: it proves another attempt, not another effect.
 	tools map[string]bool
+	// seeding is true while a background read of the ledger builds the
+	// facts of the run before its first observed event. The events that
+	// arrive meanwhile wait in backlog, in order.
+	seeding bool
+	backlog []fw.Event
 }
 
-func newQualityMetrics() *qualityMetrics {
+func newQualityMetrics(mu *sync.Mutex) *qualityMetrics {
 	return &qualityMetrics{
+		mu:            mu,
 		runs:          map[string]*qualityRun{},
 		completions:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "fw_task_completions_total", Help: "Own execution completion episodes, including failed and canceled, by execution and model grader judgment; no external verification is implied."}, []string{"execution", "grader_judgment"}),
 		verifications: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "fw_task_verifications_total", Help: "Final trusted application receipts for completed episodes, by result; absent receipts remain unverified in the completion denominator."}, []string{"result"}),
 		interventions: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "fw_operator_interventions_total", Help: "Concrete operator ledger actions: attributed decisions, user followups from interactive surfaces, and attributed interactive budget changes."}, []string{"kind"}),
 		perRun:        prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "fw_operator_interventions_per_run", Help: "Operator actions per own completion episode including zero, with history coverage; late actions enter the next episode.", Buckets: []float64{0, 1, 2, 3, 5, 8, 13, 21, 34}}, []string{"coverage"}),
-		recovery:      prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "fw_recovery_duration_seconds", Help: "Resume to first model response, tool response/progress, or own terminal/suspend; sleep downtime excluded. Interrupted attempts are not successes.", Buckets: []float64{0.01, 0.1, 1, 5, 15, 30, 60, 120, 300, 600}}, []string{"result"}),
+		recovery:      prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "fw_recovery_duration_seconds", Help: "Resume of a run that was queued or running to first model response, tool response/progress, approval request, or own terminal/suspend; sleep downtime excluded, runs that wait for input excluded. Interrupted attempts are not successes.", Buckets: []float64{0.01, 0.1, 1, 5, 15, 30, 60, 120, 300, 600}}, []string{"result"}),
 		duplicates:    prometheus.NewCounter(prometheus.CounterOpts{Name: "fw_confirmed_duplicate_effects_total", Help: "Additional external effects confirmed by trusted application receipts only; retries and prevented duplicates do not count."}),
 		retries:       prometheus.NewCounter(prometheus.CounterOpts{Name: "fw_ambiguous_tool_retries_total", Help: "Repeated requests of an outstanding tool call id; ambiguous attempts, never proof of duplicate external effects."}),
 		cost:          prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "fw_successful_task_cost_usd", Help: "Own episode model cost at final accepted or externally satisfied receipt, only with every observed token priced; child usage excluded.", Buckets: []float64{0, 0.001, 0.01, 0.1, 0.5, 1, 5, 10, 50, 100}}, []string{"basis"}),
@@ -60,13 +78,15 @@ func newQualityRun() *qualityRun { return &qualityRun{grade: "unknown", tools: m
 
 // seed reconstructs open episode facts without recounting historical work.
 // Reading only through through makes Attach and a concurrent notification
-// agree, even when the ledger already holds the next event.
-func (q *qualityMetrics) seed(id string, through uint64) *qualityRun {
+// agree, even when the ledger already holds the next event. It reads the
+// ledger, so it runs without the lock, in seedLater: fold with count false
+// changes only the state of the run that it builds, never a metric.
+func (q *qualityMetrics) seed(l fw.Ledger, id string, through uint64) *qualityRun {
 	st := newQualityRun()
-	if q.ledger == nil {
+	if l == nil {
 		return st
 	}
-	for e, err := range q.ledger.Read(context.Background(), id, 0) {
+	for e, err := range l.Read(context.Background(), id, 0) {
 		if err != nil || e.Seq > through {
 			if err != nil {
 				st.complete = false
@@ -79,8 +99,56 @@ func (q *qualityMetrics) seed(id string, through uint64) *qualityRun {
 	return st
 }
 
+// pendingSeed is a run whose facts a background read of the ledger builds
+// through the sequence number through, into the placeholder st.
+type pendingSeed struct {
+	id      string
+	through uint64
+	st      *qualityRun
+}
+
+// placeholder registers a run that waits for its seed. The caller holds
+// q.mu.
+func (q *qualityMetrics) placeholder(id string, through uint64) pendingSeed {
+	st := &qualityRun{seeding: true}
+	q.runs[id] = st
+	return pendingSeed{id: id, through: through, st: st}
+}
+
+// seedLater reads the ledger for each pending seed in one goroutine, in
+// order, without the lock. Then, with the lock, it puts the facts in place
+// and replays the events that waited, so each event counts once and in
+// order. The caller holds q.mu.
+func (q *qualityMetrics) seedLater(l fw.Ledger, seeds []pendingSeed) {
+	if len(seeds) == 0 {
+		return
+	}
+	q.seeds.Add(1)
+	go func() {
+		defer q.seeds.Done()
+		for _, p := range seeds {
+			facts := q.seed(l, p.id, p.through)
+			q.mu.Lock()
+			backlog := p.st.backlog
+			*p.st = *facts
+			for _, e := range backlog {
+				q.observe(e)
+			}
+			q.mu.Unlock()
+		}
+	}()
+}
+
+// wait returns when every background seed is in place. Tests use it.
+func (q *qualityMetrics) wait() { q.seeds.Wait() }
+
+// observe folds one event. The caller holds q.mu. It reads no ledger.
 func (q *qualityMetrics) observe(e fw.Event) {
 	st := q.runs[e.Subject]
+	if st != nil && st.seeding {
+		st.backlog = append(st.backlog, e)
+		return
+	}
 	if st != nil && e.Seq != 0 && e.Seq <= st.seq {
 		return
 	}
@@ -129,11 +197,15 @@ func (q *qualityMetrics) observe(e fw.Event) {
 			}
 			return
 		}
-		through := uint64(0)
-		if e.Seq > 0 {
-			through = e.Seq - 1
+		if e.Seq > 1 && e.Type != fw.EvRunQueued && q.ledger != nil {
+			// The run has history that this process did not observe. Read
+			// it in the background, and keep this event until then.
+			p := q.placeholder(e.Subject, e.Seq-1)
+			p.st.backlog = append(p.st.backlog, e)
+			q.seedLater(q.ledger, []pendingSeed{p})
+			return
 		}
-		st = q.seed(e.Subject, through)
+		st = newQualityRun()
 		q.runs[e.Subject] = st
 	}
 	q.fold(st, e, true)
@@ -152,6 +224,8 @@ func (q *qualityMetrics) fold(st *qualityRun, e fw.Event, count bool) {
 		st.complete = true
 		st.grade = "unverified"
 	}
+	// A copied approval request counts too: a branch can begin by waiting.
+	st.pending = pendingAfter(st.pending, e)
 	if e.Seq != 0 && e.Seq <= st.kept {
 		switch e.Type {
 		case fw.EvRunFinished:
@@ -172,6 +246,10 @@ func (q *qualityMetrics) fold(st *qualityRun, e fw.Event, count bool) {
 		switch e.Type {
 		case fw.EvModelResponded, fw.EvToolResponded, fw.EvToolProgress:
 			result = "progress"
+		case fw.EvApprovalRequested:
+			// From here on the run waits for a person, and that time is not
+			// recovery.
+			result = "input_required"
 		case fw.EvRunFinished:
 			result = outcomeOf(e)
 		case fw.EvRunSuspended, fw.EvRunResumed:
@@ -193,7 +271,12 @@ func (q *qualityMetrics) fold(st *qualityRun, e fw.Event, count bool) {
 	}
 	switch e.Type {
 	case fw.EvRunResumed:
-		st.recovering = eventTime(e)
+		// Only a run that was queued or running at the interruption
+		// recovers. A run that waits for input waits for a person, before
+		// and after the restart.
+		if st.pending == "" {
+			st.recovering = eventTime(e)
+		}
 	case fw.EvMessageReceived:
 		var d fw.MessageReceivedData
 		_ = e.Decode(&d)
@@ -261,4 +344,41 @@ func intervention(e fw.Event, st *qualityRun) string {
 		}
 	}
 	return ""
+}
+
+// noApprovalID stands for a pending approval without an id, so that the
+// state of a run that waits for one is not "".
+const noApprovalID = "-"
+
+// pendingAfter returns the approval that a run waits for after e, from the
+// approval that it waited for before e, as the projection of the run does:
+// fw.approval.requested sets it, the decision of that approval and
+// fw.run.finished clear it. "" means that the run waits for no approval.
+func pendingAfter(pending string, e fw.Event) string {
+	switch e.Type {
+	case fw.EvApprovalRequested:
+		var d fw.ApprovalRequestedData
+		if e.Decode(&d) != nil {
+			return pending
+		}
+		if d.ApprovalID == "" {
+			return noApprovalID
+		}
+		return d.ApprovalID
+	case fw.EvApprovalDecided:
+		var d fw.ApprovalDecidedData
+		if e.Decode(&d) != nil {
+			return pending
+		}
+		id := d.ApprovalID
+		if id == "" {
+			id = noApprovalID
+		}
+		if id == pending {
+			return ""
+		}
+	case fw.EvRunFinished:
+		return ""
+	}
+	return pending
 }

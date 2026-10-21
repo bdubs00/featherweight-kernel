@@ -1,13 +1,18 @@
 package a2a
 
-// This file answers a control plane that did not answer (fw.ErrAuthzUnavailable).
-// A2A has no error for a service that is down. The protocol code is
-// therefore the server error, and the details and the metadata of the error
-// info carry the reason and a retry hint, so a client can tell the outage
-// from a refusal. The SDK sends every server error with HTTP 500 on the
-// REST binding, so unavailableStatus turns this one error into a 503 with
-// Retry-After, the same answer as the native API. A JSON-RPC error goes out
-// with HTTP 200, as JSON-RPC defines, and its data carries the reason.
+// This file answers the conditions that end by themselves: a control plane
+// that did not answer (fw.ErrAuthzUnavailable), a full backlog of runs
+// (fw.ErrSaturated), and a process that a storage failure blocked until
+// its restart (fw.ErrStorageUnavailable). A2A and its SDK have no error for
+// a service that is busy or down. The protocol code is therefore the
+// server error, the JSON-RPC code -32000 that JSON-RPC reserves for the
+// server, and the details and the metadata of the error info carry the
+// reason and a retry hint, so a client can tell the condition from a
+// refusal and try again. The SDK sends every server error with HTTP 500
+// on the REST binding, so unavailableStatus turns these errors into the
+// answers of the native API: 429 with Retry-After for a full backlog, and
+// 503 with Retry-After for the other two. A JSON-RPC error goes out with
+// HTTP 200, as JSON-RPC defines, and its data carries the reason.
 
 import (
 	"bytes"
@@ -22,34 +27,75 @@ import (
 )
 
 const (
-	// reasonUnavailable is the reason in the details and the value of
-	// metaReason in the error info.
+	// reasonUnavailable, reasonSaturated, and reasonStorage are the
+	// reasons in the details and the values of metaReason in the error
+	// info.
 	reasonUnavailable = "AUTHZ_UNAVAILABLE"
+	reasonSaturated   = "SATURATED"
+	reasonStorage     = "STORAGE_UNAVAILABLE"
 	// metaReason is the key of the reason in the metadata of the error
 	// info. The protocol reason of the error info stays SERVER_ERROR.
 	metaReason = "fwReason"
 	// retryAfterSeconds is the retry hint, as in the native API.
 	retryAfterSeconds = 5
+	// storageRetryAfterSeconds is the retry hint of a blocked process: it
+	// does no work until a controller or an operator restarts it.
+	storageRetryAfterSeconds = 30
 	// maxHeldBody bounds the bytes that unavailableStatus holds.
 	maxHeldBody = 64 << 10
 )
 
-// unavailable builds the A2A error for a control plane that did not answer.
-// It wraps both the server error and err, so errors.Is finds either one.
-func unavailable(err error) error {
-	msg := "The authorization service did not answer, so the request is refused. Try again in a few seconds. Cause: " + err.Error()
+// temporary builds the A2A server error of a condition that ends by
+// itself, with the reason and the retry hint in the details and in the
+// metadata of the error info. It wraps both the server error and err, so
+// errors.Is finds either one.
+func temporary(err error, reason, msg string, retryAfter int) error {
 	return sdk.NewError(fmt.Errorf("a2a: %w: %w", sdk.ErrServerError, err), msg).
-		WithDetails(map[string]any{"reason": reasonUnavailable, "retryAfterSeconds": retryAfterSeconds}).
-		WithErrorInfoMeta(map[string]string{metaReason: reasonUnavailable, "retryAfter": strconv.Itoa(retryAfterSeconds)})
+		WithDetails(map[string]any{"reason": reason, "retryAfterSeconds": retryAfter}).
+		WithErrorInfoMeta(map[string]string{metaReason: reason, "retryAfter": strconv.Itoa(retryAfter)})
 }
 
-// unavailableStatus wraps the REST binding. It holds the body of a 500 and,
-// when the body is the error of unavailable, sends it with a 503, the
-// status UNAVAILABLE, and Retry-After. A stream starts with HTTP 200 before
-// its first event, so the wrapper also holds the headers of a stream until
-// the first event is complete. When that event is the error of
-// unavailable, the answer is the same 503 as for a plain call. Every other
-// response passes through unchanged.
+// unavailable builds the A2A error for a control plane that did not answer.
+func unavailable(err error) error {
+	msg := "The authorization service did not answer, so the request is refused. Try again in a few seconds. Cause: " + err.Error()
+	return temporary(err, reasonUnavailable, msg, retryAfterSeconds)
+}
+
+// saturated builds the A2A error for a full backlog of runs. A retry with
+// the same message id or idempotency key gives one run.
+func saturated(err error) error {
+	msg := "The run admission of the agent is full, so the request is refused. Try again after the retry hint with the same message id."
+	return temporary(err, reasonSaturated, msg, retryAfterSeconds)
+}
+
+// storageUnavailable builds the A2A error for a process that a storage
+// failure blocked. The message does not hold the cause, because the cause
+// can name a path of the server.
+func storageUnavailable(err error) error {
+	msg := "The storage of the agent failed, so the agent does no work until it restarts. Try again later with the same message id."
+	return temporary(err, reasonStorage, msg, storageRetryAfterSeconds)
+}
+
+// temporaryStatus returns the HTTP status and the status word of the REST
+// binding for the reason of a temporary error, and false for any other
+// reason.
+func temporaryStatus(reason string) (int, string, bool) {
+	switch reason {
+	case reasonUnavailable, reasonStorage:
+		return http.StatusServiceUnavailable, "UNAVAILABLE", true
+	case reasonSaturated:
+		return http.StatusTooManyRequests, "RESOURCE_EXHAUSTED", true
+	}
+	return 0, "", false
+}
+
+// unavailableStatus wraps the REST binding. It holds the body of a 500
+// and, when the body is the error of temporary, sends it with the status
+// of its reason (temporaryStatus) and Retry-After. A stream starts with
+// HTTP 200 before its first event, so the wrapper also holds the headers
+// of a stream until the first event is complete. When that event is the
+// error of temporary, the answer is the same as for a plain call. Every
+// other response passes through unchanged.
 func unavailableStatus(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hw := &holdWriter{ResponseWriter: w}
@@ -148,14 +194,15 @@ func (w *holdWriter) finish() {
 	}
 }
 
-// answer sends the 503 with the rewritten error document.
-func (w *holdWriter) answer(doc []byte) {
+// answer sends the rewritten error document with its status and its retry
+// hint.
+func (w *holdWriter) answer(out temporaryAnswer) {
 	h := w.Header()
 	h.Set("Content-Type", "application/json")
-	h.Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	h.Set("Retry-After", out.retryAfter)
 	h.Del("Content-Length")
-	w.ResponseWriter.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = w.ResponseWriter.Write(doc)
+	w.ResponseWriter.WriteHeader(out.code)
+	_, _ = w.ResponseWriter.Write(out.doc)
 	w.buf.Reset()
 }
 
@@ -188,44 +235,59 @@ func eventData(event []byte) []byte {
 	return bytes.Join(parts, []byte("\n"))
 }
 
-// asUnavailable returns the body with the code 503 and the status
-// UNAVAILABLE when the error info of the body names reasonUnavailable.
-func asUnavailable(body []byte) ([]byte, bool) {
+// temporaryAnswer is the REST answer of an error of temporary: the
+// rewritten document, its HTTP status, and the value of Retry-After.
+type temporaryAnswer struct {
+	doc        []byte
+	code       int
+	retryAfter string
+}
+
+// asUnavailable returns the body with the code and the status of its
+// reason (temporaryStatus) when the error info of the body names the
+// reason of an error of temporary.
+func asUnavailable(body []byte) (temporaryAnswer, bool) {
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(body, &doc) != nil {
-		return nil, false
+		return temporaryAnswer{}, false
 	}
 	var e map[string]json.RawMessage
 	if json.Unmarshal(doc["error"], &e) != nil {
-		return nil, false
+		return temporaryAnswer{}, false
 	}
 	var details []struct {
 		Type     string            `json:"@type"`
 		Metadata map[string]string `json:"metadata"`
 	}
 	if json.Unmarshal(e["details"], &details) != nil {
-		return nil, false
+		return temporaryAnswer{}, false
 	}
-	found := false
+	code, status, retryAfter := 0, "", ""
 	for _, d := range details {
-		if d.Type == errordetails.ErrorInfoType && d.Metadata[metaReason] == reasonUnavailable {
-			found = true
+		if d.Type != errordetails.ErrorInfoType {
+			continue
+		}
+		if c, s, ok := temporaryStatus(d.Metadata[metaReason]); ok {
+			code, status, retryAfter = c, s, d.Metadata["retryAfter"]
 			break
 		}
 	}
-	if !found {
-		return nil, false
+	if code == 0 {
+		return temporaryAnswer{}, false
 	}
-	e["code"] = json.RawMessage(strconv.Itoa(http.StatusServiceUnavailable))
-	e["status"] = json.RawMessage(`"UNAVAILABLE"`)
+	if _, err := strconv.Atoi(retryAfter); err != nil {
+		retryAfter = strconv.Itoa(retryAfterSeconds)
+	}
+	e["code"] = json.RawMessage(strconv.Itoa(code))
+	e["status"] = json.RawMessage(strconv.Quote(status))
 	raw, err := json.Marshal(e)
 	if err != nil {
-		return nil, false
+		return temporaryAnswer{}, false
 	}
 	doc["error"] = raw
 	out, err := json.Marshal(doc)
 	if err != nil {
-		return nil, false
+		return temporaryAnswer{}, false
 	}
-	return append(out, '\n'), true
+	return temporaryAnswer{doc: append(out, '\n'), code: code, retryAfter: retryAfter}, true
 }

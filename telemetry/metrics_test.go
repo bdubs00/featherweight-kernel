@@ -206,6 +206,7 @@ func TestRegistryNames(t *testing.T) {
 		"fw_ledger_events_total":                 {dto.MetricType_COUNTER, []string{"type"}},
 		"fw_ledger_append_duration_seconds":      {dto.MetricType_HISTOGRAM, []string{"driver"}},
 		"fw_build_info":                          {dto.MetricType_GAUGE, []string{"commit", "go", "version"}},
+		"fw_storage_blocked":                     {dto.MetricType_GAUGE, nil},
 	}
 	if len(mfs) != len(want) {
 		t.Fatalf("registry has %d families, want %d", len(mfs), len(want))

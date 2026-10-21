@@ -27,6 +27,16 @@ type Status struct {
 	// IdleSince is when the last run stopped working, or when the process
 	// started if no run worked yet. It is absent while a run works.
 	IdleSince *time.Time `json:"idleSince,omitempty"`
+	// Blocked is true after a storage failure stopped the process
+	// (fw.Agent.RuntimeError). The process then does no work until a
+	// restart, so it is idle since the failure, whatever the last recorded
+	// state of its runs: a controller suspends it, and the next request
+	// starts a fresh process that rebuilds from the ledger. It is absent
+	// while the process is not blocked.
+	Blocked bool `json:"blocked,omitempty"`
+	// BlockedReason says why the process is blocked, with secrets
+	// removed. It is absent when Blocked is false.
+	BlockedReason string `json:"blockedReason,omitempty"`
 }
 
 // StatusUsage is the token usage over every run.
@@ -56,7 +66,8 @@ type RunCounts struct {
 // sending a branch to another process (fw.Agent.Starting), that reads a
 // child in another process that works (fw.Agent.Following), or that holds
 // background work such as the install of an environment (fw.Agent.Hold),
-// is not idle.
+// is not idle. A process that a storage failure blocked is blocked and
+// idle since the failure (fw.Agent.RuntimeErrorSince).
 func StatusOf(ctx context.Context, a *fw.Agent) (Status, error) {
 	runs, err := a.List(ctx)
 	if err != nil && !errors.Is(err, fw.ErrNotImplemented) {
@@ -65,6 +76,11 @@ func StatusOf(ctx context.Context, a *fw.Agent) (Status, error) {
 	s := ComputeStatus(runs)
 	if a.Starting() > 0 || a.Following() > 0 || a.Holds() > 0 {
 		s.Idle, s.IdleSince = false, nil
+	}
+	if failure := a.RuntimeError(); failure != nil {
+		t := a.RuntimeErrorSince().UTC()
+		s.Blocked, s.BlockedReason = true, a.Redact(failure.Error())
+		s.Idle, s.IdleSince = true, &t
 	}
 	if s.Idle && s.IdleSince == nil {
 		t := a.Started().UTC()

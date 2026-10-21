@@ -440,6 +440,10 @@ func mapErr(err error) error {
 		return err
 	case errors.Is(err, fw.ErrAuthzUnavailable):
 		return unavailable(err)
+	case errors.Is(err, fw.ErrSaturated):
+		return saturated(err)
+	case errors.Is(err, fw.ErrStorageUnavailable):
+		return storageUnavailable(err)
 	case errors.Is(err, fw.ErrForbidden):
 		target = sdk.ErrUnauthorized // the A2A permission-denied error
 	case errors.Is(err, fw.ErrRunNotFound):

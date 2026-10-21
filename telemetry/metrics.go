@@ -84,6 +84,10 @@ var (
 type Metrics struct {
 	prices  fw.Prices
 	quality *qualityMetrics
+	// agent is the agent of Attach. fw_storage_blocked reads its runtime
+	// error at each scrape.
+	agent          atomic.Pointer[fw.Agent]
+	storageBlocked prometheus.GaugeFunc
 
 	runsTotal        *prometheus.CounterVec
 	runsQueued       *prometheus.CounterVec
@@ -152,8 +156,7 @@ type modelCall struct {
 // panics when reg already holds a metric with the same name.
 func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 	m := &Metrics{
-		prices:  prices,
-		quality: newQualityMetrics(),
+		prices: prices,
 		runsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fw_runs_total",
 			Help: "Runs that finished, by agent, outcome, and batch, the job of the run from the metadata fw.batch, or empty.",
@@ -250,6 +253,11 @@ func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 		knownModels: map[string]bool{},
 		models:      map[string]bool{},
 	}
+	m.quality = newQualityMetrics(&m.mu)
+	m.storageBlocked = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "fw_storage_blocked",
+		Help: "1 after a storage failure stopped execution and writes of the process until a restart (fail-stop), else 0.",
+	}, m.blocked)
 	m.SetBuildInfo("", "")
 	if reg != nil {
 		reg.MustRegister(m.collectors()...)
@@ -264,8 +272,18 @@ func (m *Metrics) collectors() []prometheus.Collector {
 		m.modelRequests, m.modelDuration, m.modelTokens, m.modelCost, m.modelUnpriced,
 		m.toolCalls, m.toolDuration, mcpCollector{m},
 		m.approvalsPending, approvalAge{m}, m.approvalsTotal, m.loopsTotal, m.busMessages,
-		m.ledgerEvents, m.ledgerAppend, m.buildInfo,
+		m.ledgerEvents, m.ledgerAppend, m.buildInfo, m.storageBlocked,
 	}, m.quality.collectors()...)
+}
+
+// blocked is the value of fw_storage_blocked: 1 when the agent of Attach
+// has a storage failure (fw.Agent.RuntimeError), else 0. It reads the agent
+// at the scrape, so the gauge needs no event: a failed append writes none.
+func (m *Metrics) blocked() float64 {
+	if a := m.agent.Load(); a != nil && a.RuntimeError() != nil {
+		return 1
+	}
+	return 0
 }
 
 // KnowModels names the model selectors of the configuration, such as
@@ -441,11 +459,15 @@ func (m *Metrics) ObserveLedgerAppend(driver string, d time.Duration) {
 // Attach, a run that was open before the observer was added enters
 // fw_runs_active at its next event, and its pending approval is not counted.
 func (m *Metrics) Attach(a *fw.Agent) {
+	m.agent.Store(a)
 	a.Observe(m)
-	// The lock holds back every event of the agent until the seed is done.
-	// The kernel applies an event to the run status before it notifies the
-	// observers, so an event that waits here is either in the snapshot or
-	// after it, and the per-run state makes both cases count once.
+	// The lock holds back every event of the agent until the snapshot is
+	// counted. The kernel applies an event to the run status before it
+	// notifies the observers, so an event that waits here is either in the
+	// snapshot or after it, and the per-run state makes both cases count
+	// once. The quality facts of an open run come from its ledger, so one
+	// goroutine reads them after the lock, and the events of those runs
+	// wait in their backlogs until then.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.quality.ledger = a.Ledger()
@@ -453,9 +475,11 @@ func (m *Metrics) Attach(a *fw.Agent) {
 	if err != nil {
 		return
 	}
+	var seeds []pendingSeed
+	defer func() { m.quality.seedLater(m.quality.ledger, seeds) }()
 	for _, r := range runs {
 		if !r.State.Terminal() {
-			m.quality.runs[r.ID] = m.quality.seed(r.ID, r.Seq)
+			seeds = append(seeds, m.quality.placeholder(r.ID, r.Seq))
 		}
 		if r.State.Terminal() || m.runs[r.ID] != nil {
 			continue

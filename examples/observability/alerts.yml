@@ -60,6 +60,15 @@ groups:
           description: "This is per-run episode model cost, not tree cost. Children and grader runs are not charged again to their parent. Compare the excluded-cost panel before interpreting the mean."
   - name: fw
     rules:
+      - alert: FwStorageBlocked
+        expr: max by (job, instance, service_instance_id) (fw_storage_blocked) == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "fw on {{ $labels.instance }}{{ $labels.service_instance_id }} stopped after a storage failure"
+          description: "A ledger append, flush, or read failed, so the process fail-stopped: it runs no work and writes nothing until it restarts. Its runs keep their last recorded state. Repair the storage, such as a full disk, then restart the process. Under ax, the suspend controller of the workbench suspends the idle Task, and the next request restores a fresh process that rebuilds from the ledger."
+
       - alert: FwTargetDown
         expr: up{job=~"fw|fw-pods"} == 0
         for: 5m

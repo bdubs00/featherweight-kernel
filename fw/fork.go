@@ -73,8 +73,10 @@ type ForkRequest struct {
 // the reason, so nothing is lost without a trace.
 func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, error) {
 	k := a.k
-	if k.isDraining() {
-		return nil, ErrClosed
+	// ErrClosed during a drain, ErrStorageUnavailable after a storage
+	// failure.
+	if err := k.writeError(); err != nil {
+		return nil, err
 	}
 	if err := CheckMetadata(req.Metadata); err != nil {
 		return nil, err
@@ -124,6 +126,14 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	}
 	k.kids[src]++
 	k.mu.Unlock()
+	// A drain or a storage failure refuses the branch before a process
+	// exists for it in the fleet.
+	if err := k.writeError(); err != nil {
+		k.mu.Lock()
+		k.kids[src]--
+		k.mu.Unlock()
+		return nil, err
+	}
 	member, err := forker.Place(ctx, rs.snapshot())
 	if err != nil || member == "" {
 		k.mu.Lock()
@@ -171,12 +181,18 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	return cloneRun(placeholder), nil
 }
 
+// placedAbandonWait bounds the abandon of a process that Place made for a
+// branch that this process then gives up (discardPlacedBranch).
+const placedAbandonWait = 30 * time.Second
+
 // discardPlacedBranch gives up a branch whose record did not reach the
 // ledger before its start began: the source stops counting it, its start
 // ends, and the process that Place made holds no run, so it is abandoned
-// in the background. The record can have reached storage anyway, so a
-// restart reconciles what it finds there; this process answers for none
-// of it.
+// before Fork returns, for at most placedAbandonWait. The abandon does not
+// run in the background, so a process that exits after Fork leaves no
+// empty process behind without a record. The record can have reached
+// storage anyway, so a restart reconciles what it finds there; this
+// process answers for none of it.
 func (a *Agent) discardPlacedBranch(src string, ab abandoner, id, member string, cancel context.CancelFunc) {
 	if cancel != nil {
 		cancel()
@@ -185,11 +201,9 @@ func (a *Agent) discardPlacedBranch(src string, ab abandoner, id, member string,
 	k.mu.Lock()
 	k.kids[src]--
 	k.mu.Unlock()
-	go func() {
-		ctx, done := context.WithTimeout(context.Background(), time.Minute)
-		defer done()
-		a.abandon(ctx, ab, id, member)
-	}()
+	ctx, done := context.WithTimeout(context.Background(), placedAbandonWait)
+	defer done()
+	a.abandon(ctx, ab, id, member)
 }
 
 // Starting counts the branches and the children of this process whose
@@ -300,8 +314,8 @@ func (a *Agent) recordLostBranch(src *runState, d RunChildData) {
 // order. The native API serves it to a trusted caller, so a Forker can
 // start a branch on this process. The branch goes on as Fork describes.
 func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest) (*Run, error) {
-	if a.k.isDraining() {
-		return nil, ErrClosed
+	if err := a.k.writeError(); err != nil {
+		return nil, err
 	}
 	if len(events) == 0 || events[0].Type != EvRunQueued {
 		return nil, fmt.Errorf("%w: a branch begins with fw.run.queued", ErrInvalidRequest)
@@ -490,6 +504,7 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (r 
 	k.runs[id] = brs
 	k.mu.Unlock()
 	undo := func() {
+		a.releaseAdmission(brs)
 		k.mu.Lock()
 		delete(k.runs, id)
 		k.mu.Unlock()
@@ -511,6 +526,18 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (r 
 		}
 		close(brs.acceptDone)
 	}()
+	// A branch is new work. It takes its place in the backlog before its
+	// first append, so a full backlog appends nothing of it, and the
+	// copies keep that place, whatever events they hold: a copied
+	// fw.run.finished does not give it back, and a copied message or
+	// decision takes no other (copying).
+	if err := a.reserveAdmission(brs, true); err != nil {
+		undo()
+		return nil, err
+	}
+	brs.emitMu.Lock()
+	brs.copying = true
+	brs.emitMu.Unlock()
 	for i, e := range kept {
 		data := any(e.Data)
 		if i == 0 && e.Type == EvRunQueued {
@@ -537,6 +564,9 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (r 
 			return nil, aerr
 		}
 	}
+	brs.emitMu.Lock()
+	brs.copying = false
+	brs.emitMu.Unlock()
 	a.log.Info("run branched", "run", id, "from", q.Metadata[MetaForkOf], "seq", q.Metadata[MetaForkSeq], "withMessage", req.Input != "")
 	if req.Input != "" {
 		if _, err := a.emit(nil, brs, EvMessageReceived, MessageReceivedData{Role: RoleUser, Content: []Block{Text(req.Input)}, Origin: req.Origin}); err != nil {
@@ -552,10 +582,10 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (r 
 	brs.mu.Unlock()
 	if !terminal {
 		a.resume([]*runState{brs})
-		// A branch that waits for a decision starts no driver: resume
-		// leaves the run idle, so the place that its copied queue took
-		// goes back to the backlog until the decision starts a driver.
-		a.releaseAdmission(brs)
 	}
+	// A branch that its copies end, and a branch that waits for a
+	// decision, start no driver, so the place of the branch goes back to
+	// the backlog until a follow-up or the decision starts a driver.
+	a.releaseAdmission(brs)
 	return brs.snapshot(), nil
 }

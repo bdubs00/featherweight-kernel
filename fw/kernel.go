@@ -101,6 +101,7 @@ type kernel struct {
 	drainCh    chan struct{} // closed when shutdown starts
 	closedCh   chan struct{} // closed when shutdown ends
 	storageErr error         // first storage failure; guarded by lifeMu
+	storageAt  time.Time     // the time of storageErr; guarded by lifeMu
 	failedCh   chan struct{} // closed on the first storage failure
 	wg         sync.WaitGroup
 
@@ -152,6 +153,11 @@ type runState struct {
 	acceptDone chan struct{} // non-nil while a Start owns durable acceptance
 	acceptErr  error         // published by closing acceptDone
 	reserved   bool          // root admission held before driver launch; guarded by mu
+	// copying is true while appendBranch copies the kept events of a
+	// branch. The place that the branch reserved before its first append
+	// then stays as it is: a copied terminal event does not give it back,
+	// and a copied message or decision takes no other. Guarded by emitMu.
+	copying bool
 
 	emitMu    sync.Mutex
 	events    []Event // the full log while a driver holds a reference
@@ -325,8 +331,7 @@ func (a *Agent) shutdownKernel(ctx context.Context) {
 		}
 		if f, ok := a.ledger.(interface{ Flush() error }); ok {
 			if err := f.Flush(); err != nil {
-				a.log.Error("flush ledger", "error", err)
-				a.failStorage(fmt.Errorf("fw: flush ledger: %w", err))
+				a.failStorage(storageFailed(fmt.Errorf("fw: flush ledger: %w", err)))
 			}
 		}
 		a.closeResources()
@@ -445,6 +450,18 @@ func (a *Agent) Start(ctx context.Context, input string, opts ...RunOption) (*Ru
 
 // start appends fw.run.queued for a request and launches its driver.
 func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
+	return a.startJob(ctx, req, nil)
+}
+
+// startJob is start for a job that the bus intake took with the admission
+// t, or for any other start when t is nil. Every refusal comes before
+// fw.run.queued is appended: a drain, a storage failure, a full backlog,
+// and a request that fails validation. Once fw.run.queued is in the
+// ledger, the run is accepted, and startJob returns it, also when a drain
+// or a storage failure comes after the append. The ledger then holds the
+// run, the bus intake acknowledges its job, and the next start of the
+// process resumes the run, so no other process starts it again.
+func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Run, error) {
 	k := a.k
 	if err := k.writeError(); err != nil {
 		return nil, err
@@ -543,6 +560,22 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 			return nil, err
 		}
 	}
+	// A top-level run takes its place in the backlog before it stores
+	// anything, so a full backlog leaves no file of the request on disk. A
+	// child takes no place (driverBody). The run takes the place over at
+	// its append; until then, a refusal gives it back.
+	held := false
+	if parent == nil {
+		if err := a.claimPlace(t, true); err != nil {
+			return nil, err
+		}
+		held = true
+		defer func() {
+			if held {
+				k.addRootDriver(-1)
+			}
+		}()
+	}
 	files, changes, err := a.keepFiles(a.newRunDir(req.ID, parent, req.FilesRoot), req.Files)
 	if err != nil {
 		return nil, err
@@ -635,6 +668,14 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	defer func() { close(rs.acceptDone) }()
 
 	rs.emitMu.Lock()
+	if held {
+		// A failed append gives the place back, and the launch moves it
+		// to the driver.
+		rs.mu.Lock()
+		rs.reserved = true
+		rs.mu.Unlock()
+		held = false
+	}
 	_, err = a.appendLocked(nil, rs, ev)
 	rs.emitMu.Unlock()
 	if err != nil {
@@ -651,18 +692,17 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		k.mu.Unlock()
 		return nil, err
 	}
+	// The run is accepted. A record of an attachment that fails now is a
+	// storage failure, which blocks the process: the run stays in the
+	// ledger, and the restart reconciles it.
 	for _, d := range changes {
 		if _, err := a.emit(nil, rs, EvFileChanged, d); err != nil {
-			rs.acceptErr = err
-			a.releaseAdmission(rs)
-			return nil, err
+			a.log.Warn("the record of an attachment of an accepted run failed; a restart reconciles the run", "run", rs.id, "error", a.Redact(err.Error()))
+			break
 		}
 	}
-	if err := k.writeError(); err != nil {
-		rs.acceptErr = err
-		a.releaseAdmission(rs)
-		return nil, err
-	}
+	// During a drain or after a storage failure, launchLocked starts no
+	// driver and gives the place back. The shutdown suspends the run.
 	rs.mu.Lock()
 	a.launchLocked(rs)
 	rs.mu.Unlock()
@@ -1071,9 +1111,11 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 	}
 	// The message can start a driver. Reserve its place before any write,
 	// even while a driver is active, because the driver can idle before the
-	// message lands: a full backlog then changes nothing of the run. The
-	// launch below moves the place to the driver, and the release gives it
-	// back when the active driver takes the message instead.
+	// message lands. A follow-up continues a run that this process
+	// accepted, so no bound of the backlog refuses the place; the driver
+	// waits for a working slot. The launch below moves the place to the
+	// driver, and the release gives it back when the active driver takes
+	// the message instead.
 	if err := a.reserveAdmissionFor(rs); err != nil {
 		return err
 	}
@@ -1422,9 +1464,12 @@ func (a *Agent) appendLocked(guard context.Context, rs *runState, e Event) (Even
 	}
 	// Reserve before writing an event that can start direct work. The
 	// reservation transfers to its driver, so concurrent starts cannot
-	// overbook the backlog while their ledger writes are in flight.
-	if e.Type == EvRunQueued || e.Type == EvMessageReceived || e.Type == EvApprovalDecided {
-		if err := a.reserveAdmission(rs); err != nil {
+	// overbook the backlog while their ledger writes are in flight. Only
+	// new work, fw.run.queued, meets the bound; a follow-up and a decision
+	// continue an accepted run and are never refused. The copies of a
+	// branch use the place that the branch reserved before its copy.
+	if !rs.copying && (e.Type == EvRunQueued || e.Type == EvMessageReceived || e.Type == EvApprovalDecided) {
+		if err := a.reserveAdmission(rs, e.Type == EvRunQueued); err != nil {
 			return Event{}, err
 		}
 	}
@@ -1436,7 +1481,7 @@ func (a *Agent) appendLocked(guard context.Context, rs *runState, e Event) (Even
 	began := time.Now()
 	seq, err := a.ledger.Append(context.Background(), e)
 	if err != nil {
-		err = a.failStorage(fmt.Errorf("fw: append %s to run %s: %w", e.Type, rs.id, err))
+		err = a.failStorage(storageFailed(fmt.Errorf("fw: append %s to run %s: %w", e.Type, rs.id, err)))
 		a.releaseAdmission(rs)
 		return Event{}, err
 	}
@@ -1444,7 +1489,7 @@ func (a *Agent) appendLocked(guard context.Context, rs *runState, e Event) (Even
 	e.Seq = seq
 	rs.mu.Lock()
 	rs.run.Apply(e, a.prices)
-	if IsTerminal(e.Type) && rs.reserved {
+	if IsTerminal(e.Type) && rs.reserved && !rs.copying {
 		rs.reserved = false
 		a.k.addRootDriver(-1)
 	}
@@ -1526,7 +1571,11 @@ func (a *Agent) runDriver(ctx context.Context, cancel context.CancelFunc, rs *ru
 	defer cancel()
 	reason := a.driverBody(ctx, rs)
 	if reason == exitError && a.k.storageError() == nil {
-		a.failStorage(fmt.Errorf("fw: driver of run %s stopped after a ledger failure", rs.id))
+		// The driver stopped on an error that is not a storage fault,
+		// such as a broken pipe of a hosted harness or an error of a
+		// runner. The ledger works, so only this run fails, and the
+		// process goes on. A follow-up can continue the run.
+		a.failRun(rs)
 	}
 	if reason == exitIdle {
 		return
@@ -1539,6 +1588,24 @@ func (a *Agent) runDriver(ctx context.Context, cancel context.CancelFunc, rs *ru
 	st := rs.run.State
 	if reason == exitCanceled && !rs.canceling && !st.Terminal() && st != StateInputRequired && st != StateSuspended {
 		a.launchLocked(rs)
+	}
+}
+
+// failRun records the end of a run whose driver stopped on an error that
+// is not a storage fault. The log of the process has the cause. The event
+// does not hold it, because the cause can name a path or a peer.
+func (a *Agent) failRun(rs *runState) {
+	rs.emitMu.Lock()
+	defer rs.emitMu.Unlock()
+	rs.mu.Lock()
+	terminal := rs.run.State.Terminal()
+	rs.mu.Unlock()
+	if terminal {
+		return
+	}
+	d := RunFinishedData{Outcome: OutcomeFailed, Error: "the driver of the run stopped on an error; the log of the process has the cause"}
+	if _, err := a.emitLocked(nil, rs, EvRunFinished, d); err != nil {
+		a.log.Error("record the failure of a run driver", "run", rs.id, "error", a.Redact(err.Error()))
 	}
 }
 
@@ -1570,8 +1637,7 @@ func (a *Agent) driverBody(ctx context.Context, rs *runState) exitReason {
 		defer a.dropSlot(rs)
 	}
 	if err := a.holdEvents(rs); err != nil {
-		a.log.Error("load run", "run", rs.id, "error", err)
-		a.failStorage(fmt.Errorf("fw: load run %s: %w", rs.id, err))
+		a.failStorage(storageFailed(fmt.Errorf("fw: load run %s: %w", rs.id, err)))
 		return exitError
 	}
 	defer rs.releaseEvents()

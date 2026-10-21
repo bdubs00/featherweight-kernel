@@ -139,17 +139,19 @@ func (a *Agent) startIntake() {
 // runs, or when the kernel is closing and a retry has no point.
 func (a *Agent) tryIntake(queue string) bool {
 	k := a.k
-	h := func(e Event) error { return a.handleIntake(queue, e) }
 	var stop func()
 	var err error
 	if gb, ok := a.bus.(GatedBus); ok {
-		g := intakeGate{k: k}
-		stop, err = gb.ConsumeGated(k.ctx, queue, g, func(e Event) error {
-			defer g.free(1)
-			return h(e)
+		// Each message holds the admission that the gate gave it until its
+		// handler returns. The start of its run takes that admission over
+		// as its place in the backlog.
+		stop, err = gb.ConsumeGated(k.ctx, queue, intakeGate{k: k}, func(e Event) error {
+			t := &admission{k: k}
+			defer t.release()
+			return a.handleJob(queue, e, t)
 		})
 	} else {
-		stop, err = a.bus.Consume(k.ctx, queue, h)
+		stop, err = a.bus.Consume(k.ctx, queue, func(e Event) error { return a.handleIntake(queue, e) })
 	}
 	if err != nil {
 		if k.ctx.Err() != nil {
@@ -183,11 +185,28 @@ func (a *Agent) tryIntake(queue string) bool {
 // until the handler does. A message that arrives while the kernel closes
 // returns ErrClosed, so the bus delivers it again, to this process or to
 // another one.
+//
+// handleIntake handles a message of a bus without a gate: it first waits
+// for a place in the backlog (backlogPlace), so a full backlog never
+// refuses the job and never makes a bus drop it after its redeliveries.
 func (a *Agent) handleIntake(queue string, e Event) error {
+	return a.handleJob(queue, e, nil)
+}
+
+// handleJob is handleIntake for a message that holds the admission t of
+// the gate, or nil for a bus without a gate.
+func (a *Agent) handleJob(queue string, e Event, t *admission) error {
 	a.countBus("in")
 	var req RunRequest
 	if err := json.Unmarshal(e.Data, &req); err != nil {
 		return a.rejectJob(queue, e, nil, fmt.Errorf("fw: bus intake: the message is not a run request: %w", err))
+	}
+	if t == nil {
+		var err error
+		if t, err = a.backlogPlace(a.k.ctx); err != nil {
+			return err
+		}
+		defer t.release()
 	}
 	sent := req
 	if req.IdempotencyKey == "" {
@@ -202,13 +221,52 @@ func (a *Agent) handleIntake(queue string, e Event) error {
 	// request makes the kernel skip what a failure owes.
 	delete(req.Metadata, MetaIntakeOutcome)
 	req.Metadata[MetaIntakeQueue] = queue
-	if _, err := a.start(a.k.ctx, req); err != nil {
-		if errors.Is(err, ErrClosed) || errors.Is(err, ErrSaturated) || errors.Is(err, ErrStorageUnavailable) {
+	if _, err := a.startJob(a.k.ctx, req, t); err != nil {
+		if temporaryIntakeError(err) {
 			return err
 		}
 		return a.rejectJob(queue, e, &sent, err)
 	}
 	return nil
+}
+
+// temporaryIntakeError reports whether a job that did not start goes back
+// to the bus for another delivery instead of to the dead letter: the drain,
+// a storage failure, a full backlog, and the end of a context, such as the
+// kernel context at a shutdown or a fail-stop. The job itself is valid.
+func temporaryIntakeError(err error) bool {
+	return errors.Is(err, ErrClosed) || errors.Is(err, ErrSaturated) || errors.Is(err, ErrStorageUnavailable) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// backlogPlace waits for a place in the backlog of maxRuns +
+// maxQueuedRuns for a job of a bus without a gate, and takes it as the
+// admission of the job. It returns ErrClosed at the drain, the storage
+// failure, or the error of ctx.
+func (a *Agent) backlogPlace(ctx context.Context) (*admission, error) {
+	k := a.k
+	for {
+		if err := k.writeError(); err != nil {
+			return nil, err
+		}
+		k.slotMu.Lock()
+		if k.rootDrivers+k.admitted < cap(k.sem)+a.maxQueued() {
+			k.admitted++
+			k.slotMu.Unlock()
+			return &admission{k: k}, nil
+		}
+		changed := k.slotsChanged
+		k.slotMu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-k.drainCh:
+			return nil, ErrClosed
+		case <-k.failedCh:
+			return nil, k.storageError()
+		}
+	}
 }
 
 // rejectJob sends the dead-letter record of a message that cannot start a
@@ -287,9 +345,13 @@ func attemptOf(meta map[string]string) int {
 // maxRuns. The drivers of top-level runs fill the slots, the ones that
 // wait for a slot included, and so does each message that the gate
 // admitted until its handler returns. A run that waits for a decision has
-// no driver, so its slot is free for the next job. A run that another
-// surface starts at the same moment can still take the slot first; the
-// job then waits in this process for the next slot.
+// no driver, so its slot is free for the next job. Each admission is also
+// a reserved place in the backlog of maxRuns + maxQueuedRuns, which a
+// start from another surface cannot take: the start of the job takes it
+// over (claimPlace), so a job that the gate admitted is never refused for
+// saturation. A run that another surface starts at the same moment can
+// still take the working slot first; the run of the job then waits in
+// this process for the next slot.
 type intakeGate struct{ k *kernel }
 
 // Admit implements Gate. It returns ErrClosed when the kernel drains.

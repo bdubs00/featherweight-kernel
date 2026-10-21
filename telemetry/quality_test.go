@@ -141,6 +141,7 @@ func TestQualityAttachSeedsResumedRun(t *testing.T) {
 	e.Seq = 5
 	e.Time = at.Add(8 * time.Second)
 	m.Observe(e)
+	m.quality.wait()
 	if got := histogramSum(t, reg, "fw_recovery_duration_seconds", map[string]string{"result": "canceled"}); got != 5 {
 		t.Fatal(got)
 	}
@@ -191,6 +192,7 @@ func TestQualityRecoveryCrashGapIsNotRecoveryTime(t *testing.T) {
 			progress.Seq = 5
 			progress.Time = base.Add(101 * time.Second)
 			m.Observe(progress)
+			m.quality.wait()
 			if got := histogramSum(t, reg, "fw_recovery_duration_seconds", map[string]string{"result": "interrupted"}); got != 1 {
 				t.Fatalf("old incomplete attempt included crash downtime: %v", got)
 			}
@@ -245,6 +247,7 @@ func TestQualityLateBudgetAndFollowupHaveOneNextEpisode(t *testing.T) {
 	}
 	f.emit(fw.EvMessageReceived, fw.MessageReceivedData{Role: fw.RoleUser, Origin: fw.OriginHTTP})
 	f.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeCompleted})
+	m.quality.wait()
 	if got := histogramSum(t, reg, "fw_operator_interventions_per_run", map[string]string{"coverage": "complete"}); got != 3 {
 		t.Fatalf("late budget was lost or counted twice: %v", got)
 	}

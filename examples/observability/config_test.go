@@ -54,6 +54,9 @@ func TestDashboardAndAlertsParse(t *testing.T) {
 			names[r.Alert] = true
 		}
 	}
+	if !names["FwStorageBlocked"] {
+		t.Fatal("missing alert FwStorageBlocked")
+	}
 	for _, name := range []string{"FwVerifiedCompletionRateLow", "FwOperatorInterventionsHigh", "FwRecoverySlow", "FwConfirmedDuplicateEffects", "FwSuccessfulTaskCostUnknown", "FwSuccessfulTaskCostHigh"} {
 		if !names[name] {
 			t.Fatalf("missing quality alert %s", name)
