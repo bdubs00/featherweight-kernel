@@ -183,7 +183,7 @@ func (a *Agent) reportFits(ctx context.Context, rs *runState, c *cursor, b Budge
 		return "the kernel failed to build the call: " + err.Error(), false
 	}
 	rs.emitMu.Lock()
-	_, in := rs.historyLocked((len(req.System) + jsonSize(req.Tools)) / bytesPerToken)
+	_, in := rs.historyLocked((len(req.System) + len(c.context) + jsonSize(req.Tools)) / bytesPerToken)
 	rs.emitMu.Unlock()
 	out := b.reportTokens()
 	u := *rs.usage()
@@ -241,7 +241,7 @@ func (a *Agent) stepReport(ctx context.Context, rs *runState, c *cursor, n int) 
 	b := a.budgetOf(rs)
 	req.MaxTokens = b.reportTokens()
 	provider, name := SplitSelector(selector)
-	extra := (len(req.System) + jsonSize(req.Tools)) / bytesPerToken
+	extra := (len(req.System) + len(c.context) + jsonSize(req.Tools)) / bytesPerToken
 
 	rs.emitMu.Lock()
 	if r.noteSeq == 0 {
@@ -252,7 +252,7 @@ func (a *Agent) stepReport(ctx context.Context, rs *runState, c *cursor, n int) 
 		}
 	}
 	h, tokens := rs.historyLocked(extra)
-	req.Messages = a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs))
+	req.Messages = withRunContext(c.context, a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs)))
 	_, err = a.emitLocked(ctx, rs, EvModelRequested, ModelRequestedData{
 		Provider:             provider,
 		Model:                name,

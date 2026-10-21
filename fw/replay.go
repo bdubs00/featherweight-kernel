@@ -44,7 +44,7 @@ func Replay(ctx context.Context, a *Agent, src Ledger, runID string, opts ...Run
 		return nil, err
 	}
 	var queued *RunQueuedData
-	var brief, zone *string
+	var brief, runContext, zone *string
 	calls := map[string]replayCall{} // call id to tool name and canonical input
 	results := map[replayCall][]ToolResult{}
 	stray := map[string]int{} // recorded results whose call input the ledger does not hold
@@ -61,7 +61,7 @@ func Replay(ctx context.Context, a *Agent, src Ledger, runID string, opts ...Run
 		case EvRunStarted:
 			var d RunStartedData
 			if brief == nil && e.Decode(&d) == nil {
-				brief, zone = &d.Brief, &d.TimeZone
+				brief, runContext, zone = &d.Brief, &d.Context, &d.TimeZone
 			}
 		case EvModelResponded:
 			var d ModelRespondedData
@@ -119,10 +119,11 @@ func Replay(ctx context.Context, a *Agent, src Ledger, runID string, opts ...Run
 	k := a.k
 	k.mu.Lock()
 	k.overrides[req.ID] = &runOverride{
-		wrap:   rp.wrap,
-		brief:  brief,
-		zone:   zone,
-		policy: PolicyFunc(func(context.Context, ToolCall) Decision { return Decision{Verdict: VerdictAllow, Reason: "replay"} }),
+		wrap:    rp.wrap,
+		brief:   brief,
+		context: runContext,
+		zone:    zone,
+		policy:  PolicyFunc(func(context.Context, ToolCall) Decision { return Decision{Verdict: VerdictAllow, Reason: "replay"} }),
 	}
 	k.mu.Unlock()
 	r, err := a.start(ctx, req)

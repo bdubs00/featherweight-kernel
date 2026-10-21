@@ -502,6 +502,17 @@ func describe(e fw.Event) string {
 			}
 			return fmt.Sprintf("the tool %s %s %s (%d bytes)", d.Tool, d.Op, d.Path, d.Size)
 		}
+	case fw.EvMemoryChanged:
+		var d fw.MemoryChangedData
+		if e.Decode(&d) == nil {
+			switch d.Op {
+			case fw.FileRenamed:
+				return fmt.Sprintf("the tool %s renamed the note %s to %s", d.Tool, d.OldRef, d.Ref)
+			case fw.FileRemoved:
+				return fmt.Sprintf("the tool %s removed the note %s", d.Tool, d.Ref)
+			}
+			return fmt.Sprintf("the tool %s %s the note %s (%d bytes)", d.Tool, d.Op, d.Ref, d.Size)
+		}
 	case fw.EvApprovalRequested:
 		var d fw.ApprovalRequestedData
 		if e.Decode(&d) == nil {

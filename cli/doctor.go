@@ -24,6 +24,7 @@ import (
 	"github.com/bdubs00/featherweight-kernel/ax"
 	"github.com/bdubs00/featherweight-kernel/config"
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/memory"
 )
 
 // Seams for the checks that reach a provider or a server. Tests replace
@@ -93,6 +94,7 @@ func cmdDoctor(ctx context.Context, g *globals, args []string) int {
 	}
 	d.checkLedger(ctx, cfg)
 	d.checkSkills(cfg)
+	d.checkMemory(cfg)
 	if d.failed == 1 {
 		fmt.Fprintln(g.stderr, "fw doctor: 1 problem")
 		return exitFailed
@@ -760,6 +762,27 @@ func (d *doctor) checkLedger(ctx context.Context, cfg *fw.Config) {
 		return
 	}
 	d.ok("ledger: %s appends and reads", where)
+}
+
+// checkMemory reports the scope and the index of the memory (section 7.8),
+// and the notes of the default profile.
+func (d *doctor) checkMemory(cfg *fw.Config) {
+	store, err := memory.New(cfg)
+	if err != nil {
+		d.fail("memory: %v", err)
+		return
+	}
+	defer store.Close()
+	scope := cfg.Tools.Memory.Scope
+	if scope == "" {
+		scope = fw.MemoryScopeAgent
+	}
+	notes, err := store.List(context.Background(), store.Scope(fw.RunInfo{}))
+	if err != nil {
+		d.fail("memory: %v", err)
+		return
+	}
+	d.ok("memory: scope %s, index %s, %d notes of the profile default", scope, memory.IndexDriver, len(notes))
 }
 
 // checkSkills reports each skills directory. A directory that tools.skills

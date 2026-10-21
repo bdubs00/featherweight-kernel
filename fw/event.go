@@ -40,6 +40,7 @@ const (
 	EvToolResponded     = "fw.tool.responded"
 	EvToolProgress      = "fw.tool.progress"
 	EvFileChanged       = "fw.file.changed"
+	EvMemoryChanged     = "fw.memory.changed" // a tool changed a memory note; see MemoryChangedData
 	EvApprovalRequested = "fw.approval.requested"
 	EvApprovalDecided   = "fw.approval.decided"
 	EvContextCompacted  = "fw.context.compacted"
@@ -219,6 +220,9 @@ type RunStartedData struct {
 	Model string   `json:"model"`
 	Tools []string `json:"tools"`
 	Brief string   `json:"brief,omitempty"` // the sections that tools add to the system prompt (see Briefer)
+	// Context is the data that tools add to the first user message (see
+	// ContextBriefer). It is never part of the system prompt.
+	Context string `json:"context,omitempty"`
 	// TimeZone is the zone of the run for its life: the clock tool and the
 	// time notes read and write times in it (see LoadZone).
 	TimeZone string `json:"timeZone,omitempty"`

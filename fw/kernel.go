@@ -113,10 +113,11 @@ type kernel struct {
 
 // runOverride replaces the tools, the policy, and the brief of one run.
 type runOverride struct {
-	wrap   ToolMiddleware
-	policy Policy
-	brief  *string // the brief of the recorded run, for a replay
-	zone   *string // the time zone of the recorded run, for a replay
+	wrap    ToolMiddleware
+	policy  Policy
+	brief   *string // the brief of the recorded run, for a replay
+	context *string // the context of the recorded run, for a replay
+	zone    *string // the time zone of the recorded run, for a replay
 }
 
 // runState is one run in the cache. Every event of the run goes through

@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/memory"
 	"github.com/bdubs00/featherweight-kernel/surface/view"
 )
 
@@ -62,6 +63,7 @@ func NewWith(exts ...Extension) fw.Surface { return newSurface(KeepAlive, exts) 
 func newSurface(keepAlive time.Duration, exts []Extension, opts ...func(*server)) fw.Surface {
 	return fw.SurfaceFunc(func(mux *http.ServeMux, a *fw.Agent) error {
 		s := &server{a: a, keepAlive: keepAlive}
+		s.mem, s.memErr = memory.New(a.Config())
 		for _, o := range opts {
 			o(s)
 		}
@@ -74,6 +76,9 @@ type server struct {
 	keepAlive  time.Duration
 	signinPath string // set by an extension that signs a person in
 	relay      Relay  // set by an extension, see Relay
+
+	mem    *memory.Store // the memory of the agents (memory.go), nil when memErr is set
+	memErr error
 }
 
 // remote wraps the handler of a route about one run. When the relay knows
@@ -111,6 +116,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/skills", s.listSkills},
 		{"GET /v1/skills/{name}", s.getSkill},
 	}
+	routes = append(routes, s.memoryRoutes()...)
 	for _, rt := range routes {
 		mux.Handle(rt.pattern, s.protect(rt.h))
 	}

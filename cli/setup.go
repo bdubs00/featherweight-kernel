@@ -33,7 +33,7 @@ model: anthropic/claude-opus-5-5 # provider/model; the credential comes from ANT
 effort: high                     # low, medium, high, xhigh, or max
 
 tools:
-  builtin: [bash, files, http, memory, skill, clock, ask_user, spawn_task, await_task] # the built-in tools the model can call
+  builtin: [bash, files, http, memory, recall, skill, clock, ask_user, spawn_task, await_task] # the built-in tools the model can call
   files:
     root: .                      # the files tool cannot leave this directory
   http:

@@ -110,7 +110,7 @@ func (b *cursorBuilder) apply(e Event) {
 		c.started = true
 		var d RunStartedData
 		if e.Decode(&d) == nil {
-			c.brief, c.zone = d.Brief, d.TimeZone
+			c.brief, c.context, c.zone = d.Brief, d.Context, d.TimeZone
 		}
 	case EvContextCompacted:
 		c.compactSeq = e.Seq

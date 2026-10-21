@@ -367,9 +367,9 @@ func validate(c *fw.Config, servers bool) error {
 		p = append(p, fmt.Sprintf("tools.bash.timeout %s is negative", c.Tools.Bash.Timeout))
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Tools.Memory.Scope)) {
-	case "", fw.MemoryScopeAgent, fw.MemoryScopeShared:
+	case "", fw.MemoryScopeAgent, fw.MemoryScopePrincipal, fw.MemoryScopeShared:
 	default:
-		p = append(p, fmt.Sprintf("tools.memory.scope %q is not one of %s, %s", c.Tools.Memory.Scope, fw.MemoryScopeAgent, fw.MemoryScopeShared))
+		p = append(p, fmt.Sprintf("tools.memory.scope %q is not one of %s, %s, %s", c.Tools.Memory.Scope, fw.MemoryScopeAgent, fw.MemoryScopePrincipal, fw.MemoryScopeShared))
 	}
 	p = append(p, checkBudget("budget", c.Budget)...)
 	if c.Compaction.At < 0 {

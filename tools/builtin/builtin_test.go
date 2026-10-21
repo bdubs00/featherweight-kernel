@@ -67,6 +67,7 @@ func TestRegisteredSpecs(t *testing.T) {
 		"files":      {native: fw.NativeTextEditor},
 		"http":       {readOnly: true, idempotent: true, parallelOK: true},
 		"memory":     {native: fw.NativeMemory},
+		"recall":     {readOnly: true, idempotent: true, parallelOK: true},
 		"ask_user":   {readOnly: true},
 		"send":       {},
 		"spawn_task": {parallelOK: true},
@@ -115,6 +116,7 @@ func TestActionLabels(t *testing.T) {
 		"send":       "Send message",
 		"files":      "", // reads and writes
 		"memory":     "", // reads, writes, and deletes
+		"recall":     "", // reads only
 		"ask_user":   "", // a question, not an action
 		"await_task": "", // waits or lists
 		"skill":      "",

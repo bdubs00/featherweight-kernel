@@ -86,6 +86,7 @@ type cursor struct {
 	calls      map[string]*callRecord // the tool calls of resp, when it stopped for tool use
 	lastSeq    uint64
 	brief      string    // the brief of fw.run.started
+	context    string    // the context of fw.run.started (ContextBriefer)
 	compactSeq uint64    // the latest fw.context.compacted
 	toolCalls  int       // fw.tool.requested events in the run
 	keptTurns  int       // the turns that a branch kept from its source (RunQueuedData.Kept)
@@ -147,7 +148,7 @@ func analyze(events []Event) *cursor {
 			c.started = true
 			var d RunStartedData
 			if e.Decode(&d) == nil {
-				c.brief, c.zone = d.Brief, d.TimeZone
+				c.brief, c.context, c.zone = d.Brief, d.Context, d.TimeZone
 			}
 		case EvContextCompacted:
 			c.compactSeq = e.Seq
@@ -483,7 +484,13 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	if o := a.k.override(rs.id); o != nil && o.zone != nil && *o.zone != "" {
 		zone = *o.zone
 	}
-	_, err := a.emit(ctx, rs, EvRunStarted, RunStartedData{Model: a.selectorOf(c.queued, prof), Tools: names, Brief: a.brief(ctx, rs, tools), TimeZone: zone})
+	_, err := a.emit(ctx, rs, EvRunStarted, RunStartedData{
+		Model:    a.selectorOf(c.queued, prof),
+		Tools:    names,
+		Brief:    a.brief(ctx, rs, tools),
+		Context:  a.briefContext(ctx, rs, tools),
+		TimeZone: zone,
+	})
 	if err == nil {
 	}
 	return err
@@ -540,6 +547,9 @@ func (a *Agent) callRequest(ctx context.Context, rs *runState, c *cursor, prof A
 	if c.brief != "" {
 		system += "\n\n" + c.brief
 	}
+	if c.context != "" {
+		system += "\n\n" + ContextNote
+	}
 	return &Request{
 		System:    system,
 		Tools:     specs,
@@ -569,7 +579,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		return err
 	}
 	provider, name := SplitSelector(selector)
-	extra := (len(req.System) + jsonSize(req.Tools)) / bytesPerToken
+	extra := (len(req.System) + len(c.context) + jsonSize(req.Tools)) / bytesPerToken
 	if !c.turnOpen {
 		before := *rs.usage()
 		if err := a.maybeCompact(ctx, rs, model, req, extra); err != nil {
@@ -609,7 +619,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		}
 	}
 	h, tokens := rs.historyLocked(extra)
-	req.Messages = a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs))
+	req.Messages = withRunContext(c.context, a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs)))
 	_, err = a.emitLocked(ctx, rs, EvModelRequested, ModelRequestedData{
 		Provider:             provider,
 		Model:                name,
@@ -1393,6 +1403,10 @@ func (a *Agent) callTool(ctx context.Context, rs *runState, p plannedCall, input
 	})
 	tctx = WithAsker(tctx, a.asker(ctx, rs, p.use, aborted))
 	tctx = WithConnecter(tctx, a.connecter(ctx, rs, p.use, aborted))
+	tctx = WithMemoryRecorder(tctx, func(d MemoryChangedData) {
+		d.CallID, d.Tool = callID, p.use.Name
+		_, _ = a.emit(ctx, rs, EvMemoryChanged, d)
+	})
 	if a.files != nil {
 		tool := p.use.Name
 		ws, err := a.runWorkspace(a.dirOf(rs), func(d FileChangedData) {

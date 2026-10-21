@@ -21,6 +21,7 @@ import (
 
 	"github.com/bdubs00/featherweight-kernel/config"
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/memory"
 
 	// The binary embeds the zone database. The tests embed it too, so the
 	// zone names resolve on a host without zone files.
@@ -899,8 +900,8 @@ func TestDoctorAllOK(t *testing.T) {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 17 {
-		t.Errorf("%d lines, want 17:\n%s", len(lines), out)
+	if len(lines) != 18 {
+		t.Errorf("%d lines, want 18:\n%s", len(lines), out)
 	}
 	timeLine := regexp.MustCompile(`(?m)^ok    time: America/Chicago, [A-Z][a-z]+day \d{4}-\d{2}-\d{2} \d{2}:\d{2} C[SD]T, notes after 10m$`)
 	if !timeLine.MatchString(out) {
@@ -923,6 +924,7 @@ func TestDoctorAllOK(t *testing.T) {
 		"ok    ax: not under ax (no AX_TASK_YAML and no AX_METADATA_URL)",
 		"ok    ledger: file ledger " + filepath.Join(home, "runs") + " appends and reads",
 		"ok    skills: 1 in " + filepath.Join(home, "skills"),
+		"ok    memory: scope agent, index " + memory.IndexDriver + ", 0 notes of the profile default",
 	} {
 		if !strings.Contains(out, want+"\n") && !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)

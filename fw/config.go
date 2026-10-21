@@ -427,13 +427,19 @@ type CompactionConfig struct {
 
 // Scopes of the memory tool.
 const (
-	MemoryScopeAgent  = "agent"  // each agent profile has a memory directory of its own
-	MemoryScopeShared = "shared" // every agent profile uses one memory directory
+	MemoryScopeAgent     = "agent"     // each agent profile has a memory directory of its own
+	MemoryScopePrincipal = "principal" // each person has a memory directory of their own in each profile
+	MemoryScopeShared    = "shared"    // every agent profile uses one memory directory
 )
 
-// MemoryToolConfig configures the memory tool. Scope is MemoryScopeAgent or
-// MemoryScopeShared. With MemoryScopeAgent, the notes of the profile
-// "reviewer" live under $FW_HOME/memory/agents/reviewer. With
+// MemoryToolConfig configures the memory tool and the recall tool. Scope is
+// MemoryScopeAgent, MemoryScopePrincipal, or MemoryScopeShared. With
+// MemoryScopeAgent, the notes of the profile "reviewer" live under
+// $FW_HOME/memory/agents/reviewer, and every person who runs that profile
+// shares them. With MemoryScopePrincipal, the notes of one person in that
+// profile live under $FW_HOME/memory/principals/reviewer/<hash>, where the
+// hash names the subject of the person; a run without a principal, such as
+// a local run, uses the directory of MemoryScopeAgent. With
 // MemoryScopeShared, the notes of every profile live under
 // $FW_HOME/memory/shared.
 type MemoryToolConfig struct {
@@ -678,7 +684,7 @@ func DefaultConfig() *Config {
 		Ledger:  LedgerConfig{Driver: "file"},
 		Bus:     BusConfig{Driver: "mem"},
 		Tools: ToolsConfig{
-			Builtin: []string{"bash", "files", "http", "memory", "skill", "clock", "ask_user", "spawn_task", "await_task"},
+			Builtin: []string{"bash", "files", "http", "memory", "recall", "skill", "clock", "ask_user", "spawn_task", "await_task"},
 			Files: FilesToolConfig{
 				Deny:         append([]string(nil), defaultDeny...),
 				ReadOnly:     []string{".git"},

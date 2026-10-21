@@ -1,7 +1,7 @@
 // Package builtin holds the built-in tools of fw: bash, files, http,
-// memory, skill, clock, ask_user, send, spawn_task, and await_task. Each
-// tool registers itself in init through fw.RegisterTool, so a blank import
-// of this package makes them available.
+// memory, recall, skill, clock, ask_user, send, spawn_task, and await_task.
+// Each tool registers itself in init through fw.RegisterTool, so a blank
+// import of this package makes them available.
 //
 // A tool returns an error result, which the model reads, for every problem
 // that the model can fix. Call returns a Go error only when the context ends.
@@ -32,6 +32,7 @@ var titles = map[string]string{
 	"files":      "Read and change files in the workspace",
 	"http":       "Fetch web addresses on its allowlist",
 	"memory":     "Keep notes between runs",
+	"recall":     "Search its memory",
 	"skill":      "Read its skills",
 	"clock":      "Read the time",
 	"ask_user":   "Ask you questions",
