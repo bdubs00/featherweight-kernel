@@ -124,7 +124,7 @@ func (a *accumulator) readSSE(r io.Reader) error {
 		line, err := br.ReadString('\n')
 		line = strings.TrimRight(line, "\r\n")
 		switch {
-		case line == "":
+		case line == "" && err == nil:
 			if len(data) > 0 {
 				stop, derr := a.event(strings.Join(data, "\n"))
 				data = data[:0]
@@ -145,12 +145,20 @@ func (a *accumulator) readSSE(r io.Reader) error {
 		}
 	}
 	if len(data) > 0 {
-		if _, err := a.event(strings.Join(data, "\n")); err != nil {
+		payload := strings.Join(data, "\n")
+		// The end of the body does not end an event. JSON that the end
+		// of the body cut is a cut stream. Malformed JSON in an event
+		// that the server ended with a blank line is not.
+		var c chunk
+		if err := json.NewDecoder(strings.NewReader(payload)).Decode(&c); errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("decode unfinished chunk: %w", err)
+		}
+		if _, err := a.event(payload); err != nil {
 			return err
 		}
 	}
 	if !a.done {
-		return errors.New("the stream ended before a finish reason")
+		return fmt.Errorf("the stream ended before a finish reason: %w", io.ErrUnexpectedEOF)
 	}
 	return nil
 }

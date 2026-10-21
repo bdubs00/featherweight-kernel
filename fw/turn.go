@@ -34,6 +34,11 @@ const (
 // answerSchema is the form of a free-text question.
 const answerSchema = `{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`
 
+// modelStreamRetryWait is the pause before the one retry of a model
+// response that the network cut. The context of the call bounds both calls
+// and the pause.
+const modelStreamRetryWait = 500 * time.Millisecond
+
 // maxLoopPeriod is the longest cycle of tool calls that the loop guard
 // detects: a call, a pair, or a triple that comes back in the same order.
 const maxLoopPeriod = 3
@@ -538,8 +543,9 @@ func (a *Agent) callRequest(ctx context.Context, rs *runState, c *cursor, prof A
 }
 
 // stepModel checks the budget, compacts the history when it is too long,
-// and calls the model once. A call that is in flight when the working time
-// reaches the deadline ends at the deadline.
+// and calls the model. It calls once more when the network cut the
+// response (StreamInterruptedError). A call that is in flight when the
+// working time reaches the deadline ends at the deadline.
 func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
 	if o, over := a.overBudget(rs, c); over {
@@ -610,6 +616,26 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	mctx, cut := a.deadlineCut(ctx, rs)
 	start := time.Now()
 	resp, err := model.Stream(mctx, req, func(Delta) {})
+	var interrupted *StreamInterruptedError
+	if mctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && errors.As(err, &interrupted) {
+		// No delta leaves this call, and the cut response is never
+		// recorded. The same request goes again in the same turn.
+		if _, e := a.emit(ctx, rs, EvError, ErrorData{Message: "model: " + err.Error() + " (retrying the interrupted response)", Retryable: true}); e != nil {
+			cut()
+			return e
+		}
+		resp = nil
+		timer := time.NewTimer(modelStreamRetryWait)
+		select {
+		case <-mctx.Done():
+			timer.Stop()
+			err = mctx.Err()
+		case <-timer.C:
+			if err = mctx.Err(); err == nil {
+				resp, err = model.Stream(mctx, req, func(Delta) {})
+			}
+		}
+	}
 	latency := time.Since(start).Milliseconds()
 	if cut() && err != nil && ctx.Err() == nil {
 		// The working time reached the deadline while the call was in

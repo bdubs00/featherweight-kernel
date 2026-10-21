@@ -145,8 +145,10 @@
 // Retry-After names or an exponential backoff. A connection error before any
 // byte of the answer arrived, such as a refused connection, a reset, or an
 // early EOF, is retried the same way, because the request had no effect
-// yet. A call is never retried once the stream started. A response larger
-// than 16 MB is an error.
+// yet. The adapter never retries once the stream started. It marks a
+// stream that the network cut with fw.StreamInterruptedError, so the kernel
+// can call once more without a record of the cut response. A response
+// larger than 16 MB is an error.
 //
 // A 404 that names an unknown model lists the models that the server serves
 // in the error. The Models method returns the same list for a doctor
@@ -696,7 +698,11 @@ func (m *Model) Stream(ctx context.Context, req *fw.Request, on func(fw.Delta)) 
 		err = acc.readSSE(rd)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("openai: stream %s: %w", m.model, m.explain(call, err))
+		err = m.explain(call, err)
+		if call.Err() == nil && interruptedStream(err) {
+			err = &fw.StreamInterruptedError{Err: err}
+		}
+		return nil, fmt.Errorf("openai: stream %s: %w", m.model, err)
 	}
 	out, err := acc.response(m.model)
 	if out != nil && !acc.first.IsZero() {

@@ -19,6 +19,23 @@ type Ledger interface {
 	Runs(ctx context.Context) iter.Seq2[string, error]
 }
 
+// EgressCursors is an optional capability of a Ledger. It makes the bus
+// egress survive a restart (docs/ARCHITECTURE.md section 9.4). A cursor is
+// the last sequence number of a run that the egress of one route handled:
+// the bus confirmed the event, or the filter skipped it. The route is an
+// opaque name for the prefix, the atespace, and the filter. A missing
+// cursor is zero. A load returns zero when the cursor no longer matches
+// the ledger, for example after a recovery cut the run. A save makes the
+// events up to seq durable before the cursor, and reports success only
+// when the cursor is durable. A failed save can make the egress send
+// events again, but it must never skip an event that the bus did not
+// confirm. The egress of a ledger without this capability keeps the
+// events in memory only.
+type EgressCursors interface {
+	LoadEgressCursor(ctx context.Context, route, runID string) (uint64, error)
+	SaveEgressCursor(ctx context.Context, route, runID string, seq uint64) error
+}
+
 // Observer receives every event once, in order, after the ledger stored it.
 // An observer must not block for long and must not write to the ledger.
 type Observer interface {

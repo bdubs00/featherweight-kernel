@@ -16,6 +16,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -367,6 +368,14 @@ func retryableNetErr(err error) bool {
 	// The server closed a kept-alive connection as the request went out.
 	// net/http retries that for idempotent requests only.
 	return strings.Contains(err.Error(), "server closed idle connection")
+}
+
+// interruptedStream reports whether an error of a started stream is a cut:
+// an EOF, an unexpected EOF, or a reset. A stall, malformed data, an error
+// from the server, and a canceled call are not. Unlike retryableNetErr, it
+// covers only a stream whose headers already arrived.
+func interruptedStream(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
 // parseRetryAfter reads a Retry-After value in seconds or as an HTTP date.
