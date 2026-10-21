@@ -42,6 +42,10 @@ type ToolResult struct {
 	Content    []Block         `json:"content"`
 	IsError    bool            `json:"isError,omitempty"`
 	Structured json.RawMessage `json:"structured,omitempty"`
+	// ExitCode is the exit code of the command of a tool that runs one,
+	// such as bash, and nil for other tools. fw.tool.responded records it,
+	// because a non-zero exit code is a normal result, not IsError.
+	ExitCode *int `json:"exitCode,omitempty"`
 }
 
 // TextResult returns a text result.

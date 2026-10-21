@@ -98,6 +98,9 @@ type redactor struct {
 	// resolved holds the values that fw resolved through Secrets, a subset
 	// of values. ToolEnv keeps them from a tool under any name.
 	resolved []string
+	// own holds the values that a package added with Agent.AddSecret, a
+	// subset of values, which Agent.RemoveSecret can take out again.
+	own []string
 }
 
 // newRedactor returns a redactor that knows the secret values of the
@@ -139,6 +142,33 @@ func (r *redactor) addResolved(v string) {
 	if !slices.Contains(r.resolved, v) {
 		r.resolved = append(r.resolved, v)
 	}
+}
+
+// addOwn records a secret value of a package (Agent.AddSecret).
+func (r *redactor) addOwn(v string) {
+	r.add(v)
+	v = strings.TrimSpace(v)
+	if len(v) < minSecretLen {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !slices.Contains(r.own, v) {
+		r.own = append(r.own, v)
+	}
+}
+
+// removeOwn takes out a value that addOwn recorded, unless fw also
+// resolved it through Secrets.
+func (r *redactor) removeOwn(v string) {
+	v = strings.TrimSpace(v)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !slices.Contains(r.own, v) || slices.Contains(r.resolved, v) {
+		return
+	}
+	r.own = slices.DeleteFunc(r.own, func(x string) bool { return x == v })
+	r.values = slices.DeleteFunc(r.values, func(x string) bool { return x == v })
 }
 
 // hasSecret reports whether s holds a secret: a value that the redactor
@@ -374,3 +404,16 @@ func (s recordSecrets) Get(ctx context.Context, name string) (string, error) {
 // Redact returns s with every secret that the agent knows replaced, as the
 // kernel does for each ledger event. Use it before text goes to a log line.
 func (a *Agent) Redact(s string) string { return a.redact.text(s) }
+
+// AddSecret makes the agent replace v in every later ledger event and in
+// Redact. A package that makes a secret of its own, such as the password
+// of a process that it starts, adds it before the secret can reach an
+// event or a log line. A value shorter than 8 bytes is left out, because
+// it matches too much text.
+func (a *Agent) AddSecret(v string) { a.redact.addOwn(v) }
+
+// RemoveSecret takes out a value that AddSecret added, once it is no
+// longer a secret, such as the secret of a process that ended, so the
+// values of the redactor do not grow without end. A value that fw resolved
+// through Secrets stays.
+func (a *Agent) RemoveSecret(v string) { a.redact.removeOwn(v) }

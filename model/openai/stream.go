@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
@@ -102,6 +103,7 @@ type accumulator struct {
 	finish string
 	done   bool // the stream sent [DONE] or a finish reason
 	usage  fw.Usage
+	first  time.Time // when the first event of the answer arrived
 }
 
 type callState struct {
@@ -159,6 +161,9 @@ func (a *accumulator) event(data string) (bool, error) {
 	if data == "" {
 		return false, nil
 	}
+	if a.first.IsZero() {
+		a.first = time.Now()
+	}
 	if data == "[DONE]" {
 		a.done = true
 		return true, nil
@@ -172,6 +177,7 @@ func (a *accumulator) event(data string) (bool, error) {
 
 // readJSON reads one completion that did not stream.
 func (a *accumulator) readJSON(r io.Reader) error {
+	a.first = time.Now() // the answer arrives in one piece with its headers
 	var c chunk
 	if err := json.NewDecoder(r).Decode(&c); err != nil {
 		return fmt.Errorf("decode completion: %w", err)

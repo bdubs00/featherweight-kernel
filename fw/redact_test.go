@@ -29,6 +29,22 @@ func TestRedactorValuesFromEnvironment(t *testing.T) {
 	}
 }
 
+// TestAgentAddSecret adds a secret of a package and takes it out again. A
+// value of the environment stays when a package removes it.
+func TestAgentAddSecret(t *testing.T) {
+	a := &Agent{redact: newRedactor([]string{"DB_PASSWORD=hunter2hunter2"})}
+	a.AddSecret("proc-secret-0123456789")
+	a.AddSecret("short")
+	if got := a.Redact("a proc-secret-0123456789 b short"); got != "a [redacted] b short" {
+		t.Fatalf("after AddSecret: %q", got)
+	}
+	a.RemoveSecret("proc-secret-0123456789")
+	a.RemoveSecret("hunter2hunter2")
+	if got := a.Redact("a proc-secret-0123456789 b hunter2hunter2"); got != "a proc-secret-0123456789 b [redacted]" {
+		t.Fatalf("after RemoveSecret: %q", got)
+	}
+}
+
 func TestRedactorShapes(t *testing.T) {
 	r := newRedactor(nil)
 	cases := []struct{ in, want string }{

@@ -454,6 +454,7 @@ func TestLimitTools(t *testing.T) {
 	tctx := testCtx(t)
 	s := newScript(callTools(use("c1", "big", `{}`)), endTurn("done"))
 	cfg := DefaultConfig()
+	cfg.Tools.Files.Root = t.TempDir() // the cut result keeps its full text in a file there
 	cfg.Tools.Limits = ToolLimits{Limit: Limit{MaxOutputBytes: 100}}
 	a := newTestAgent(t, s.Model(), WithConfig(cfg), WithTools(big))
 	r, err := a.Run(tctx, "go")

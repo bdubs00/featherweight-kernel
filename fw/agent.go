@@ -25,6 +25,7 @@ var ErrRunNotFound = errors.New("fw: run not found")
 
 // Agent is a configured featherweight agent. Build one with New.
 type Agent struct {
+	holds     atomic.Int32 // open holds of background work (Hold)
 	cfg       *Config
 	log       *slog.Logger
 	model     Model
@@ -73,6 +74,7 @@ type Agent struct {
 
 	modelsMu sync.Mutex
 	models   map[string]Model
+	slots    map[string]chan struct{} // the model slots of each provider with maxConcurrent
 
 	zoneMu sync.Mutex
 	zones  map[string]zoneEntry // time zones by name, see clock.go
@@ -80,6 +82,7 @@ type Agent struct {
 	decisionPoints []external // policy.external and the points of linked packages, see external.go
 
 	services   []io.Closer // what stops the services, see service.go
+	runner     Runner      // drives the runs in place of the turn loop, see runner.go
 	accessMode string      // AccessModeRules, AccessModeExternal, or AccessModeCustom
 
 	k *kernel // runtime state, see kernel.go
@@ -155,6 +158,7 @@ func New(opts ...Option) (*Agent, error) {
 		observers:  o.observers,
 		annotators: o.annotators,
 		models:     map[string]Model{},
+		slots:      modelSlots(cfg),
 		noResume:   o.noResume,
 	}
 	a.followEvery, a.recordEvery, a.giveUp = defaultFollowEvery, defaultRecordEvery, followGiveUp
@@ -254,7 +258,7 @@ func New(opts ...Option) (*Agent, error) {
 		}
 	}
 	if o.model != nil {
-		a.model = a.wrapModel(o.model)
+		a.model = a.wrapModel(limitModel(a.slots, cfg.Model, o.model))
 	} else if cfg.Model == "" {
 		// No default model. The process serves, and a run request fails with
 		// ErrNoModel unless its profile names a model.
@@ -267,7 +271,7 @@ func New(opts ...Option) (*Agent, error) {
 		if err != nil {
 			a.log.Warn("default model not available yet", "model", cfg.Model, "error", err)
 		} else {
-			a.model = a.wrapModel(m)
+			a.model = a.wrapModel(limitModel(a.slots, cfg.Model, m))
 		}
 	}
 	if a.model != nil {
@@ -316,6 +320,14 @@ func New(opts ...Option) (*Agent, error) {
 	a.spawner = o.spawner
 	if a.spawner == nil && !o.noDefaults {
 		if a.spawner, err = newSpawner(ctx, cfg); err != nil {
+			return nil, err
+		}
+	}
+	// The runner exists before the kernel resumes the runs of the ledger,
+	// so a resumed run goes to it.
+	a.runner = o.runner
+	if a.runner == nil && !o.noDefaults {
+		if a.runner, err = newRunner(ctx, a); err != nil {
 			return nil, err
 		}
 	}
@@ -419,7 +431,7 @@ func (a *Agent) openModel(ctx context.Context, selector string) (Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	m = a.wrapModel(m)
+	m = a.wrapModel(limitModel(a.slots, selector, m))
 	a.models[selector] = m
 	return m, nil
 }
@@ -682,3 +694,17 @@ func (a *Agent) closeResources() {
 		}
 	}
 }
+
+// Hold marks the process as busy with background work, such as the install
+// of an environment, until the returned function is called. The status of
+// the process is not idle while a hold is open, so a controller does not
+// put the process to sleep in the middle of the work (StatusOf in
+// surface/view). The function can be called more than once.
+func (a *Agent) Hold() (release func()) {
+	a.holds.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { a.holds.Add(-1) }) }
+}
+
+// Holds counts the open holds of background work.
+func (a *Agent) Holds() int { return int(a.holds.Load()) }

@@ -646,14 +646,16 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		name = resp.Model
 	}
 	_, err = a.emit(ctx, rs, EvModelResponded, ModelRespondedData{
-		Content:    validJSONBlocks(resp.Content),
-		Raw:        validJSON(resp.Raw),
-		StopReason: resp.StopReason,
-		StopDetail: resp.StopDetail,
-		Usage:      resp.Usage,
-		LatencyMS:  latency,
-		Provider:   provider,
-		Model:      name,
+		Content:     validJSONBlocks(resp.Content),
+		Raw:         validJSON(resp.Raw),
+		StopReason:  resp.StopReason,
+		StopDetail:  resp.StopDetail,
+		Usage:       resp.Usage,
+		LatencyMS:   latency,
+		FirstByteMS: resp.FirstByteMS,
+		QueuedMS:    resp.QueuedMS,
+		Provider:    provider,
+		Model:       name,
 	})
 	return err
 }
@@ -702,6 +704,10 @@ func (a *Agent) stepResponse(ctx context.Context, rs *runState, c *cursor, n int
 // that the model has not seen. Then the next step starts a new turn. The
 // check and the events are one step, so no message is lost.
 func (a *Agent) endTurn(ctx context.Context, rs *runState, c *cursor, n int) error {
+	// A run with an outcome has its answer graded first (outcome.go).
+	if graded, err := a.gradeOutcome(ctx, rs, c, n); graded || err != nil {
+		return err
+	}
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
 	fresh := c.unseen
@@ -1263,7 +1269,7 @@ func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall)
 			outs[i] = callOutcome{res: p.result}
 			continue
 		}
-		if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input, Idempotent: p.spec.Idempotent}); err != nil {
+		if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input, Idempotent: p.spec.Idempotent, Source: p.spec.Source}); err != nil {
 			wg.Wait()
 			return err
 		}
@@ -1294,6 +1300,7 @@ func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall)
 			Tool:      p.use.Name,
 			Content:   validJSONBlocks(content),
 			IsError:   res.IsError,
+			ExitCode:  res.ExitCode,
 			LatencyMS: outs[i].ms,
 		}); err != nil {
 			return err

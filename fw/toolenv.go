@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // HideEnv is the variable that names more variables, with commas between
@@ -131,4 +132,63 @@ func toolSecretNames(env map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// A ToolEnvHook changes the environment of a tool process for a linked
+// package, such as the package environment of section 18. It gets the
+// environment that the tool built, normally from ToolEnv, and returns it
+// with its changes, such as a directory in front of PATH. A hook can wait,
+// bounded by ctx, for example until the packages are installed. An error
+// keeps the tool process from starting, and the tool returns it as its
+// result. A hook must not add a secret. The context carries the agent
+// (AgentFrom) and the run (RunInfoFrom) when a run starts the process. A
+// nil cfg means a tool without a configuration.
+type ToolEnvHook func(ctx context.Context, cfg *Config, env []string) ([]string, error)
+
+var toolEnvHooks struct {
+	mu   sync.RWMutex
+	list []ToolEnvHook
+}
+
+// RegisterToolEnv adds a hook that ExtendToolEnv applies to the
+// environment of every tool process. A package calls it in init.
+func RegisterToolEnv(h ToolEnvHook) {
+	toolEnvHooks.mu.Lock()
+	defer toolEnvHooks.mu.Unlock()
+	toolEnvHooks.list = append(toolEnvHooks.list, h)
+}
+
+// ExtendToolEnv applies the registered hooks to env, in the order of
+// registration, and returns the result. A tool that starts a process, such
+// as the shell of bash or a stdio MCP server, calls it after ToolEnv. The
+// first hook that fails stops it with its error.
+func ExtendToolEnv(ctx context.Context, cfg *Config, env []string) ([]string, error) {
+	toolEnvHooks.mu.RLock()
+	hooks := slices.Clone(toolEnvHooks.list)
+	toolEnvHooks.mu.RUnlock()
+	for _, h := range hooks {
+		next, err := h(ctx, cfg, env)
+		if err != nil {
+			return nil, err
+		}
+		env = next
+	}
+	return env, nil
+}
+
+// toolEnvNoWaitKey marks a context whose tool environment hooks must not
+// wait for anything.
+type toolEnvNoWaitKey struct{}
+
+// WithToolEnvNoWait marks ctx so that a tool environment hook applies its
+// variables and never waits, for a process that starts outside a tool
+// call of a run, such as an MCP server that the tool list starts.
+func WithToolEnvNoWait(ctx context.Context) context.Context {
+	return context.WithValue(ctx, toolEnvNoWaitKey{}, true)
+}
+
+// ToolEnvNoWait reports whether ctx carries WithToolEnvNoWait.
+func ToolEnvNoWait(ctx context.Context) bool {
+	v, _ := ctx.Value(toolEnvNoWaitKey{}).(bool)
+	return v
 }

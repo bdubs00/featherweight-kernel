@@ -10,6 +10,7 @@ import (
 type Option func(*options)
 
 type options struct {
+	runner     Runner
 	cfg        *Config
 	configPath string
 	model      Model
@@ -50,6 +51,10 @@ type options struct {
 // WithSpawner runs the children of spawn_task through s, in place of the
 // driver that spawn.driver names or the children in this process.
 func WithSpawner(s Spawner) Option { return func(o *options) { o.spawner = s } }
+
+// WithRunner drives the runs of the agent through r, in place of the
+// registered runners and of the turn loop (see Runner).
+func WithRunner(r Runner) Option { return func(o *options) { o.runner = r } }
 
 func WithServices(s ...Service) Option {
 	return func(o *options) { o.services = append(o.services, s...) }

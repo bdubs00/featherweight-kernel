@@ -899,8 +899,8 @@ func TestDoctorAllOK(t *testing.T) {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 16 {
-		t.Errorf("%d lines, want 16:\n%s", len(lines), out)
+	if len(lines) != 17 {
+		t.Errorf("%d lines, want 17:\n%s", len(lines), out)
 	}
 	timeLine := regexp.MustCompile(`(?m)^ok    time: America/Chicago, [A-Z][a-z]+day \d{4}-\d{2}-\d{2} \d{2}:\d{2} C[SD]T, notes after 10m$`)
 	if !timeLine.MatchString(out) {
@@ -920,6 +920,7 @@ func TestDoctorAllOK(t *testing.T) {
 		"ok    tokens: off; set tokens.url (FW_TOKENS_URL) to get the tokens of people from a broker",
 		"ok    telemetry: no OTLP export; set OTEL_EXPORTER_OTLP_ENDPOINT to push the metrics, the logs, and the traces to a collector",
 		"ok    bus: mem opens",
+		"ok    ax: not under ax (no AX_TASK_YAML and no AX_METADATA_URL)",
 		"ok    ledger: file ledger " + filepath.Join(home, "runs") + " appends and reads",
 		"ok    skills: 1 in " + filepath.Join(home, "skills"),
 	} {

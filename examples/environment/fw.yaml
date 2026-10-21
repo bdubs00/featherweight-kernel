@@ -1,0 +1,8 @@
+# The block environment of the example (docs/ARCHITECTURE.md section 18).
+# Under ax the environment goes to /workspace/.environment; with fw run on a
+# laptop it goes to ./.environment.
+environment:
+  python: pyproject.toml
+  tools: pixi.toml
+  prepare:
+    - jq --version

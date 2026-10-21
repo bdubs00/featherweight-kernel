@@ -141,8 +141,11 @@ var otherEnvNames = []string{
 
 // cmdEnv prints every configuration variable, one per line, with "=" and
 // its value when it is set. A secret value is masked.
-func cmdEnv(_ context.Context, g *globals, args []string) int {
-	fs := g.newFlagSet("env", "")
+func cmdEnv(ctx context.Context, g *globals, args []string) int {
+	if len(args) > 0 && args[0] == "dockerfile" {
+		return cmdEnvDockerfile(ctx, g, args[1:])
+	}
+	fs := g.newFlagSet("env", "[dockerfile]")
 	onlySet := fs.Bool("set", false, "print only the variables that are set")
 	if _, err := parseArgs(fs, args); err != nil {
 		return flagExit(err)

@@ -219,7 +219,7 @@ func loadProfiles(cfg *fw.Config, configDir string, lookup lookupFunc) error {
 // relative to each non-empty directory in order and then as given. A value
 // that names no file is the prompt text itself.
 func resolvePrompt(s string, dirs ...string) (string, error) {
-	if s == "" || len(s) > maxSystemPath || strings.ContainsAny(s, "\n\r") {
+	if s == "" || len(s) > maxSystemPath || strings.ContainsAny(s, "\n\r") || !promptFile(s) {
 		return s, nil
 	}
 	var candidates []string
@@ -237,13 +237,44 @@ func resolvePrompt(s string, dirs ...string) (string, error) {
 		if !isFile(c) {
 			continue
 		}
-		b, err := os.ReadFile(c)
+		// The check of the path runs on the file itself, not on a link
+		// to it, so a link notes.md to /proc/self/environ reads nothing.
+		real, err := filepath.EvalSymlinks(c)
+		if err != nil || !promptPath(real) {
+			return s, nil
+		}
+		b, err := os.ReadFile(real)
 		if err != nil {
 			return "", err
 		}
 		return string(b), nil
 	}
 	return s, nil
+}
+
+// promptFile reports whether s can name a prompt file: a path that ends
+// in .md or .txt, outside /proc, /sys, and /dev. Any other value is the
+// prompt text itself, so a profile that reaches the process through the
+// API or a rendered workspace cannot read a file of the process, such as
+// /proc/self/environ, into its prompt.
+func promptFile(s string) bool {
+	switch strings.ToLower(filepath.Ext(s)) {
+	case ".md", ".txt":
+	default:
+		return false
+	}
+	return promptPath(s)
+}
+
+// promptPath reports whether a path is outside /proc, /sys, and /dev.
+func promptPath(s string) bool {
+	clean := filepath.Clean(s)
+	for _, p := range []string{"/proc/", "/sys/", "/dev/"} {
+		if strings.HasPrefix(clean, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // The allowed values of the enumerated keys.
@@ -320,6 +351,9 @@ func validate(c *fw.Config, servers bool) error {
 		}
 		if c.Providers[name].Timeout < 0 {
 			p = append(p, fmt.Sprintf("providers.%s.timeout %s is negative", name, c.Providers[name].Timeout))
+		}
+		if c.Providers[name].MaxConcurrent < 0 {
+			p = append(p, fmt.Sprintf("providers.%s.maxConcurrent %d is negative", name, c.Providers[name].MaxConcurrent))
 		}
 	}
 	p = append(p, checkLimit("tools.limits", c.Tools.Limits.Limit)...)
@@ -414,6 +448,9 @@ func profileProblems(c *fw.Config, name string, prof fw.AgentProfile) []string {
 	}
 	if prof.Budget != nil {
 		p = append(p, checkBudget(key+".budget", *prof.Budget)...)
+	}
+	if err := fw.CheckOutcome(c, prof.Outcome); err != nil {
+		p = append(p, key+"."+strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
 	}
 	if prof.Access != nil {
 		p = append(p, checkEntries(key+".access.owners", prof.Access.Owners)...)

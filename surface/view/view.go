@@ -474,6 +474,9 @@ func describe(e fw.Event) string {
 			if d.IsError {
 				return "the tool " + tool + " failed: " + oneLine(fw.TextOf(d.Content), 120)
 			}
+			if d.ExitCode != nil && *d.ExitCode != 0 {
+				return fmt.Sprintf("the tool %s exited %d in %d ms", tool, *d.ExitCode, d.LatencyMS)
+			}
 			return fmt.Sprintf("the tool %s answered in %d ms", tool, d.LatencyMS)
 		}
 	case fw.EvToolProgress:
@@ -564,6 +567,20 @@ func describe(e fw.Event) string {
 			s := "budget changed: " + fw.BudgetText(d.Budget)
 			if d.By != "" {
 				s += " by " + d.By
+			}
+			return s
+		}
+	case fw.EvOutcomeEvaluated:
+		var d fw.OutcomeEvaluatedData
+		if e.Decode(&d) == nil {
+			s := fmt.Sprintf("graded %s in pass %d of %d", d.Verdict, d.Iteration, d.Iterations)
+			if d.Continue {
+				s += "; the run revises its answer"
+			}
+			if t := oneLine(d.Notes, 120); t != "" {
+				s += ": " + t
+			} else if d.Reason != "" {
+				s += " (" + oneLine(d.Reason, 120) + ")"
 			}
 			return s
 		}

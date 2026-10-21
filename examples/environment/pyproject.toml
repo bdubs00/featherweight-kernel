@@ -1,0 +1,10 @@
+# The Python packages of the example agent. uv installs them into
+# environment.dir/venv with uv sync --frozen.
+[project]
+name = "example-environment"
+version = "0.1.0"
+description = "The Python packages of the example agent."
+requires-python = ">=3.12"
+dependencies = [
+    "pyyaml>=6.0",
+]

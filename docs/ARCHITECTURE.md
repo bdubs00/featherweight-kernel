@@ -93,6 +93,9 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.run.suspended` | reason, totals (the usage of the run so far, section 8.2) |
 | `fw.run.resumed` | from seq |
 | `fw.run.finished` | outcome (`completed`, `failed`, `canceled`), output, error, totals (the usage of the run so far, section 8.2) |
+| `fw.outcome.evaluated` | verdict (`satisfied`, `needs_revision`, `max_iterations`, `unparsed`, `skipped`), notes, iteration, iterations, the grader run, whether the loop continues, reason (section 20) |
+| `fw.harness.event` | kind and a compact payload of one event of a hosted harness, with the markers of its session (section 19) |
+| `fw.env.ready`, `fw.env.failed`, `fw.env.changed` | the state of the environment of the durable volume: the digest, the versions, the time, or the failed step and its output. These belong to the agent, not to a run, so they go to the bus subject `fw.environment` and to the log, not to a ledger (section 18) |
 
 The raw provider blocks in `fw.model.responded` are stored unchanged. They include thinking blocks. The kernel sends them back to the same provider on the next turn, because the provider requires the blocks it produced.
 
@@ -338,8 +341,11 @@ Each provider has a connection block under `providers.<name>` in `fw.yaml`, and 
 | `apiKeyEnv` | The secret that holds the API key, for a key under another name than the default |
 | `headers` | Extra headers on every request. A value that names a secret is replaced by the secret. |
 | `timeout` | The limit of one call, retries included. |
+| `maxConcurrent` | The most model calls of this process to the provider at the same time, for a server with few slots. A call waits for a free slot. `0`, the default, means no limit. |
 | `tls` | A CA bundle, a client certificate and key, or `insecure` for development. |
 | `options` | Options that one adapter reads. Section 6.6 lists the OpenAI options. |
+
+`fw.model.responded` records the time of each call in three fields. `latencyMs` is the whole call. `queuedMs` is the wait for a slot of `maxConcurrent`. `ttfbMs` is the time from the start of the call at the provider to the first streamed event of the answer. The OpenAI adapter measures it, and the other adapters leave it out. A long `ttfbMs` is a wait for the server, such as a queue at a model slot or a long prompt. The time after it is the work of the model.
 
 ### 6.3 Anthropic adapter settings
 
@@ -379,7 +385,7 @@ The adapter speaks the chat completions API over `net/http` with no SDK, so one 
 
 | Option | Values | Default |
 |---|---|---|
-| `reasoning` | `auto`, `on`, `off`: send the effort as `reasoning_effort` | `auto`: on for o-series and GPT-5 names |
+| `reasoning` | `auto`, `on`, `off`: send the effort as `reasoning_effort` | `auto`: on for o-series and GPT-5 names. For another model on a server that is not OpenAI or Azure OpenAI, such as vLLM, llama.cpp, or Strata, `auto` sends an effort of the configuration or the profile other than `high`, the default, and keeps `max_tokens`. |
 | `maxTokensField` | `auto`, `max_tokens`, `max_completion_tokens` | `auto`: follows `reasoning` |
 | `authHeader` | A header name. `Authorization` sends a Bearer token. Any other name sends the bare key, which Azure wants in `api-key`. | `Authorization` |
 | `organization`, `project` | The `OpenAI-Organization` and `OpenAI-Project` headers | `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID` |
@@ -438,6 +444,8 @@ type ToolSource interface {
 
 The workbench adds the built-in tool `propose_agent` (the workbench architecture, section 6.4).
 
+`bash` answers a non-zero exit code with a normal result, not an error result. `fw.tool.responded` records the exit code in the field `exitCode`, which a tool sets through `ToolResult.ExitCode`, and the event line reads "the tool bash exited 1 in 6952 ms".
+
 Four built-in tools set `Action`:
 
 | Tool | Action |
@@ -452,6 +460,8 @@ The other built-in tools have no label. `files` and `memory` read, write, and de
 The `files` tool never opens a path under the paths that `Config.Reserved` lists: the home directory of `fw`, the directory of the file ledger, and the configuration file. The check uses the real path, after symbolic links. A change there changes what `fw` allows at its next start. For example, a profile file under `$FW_HOME/agents` can grant its agent access and read secrets from the environment through `${VAR}`. Every other path under the root needs no approval, except the paths that the rules of the workspace refuse (section 7.9).
 
 When the provider is Anthropic, `bash`, `files`, and `memory` use the Anthropic-defined tool shapes `bash_20250124`, `text_editor_20250728`, and `memory_20250818`. Other providers get the same tools with a plain JSON schema. Each profile lists the tools that it allows. The `bash` shell gets the environment of a tool process (section 7.12): no manifest of ax, no credential of `fw`, and no variable that holds a secret. It starts with `FW_HOME` and with the variables of `tools.bash.env`. A script inside the sandbox therefore reads an endpoint from its environment instead of from a literal in a prompt. `tools.bash.timeout` bounds one command, 120 seconds by default. A tool that implements `io.Closer` is closed at shutdown, which ends the shell. The `bash` tool keeps one shell per run: the working directory, the variables, and the background jobs of one run never reach another run or another person, and the kernel closes the shell when the run ends, through the interface `fw.RunCloser`, which any tool with state per run can implement.
+
+Each `bash` command starts with `set -e`, `set -u`, and `pipefail` off. A failure under a `set -e` of the command ends the command with its exit code and keeps the shell, its directory, and its variables.
 
 ### 7.3 MCP client over HTTP and HTTPS
 
@@ -553,10 +563,12 @@ Every tool call goes through the limits middleware, `fw.LimitTools`. The configu
 | Limit | Default | Effect |
 |---|---|---|
 | `maxInputBytes` | 256 KB | A larger input does not run. The model reads an error that names the limit. |
-| `maxOutputBytes` | 100 KB | A larger result keeps its head and its tail. A note at the cut says how many bytes are gone. |
+| `maxOutputBytes` | 100 KB | A larger result keeps its head and its tail. A note at the cut says how many bytes are gone, and in a run it names the file with the full text. |
 | `timeout` | 10m | A call that runs longer gets an error result and its context ends |
 
 The limits apply to the built-in tools, to MCP tools, to A2A peers, and to tools passed as Go options alike. The reason is that the middleware wraps every tool outermost. The kernel records the bounded result in the ledger, so the history that the next model call sends is bounded too. An image or a document in a result counts with its size. If it does not fit, the kernel drops it with a note. The cut keeps two thirds of the room for the head and one third for the tail. The start of a listing and the end of a log therefore both survive.
+
+In a run, the kernel also writes the full text of a cut result to `.fw-tool/<call id>.txt` in the directory of the run, with every secret replaced as in the ledger, and records `fw.file.changed` for it. The note at the cut names the file and its size, so the model reads the part that it needs with the `files` tool and a line range. One careless command then costs the context window only the limit, and a lower limit, such as 16 KB for a local model, loses nothing. The `bash` tool keeps up to 1 MiB of the head of each stream and 32 KB of its tail when this limit applies to it, so the file holds the whole output of most commands. Without the limit, `bash` keeps 100 KB of the head and the tail itself. Without `tools.files.perRun`, the directory of the run is the root of the workspace, so a git checkout there wants `.fw-tool/` in its `.gitignore`.
 
 ### 7.8 Memory
 
@@ -1146,6 +1158,8 @@ The directory [examples/observability](../examples/observability/README.md) hold
 
 The `trace` projection emits OpenTelemetry spans. A run is one span. Each turn is a child span, and each model call and tool call is a child of its turn. The service `Export` of the package `telemetry` starts the projection when a collector is named (section 10.5). The exporter is OTLP, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` variable. The `traceparent` value travels in every ledger event, in every bus message, in the `spawn_task` environment, and in outbound A2A and MCP requests.
 
+The spans carry the attributes of the OpenTelemetry GenAI agent conventions, so a trace store that knows them, such as Grafana, Langfuse, or Braintrust, reads the traces without a mapping. The run span keeps the name `fw.run` and carries `gen_ai.operation.name` `invoke_agent`, `gen_ai.agent.name` and `gen_ai.agent.id`, both the profile, and `gen_ai.conversation.id`, the run id. A model span, `chat <model>`, carries the chat attributes and the conversation. A tool span, `execute_tool <tool>`, carries `gen_ai.tool.name`, `gen_ai.tool.call.id`, the agent, the conversation, and `gen_ai.tool.type`: `function` for a built-in tool or a tool of a Go option, and `extension` for a tool of an MCP server or an A2A peer. `fw.tool.requested` names the source of the tool for this. A tool of an MCP server also carries `mcp.method.name` `tools/call`, and a call of the `skill` tool carries `gen_ai.skill.name`.
+
 ### 10.3 Logs
 
 Logs are JSON lines on standard error from `log/slog`, so that `fw-workbench mcp` keeps standard output for the protocol. Each line carries the `run`, `turn`, and `traceparent` that apply. `FW_LOG=debug` adds request and response bodies with secrets redacted.
@@ -1403,7 +1417,7 @@ A hook is an observer (section 4.4), a policy (section 7.5), a run annotator, or
 
 ### 12.5 Profiles, instructions, and skills
 
-A profile is a named agent configuration. It holds a description, a system prompt, and a list of instruction texts. It also holds a skill allowlist, a tool allowlist with globs, a model selector, an effort level, a time zone, a policy, and a budget. Profiles live under `agents:` in `fw.yaml` or as one file each under `$FW_HOME/agents/`. The system prompt and each instruction entry is either the text or the path of a file that holds it. A request names a profile with `agent`. One binary serves many profiles, and the A2A card lists each one as a skill.
+A profile is a named agent configuration. It holds a description, a system prompt, and a list of instruction texts. It also holds a skill allowlist, a tool allowlist with globs, a model selector, an effort level, a time zone, a policy, and a budget. Profiles live under `agents:` in `fw.yaml` or as one file each under `$FW_HOME/agents/`. The system prompt and each instruction entry is either the text or the path of a file that holds it. The file must end in `.md` or `.txt` and must not be under `/proc`, `/sys`, or `/dev`, so a profile that arrives through the API or a rendered workspace cannot read a file of the process into its prompt. A request names a profile with `agent`. One binary serves many profiles, and the A2A card lists each one as a skill.
 
 Instructions reach the model in three layers, and every layer is a plain text:
 
@@ -1958,3 +1972,492 @@ The safeguards revision of 2026-10-13 came on top of the milestones. It added th
 - The A2A version is 1.0. The MCP revision is 2026-07-28. The Go MCP SDK from v1.7.0 targets that revision. It states that it keeps the deprecated features for at least twelve months, and the dual-era behavior depends on that.
 - `fw` implements the ax runner contract itself instead of embedding the ax `runner` package (section 11.2).
 - NATS is the recommended bus. Redis is the zero-new-infrastructure choice on an ax cluster.
+
+## 18. Environments
+
+### 18.1 Why
+
+ax builds every actor template with the snapshot fidelity `VOLUMES`. At every resume, Agent Substrate cold-boots the container from its image and restores `/workspace` only. A `pip install` or an `apt-get install` of a run goes to the root file system of the sandbox, and the next suspend loses it. A run that needs a package therefore installs it again after each wake, and it spends its calls to find out what the Task holds.
+
+The package `env` puts the packages on the durable volume instead. The block `environment` of `fw.yaml` names the manifests of two managers that need no root: `uv` for Python, with its own interpreters, and `pixi` for everything else from conda-forge, such as Node, git, compilers, Ansible, and PostgreSQL. Each manifest has a lock file next to it. The kernel adds what the managers do not know: the durable placement, the lock enforcement, the install in the background, the variables of every tool process, the brief in the system prompt, the tool `env`, the Dockerfile, and the events.
+
+`uv` and `pixi` are single static binaries. The kernel never downloads them: the image must carry both on PATH. `fw:toolbox` does not carry them yet; build an image `FROM` it with both, as the first `RUN` of `fw env dockerfile` does (section 18.10). `fw doctor` says when one is missing.
+
+The package registers itself through the seams of section 12.6: `fw.RegisterExtension` for the block, `fw.RegisterService` for the install, `fw.RegisterTool` for the tool, `fw.RegisterToolEnv` for the variables, `fw.RegisterPromptSection` for the brief, `cli.RegisterDoctorCheck` for its line of `fw doctor`, and `fw.RegisterDefaults` for the tool list and the policy. The default binary links it. A lean build links it with the tag `env`, for example `-tags lean,nats,openai,env`.
+
+### 18.2 The block
+
+```yaml
+environment:
+  dir: /workspace/.environment     # under ax; elsewhere ./.environment in the root of the workspace
+  cache: /workspace/.cache         # under ax; elsewhere ./.cache in the root of the workspace
+  python: pyproject.toml           # optional; uv.lock must be next to it
+  tools: pixi.toml                 # optional; pixi.lock must be next to it
+  prepare:                         # optional; after the install, as the tool user, once per digest
+    - ansible-galaxy collection install community.general -p /workspace/.environment/ansible
+  placement: durable               # durable | image
+  brief: true                      # the Environment section of the system prompt
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `dir` | `/workspace/.environment` when `/workspace` exists, else `.environment` in the root of the workspace; `/opt/environment` with `placement: image` | The directory of the environment |
+| `cache` | `/workspace/.cache` when `/workspace` exists, else `.cache` in the root of the workspace | The caches of uv and pixi |
+| `python` | none | A `pyproject.toml`, relative to the root of the workspace. `uv.lock` must be next to it. |
+| `tools` | none | A `pixi.toml`, or a `pyproject.toml` with a `[tool.pixi]` table. `pixi.lock` must be next to it. |
+| `prepare` | none | Shell commands (`/bin/sh -c`) that run in the root of the workspace after the install |
+| `placement` | `durable` | `durable` installs under `dir` at run time. `image` says that the image holds the environment at `dir`, built from `fw env dockerfile`; the kernel installs nothing then. |
+| `brief` | `true` | `false` leaves the Environment section out of the system prompt |
+
+The decision for `/workspace` is the one of `fw.DefaultHome`. A relative path is relative to the root of the workspace (`tools.files.root`). Another key in the block is an error, as everywhere in `fw.yaml`. The start stops when the block does not fit:
+
+- `dir` and `cache` must not be FW_HOME, a path under it, or a path above it. The environment is a sibling of FW_HOME, never part of it.
+- They must not hold the root of the workspace, and with `tools.files.perRun` they must not be under the directories of the runs, which move with each run.
+- Under ax, a durable `dir` must be under `/workspace`, because every suspend loses the rest.
+- With `placement: image`, `dir` must not be under `/workspace`, because the volume of the Task hides the image there.
+
+`placement: image` is the target for a heavy environment, such as PyTorch. A durable volume ships at every suspend and comes back at every resume. The lab measured 0.13 to 0.2 seconds for a small workspace; a 2 GiB environment on `/workspace` changes that cost. Measure on the homelab before you choose: the time of `uv sync` for `torch` from the CPU index with a cold and a warm cache, the size of the volume after it, and the suspend and resume time of the Task with that volume.
+
+### 18.3 The layout
+
+| Path | Owner | Use |
+|---|---|---|
+| `<dir>` | fw, mode `1775` with the group of the tool user | The tool user adds and removes its own entries, but the sticky bit keeps it from renaming a file of fw |
+| `<dir>/.fw-env.json` | fw | The marker of a ready environment |
+| `<dir>/.fw-env-failed.json` | fw | The last failure |
+| `<dir>/.fw-env.lock` | fw | The `flock(2)` lock of one installer |
+| `<dir>/venv` | tool user | The virtual environment: `UV_PROJECT_ENVIRONMENT` and `VIRTUAL_ENV` |
+| `<dir>/python` | tool user | The interpreters of uv: `UV_PYTHON_INSTALL_DIR` |
+| `<dir>/bin` | tool user | The links to those interpreters and the programs of `uv tool install`: `UV_PYTHON_BIN_DIR`, `UV_TOOL_BIN_DIR` |
+| `<dir>/uv-tools` | tool user | The tools of uv: `UV_TOOL_DIR` |
+| `<dir>/pixi` | tool user | `PIXI_HOME`, with the file `config.toml` that fw writes and the programs of `pixi global` |
+| `<dir>/pixi-envs` | tool user | The environments of pixi (`detached-environments`), so an environment lives under `dir` and not next to its manifest |
+| `<cache>/uv`, `<cache>/pixi` | tool user | `UV_CACHE_DIR`, `PIXI_CACHE_DIR` |
+
+Without a tool user, as under Agent Substrate today (section 7.12), every path belongs to the user of fw, and nothing changes owner. With a tool user, a state file that fw does not own counts as absent, because the tool user could have written it.
+
+### 18.4 The install
+
+The install runs these commands, each as the tool user, with the environment of a tool process (`fw.ToolEnv`, section 7.12) and the variables of section 18.5:
+
+1. `uv sync --frozen --no-install-project --project <dir of python>`, then `uv pip list --format json --python <dir>/venv` for the versions. `--frozen` installs the lock as it is and never resolves again. The interpreter comes from `requires-python` and `.python-version`. Without a Python in the image that fits, uv downloads one into `<dir>/python`.
+2. `pixi install --frozen --manifest-path <tools>`, then `pixi info --json` for the directory of the environment and `pixi list --json --frozen` for the versions.
+3. Each `prepare` command, with `/bin/sh -c`, in the root of the workspace, with the programs of steps 1 and 2 on PATH.
+
+The marker records the digest: the sha256 of the manifests, the lock files, and the prepare commands, with a label for each part. Another file does not count. A new digest, such as a lock file from a new revision of a pool, installs again, and the caches make it incremental. The marker also holds the versions, the directory of the pixi environment, and the time that the install took. An environment counts as ready when the marker holds the digest of the files now and its virtual environment and its pixi environment exist.
+
+The service of the package starts the install in the background when `fw serve` builds the agent, after the kernel starts, and never delays `/readyz`. A failure records the step, the error, and the last 4 KB of the output of the manager, and the next try comes after 5 seconds, doubling up to 5 minutes. A golden boot has no network, so its first try fails; the next tries succeed once the egress policy lands. A failure that an earlier process recorded is due at once, so the cold boot after a resume tries without waiting. The service ends when the environment is ready. The output in a failure loses every secret of the process (section 4.2) and the password of every URL, such as the token of a private index. While the install runs, the process holds its status at not idle (`fw.Agent.Hold`), so the front does not suspend the Task in the middle of a download.
+
+A verb that starts no service, such as `fw run`, installs the environment in the first tool process of a run. A laptop therefore tests a profile with the packages of its Task before the Task exists: `fw run` and `fw serve` outside ax install the same environment under `./.environment`. The time limit of the tool call (`tools.limits.timeout`, 10 minutes) bounds that install. A cut install goes on from the cache at the next try.
+
+One lock file per environment keeps one installer at a time, across processes too. The lock is `flock(2)`, so it ends with its process. On a system without `flock(2)`, two processes can install at the same time.
+
+### 18.5 Tool processes
+
+`fw.RegisterToolEnv` adds a hook that `fw.ExtendToolEnv` applies after `fw.ToolEnv`. The shell of `bash` and a stdio MCP server call it, so both get the same environment:
+
+- `PATH` with these directories in front, in order: `<dir>/venv/bin`, the `bin` directory of the pixi environment, `<dir>/bin`, and `<dir>/pixi/bin`.
+- `VIRTUAL_ENV` and `UV_PROJECT_ENVIRONMENT` (with `python`), `CONDA_PREFIX` (with `tools`), `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_PYTHON_BIN_DIR`, `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, `PIXI_HOME`, and `PIXI_CACHE_DIR`.
+- `UV_LINK_MODE=copy` when `dir` and `cache` are on two file systems (the device numbers differ), because uv links the files of a package from its cache by default.
+
+A tool process of a run waits until the environment is ready, bounded by the context of its call. When the install of the current digest failed and its next try is not due, the process does not start, and the call returns an error that names the step, the error, the time of the next try, and the end of the output of the manager. A run therefore reports a broken environment instead of guessing. For a stdio MCP server, the error makes the listing of its tools fail, and the run goes on without them. A tool process outside a run, such as the listing of `fw tools`, gets the variables and waits for nothing.
+
+`UV_PROJECT_ENVIRONMENT` holds for every project. A `uv sync` in another project of the workspace therefore installs into the same environment. A shell unsets it for a project that needs a virtual environment of its own. pixi runs no activation script for a tool process: the process gets `PATH` and `CONDA_PREFIX` alone.
+
+### 18.6 Events
+
+The events of the environment belong to the agent, not to a run. As with `fw.connection.connected` (section 7.11), the package publishes them on the bus, on the subject `fw.environment`, and logs each one. The subject of the event is empty, and `node` names the process. The ledger of the run that changed the environment records its call of the tool `env`.
+
+| Type | Data | When |
+|---|---|---|
+| `fw.env.ready` | the marker: `digest`, `placement`, `ready`, `seconds`, `uv`, `pixi`, `python` (`manifest`, `version`, `env`, `packages`), `tools` (`manifest`, `prefix`, `packages`), `prepare` | an install succeeded |
+| `fw.env.failed` | `digest`, `time`, `step`, `error`, `output`, `attempt`, `retryAt` | an install failed; a retry that fails with the same error records no new event |
+| `fw.env.changed` | `digest`, `previous`, `manager`, `command`, `package`, `run`, `agent` | the tool `env` changed a manifest and installed the result |
+
+Each package is `name`, `version`, and `is_explicit`, the names of `uv pip list` and `pixi list`.
+
+### 18.7 The tool `env`
+
+The tool takes `command`: `list`, `add`, or `remove`. `add` and `remove` also take `manager`, `python` or `tools`, and `package`, a requirement such as `pyyaml>=6` or `nodejs>=22`. A package that starts with a dash is refused, so the model cannot pass an option to a manager.
+
+| Call | Runs |
+|---|---|
+| `add` with `python` | `uv add --no-sync --project <dir of python> -- <package>` |
+| `remove` with `python` | `uv remove --no-sync --project <dir of python> -- <package>` |
+| `add` with `tools` | `pixi add --no-install --manifest-path <tools> -- <package>` |
+| `remove` with `tools` | `pixi remove --no-install --manifest-path <tools> -- <package>` |
+
+The manager changes the manifest and the lock file. Then the tool installs the new digest under the lock of the environment and records `fw.env.changed`. A failure of the manager leaves the files as they were. With `placement: image`, `add` and `remove` refuse, because the next cold boot would lose the change: change the manifest and build the image again.
+
+The policy of section 7.5 names a tool and a field of its input. `env` is one tool, and its field `command` names the action, so a rule names an action with the field form:
+
+| Rule | Effect |
+|---|---|
+| `ask: ["env: command=add", "env: command=remove"]` | the default: a person allows each change of the packages, and `list` runs |
+| `deny: ["env: *"]` or `deny: [env]` | a locked profile: no call of the tool runs |
+| `ask: ["env: command=add"]` | ask before an add only |
+
+A dotted name such as `env.add` is a tool glob, and no tool has that name, so the rule matches nothing. The package adds the default rules to `policy.rules.ask` and `env` to `tools.builtin` through `fw.RegisterDefaults`. A file that sets `policy.rules.ask` or `tools.builtin` replaces the default list, so it names them again. Without the block, the tool is opt-in (section 7.1), and no profile gets it unless its tool list names it.
+
+### 18.8 The Environment section
+
+`fw.RegisterPromptSection` adds a function that `SystemPrompt` calls after the skills, at each model call. The section of the package reads the state files and runs no command. It names `dir`, the virtual environment, the manifests, the manager of each, the version of Python, and the packages with their versions: every Python package, and the pixi packages that the manifest names, 30 of each at most. It tells the model to call the tool `env` for a package, or, for a profile without the tool, that the packages are fixed. Inside a Task (`AX_TASK_YAML`), it also names what the Task does not have: a change outside `/workspace` is lost at the next suspend, apt and sudo are not available to a run, there is no GPU, so PyTorch runs on the CPU, and there is no init system or service manager.
+
+The text changes only when the state changes: once from installing to ready, or to failed. The cached prefix of the prompt therefore stays valid between those changes. A name or a version with characters other than those of a package name stays out of the text, because the state files are on a volume that other processes can write.
+
+### 18.9 `fw doctor`
+
+The line `environment` names:
+
+- the state: `none` without the block, not installed yet, `materializing`, `ready` with the digest and the time of the install, or `failed` with the step, the error, the attempt, and the next try;
+- whether `uv` and `pixi` are on PATH, with their versions, for the managers that the block needs;
+- the hosts that the egress policy of the Task must let through, from the URLs in the lock files: `tls pypi.org` for an https host, which needs a rule with tls passthrough, and `http deb.debian.org` for a plain http host. Without a lock file it names the default registry: `pypi.org` and `files.pythonhosted.org` for uv, `conda.anaconda.org` for pixi. Without `python3` on PATH it adds `releases.astral.sh`, where uv downloads a Python. `download.pytorch.org` appears when the lock of uv uses the PyTorch index.
+
+The kernel cannot add an egress rule. A person adds the rules to the Task. A failed state or a missing manager fails the line.
+
+### 18.10 `fw env dockerfile`
+
+`fw env dockerfile --from <image>` prints a Dockerfile for `placement: image`, for the pools pipeline to build and pin. It builds nothing. The build context is the root of the workspace. The Dockerfile:
+
+1. Installs uv 0.13.1 and pixi 0.82.0 from their release URLs on GitHub (the static musl builds for amd64 and arm64), and checks the sha256 of each archive. A new version needs new checksums.
+2. Sets the variables of section 18.5 with `dir` inside the image, except the caches: at run time the kernel gives a tool process the cache of the configuration.
+3. Copies the manifests and the lock files, and `.python-version` when it exists, to `<dir>/src/python` and `<dir>/src/tools`.
+4. Runs `uv sync --frozen --no-install-project` and `pixi install --frozen`.
+5. Runs each `prepare` command in `dir`.
+6. Writes the marker with the digest and the versions.
+
+Steps 4 to 6 keep the caches in a BuildKit cache mount, so no cache lands in the image.
+
+A block with `placement: image` keeps its `dir`. A durable block gives `/opt/environment`, and the comment at the top of the file names the block that the image needs. The base image must have `/bin/sh`, `curl`, `tar`, and `sha256sum`, which `fw:toolbox` has. apt packages stay an image concern: add them to the file before the managers. When the workspace of the Task holds the manifests, `fw doctor` compares the digest of the marker in the image with the digest of those files, and fails when they differ.
+
+### 18.11 What this is not
+
+It is not a container inside the container: gVisor does not nest. It is not a root shell: apt and system services stay out of a run. It does not replace the goal of a Workspace (section 11.3), which stays the fallback for an environment that nobody wrote down. No GPU reaches a Task, so a GPU package is not a reason for an environment.
+
+### 18.12 Limits
+
+- The `files` tool writes as the user of fw. With its root at `/workspace` and without `tools.files.perRun`, a run can therefore write the state files under `dir`. The brief takes only names and versions from them, in the characters of a package name.
+- A tool process of the tool user can change the environment, as `pip install` into the virtual environment does. The marker then no longer describes it, until the next install of a new digest.
+- The time of a long install in `fw run` counts against the time limit of the first tool call of the run.
+- On a system without `flock(2)`, two processes can install one environment at the same time.
+- No measurement of a heavy environment exists yet. Section 18.2 names the three numbers to take on the homelab before a default moves between `durable` and `image`.
+
+## 19. Hosted harnesses
+
+A harness is an agent program that people use on their laptops, such as opencode or Claude Code. The block `harness` of `fw.yaml` makes the kernel host one. Every run of the process then becomes a session of the harness instead of a run of the turn loop. The kernel keeps what makes a run durable: one ledger, one policy, one approval surface, and an idle run while a person decides, so a Task suspends at no cost and a cold boot continues the session. The package `harness` holds the hosts, one file for each kind, and `cmd/fw/driver_harness.go` links it behind the build tag `harness` (section 15).
+
+### 19.1 Configuration
+
+```yaml
+harness:
+  kind: opencode            # opencode | claude-code
+  home: /workspace/.harness # HOME, and CLAUDE_CONFIG_DIR for Claude Code
+  command: []               # the program and its first arguments
+  port: 0                   # opencode only: the loopback port of opencode serve
+```
+
+| Key | Meaning | Default |
+|---|---|---|
+| `kind` | The harness: `opencode` or `claude-code`. A block without it stops the start. | none |
+| `home` | The home of the harness: its sessions, its transcripts, and its credentials. It must be on the durable volume, beside the home of `fw` and never inside it, and never inside the directory of a run. | `.harness` beside the home of `fw`: `/workspace/.harness` under ax, `./.harness` elsewhere |
+| `command` | The program of the harness and its first arguments. The kernel adds its own flags after them. | `opencode serve`, or `claude` |
+| `port` | The loopback port of `opencode serve`. `0` picks a free port. A port for `claude-code` stops the start. | `0` |
+
+The block names no model and no key. The harness uses the model of the run, the model that the turn loop would use, with the endpoint and the key of its provider: `providers.<provider>.baseUrl` and the secret that `apiKeyEnv` names. A run without a model fails, as in the turn loop. A block that `fw config` prints holds no secret. A run that the turn loop started before the block was set stays with the turn loop.
+
+### 19.2 The runner
+
+The kernel holds one seam for the hosts, in `fw/runner.go`. A package registers a constructor with `fw.RegisterRunner(func(ctx context.Context, a *fw.Agent) (fw.Runner, error))`, and a program can pass one with `fw.WithRunner`. `New` builds the runner before it resumes the runs of the ledger, so a resumed run goes to it. `Agent.Runner` returns it.
+
+```go
+type Runner interface {
+    Drive(ctx context.Context, h *Hosted) (bool, error)
+}
+```
+
+The driver of a run asks the runner first, each time it starts: for a new run, after a follow-up, after a decision, and after a restart. `Drive` does the work that the events of the run leave, and returns when the run is finished, waits for a decision, or its context ends. Like the turn loop, the kernel releases the run only when no event arrived while `Drive` worked; otherwise it calls `Drive` again. It also releases a run that is finished or waits for a decision, so a runner that recorded the end of a run is not called again for it. A shutdown ends the context at once. `Drive` reports false for a run that it does not drive, and the turn loop drives that run.
+
+`Hosted` gives the runner what the turn loop uses: `Events`, `Emit` through the append path of the kernel (the secrets of the data are replaced, the status and the observers see the event, and an approval or a terminal event is synced), `Finish`, which records the end of the run unless a message came that the runner did not handle, `Decide` with the policy of the run, `Over` and `Budget` for the budget of the run, `Usage`, `Model`, `Queued`, and `Dir`, the directory of the tools of the run, which it creates with `tools.files.perRun`. Every exported signature of `fw` stays as it was.
+
+### 19.3 The session in the ledger
+
+The host records the steps of a session with the events of the turn loop, so the budget, the status, the views, `fw events`, the OTLP export, and the front work unchanged. A turn is one model call of the harness, as in the turn loop.
+
+| From the harness | In the ledger |
+|---|---|
+| opencode: a part `step-start`. Claude Code: the first `assistant` line of a message id. | `fw.turn.started`, `fw.model.requested` |
+| opencode: the parts `text` and `tool` of the step, and `step-finish` with its tokens. Claude Code: the `assistant` lines of one message id, with the usage of the message. | `fw.model.responded`, with the text, the tool calls, the stop reason, and the usage |
+| a tool call: the permission request of opencode, or the `tool_use` block of Claude Code | `fw.tool.requested`, before the call runs |
+| opencode: a part `tool` that is `completed` or `error`. Claude Code: a `user` line with a `tool_result`. | `fw.tool.responded` |
+| the end of the step, or the next model call | `fw.turn.finished`, then `fw.file.changed` for the files that the turn changed (19.7) |
+| a call that the policy asks a person about | `fw.approval.requested` (19.4) |
+| opencode: `session.idle`. Claude Code: the `result` line. | `fw.run.finished`, with the latest text as the output |
+| every other event of the harness | `fw.harness.event` |
+
+`fw.harness.event` holds `harness`, the kind, `kind`, the type of the event of the harness, such as `message.part.updated` or `result`, and `data`, a compact payload: ids, states, tool names, the stop reason, and the tokens, never the text of a file or a key. The high-frequency events of opencode, `message.part.delta` and `server.heartbeat`, are left out. The same event also records the steps of the kernel in the session. Their kinds start with `fw.`:
+
+| Kind | Meaning |
+|---|---|
+| `fw.start` | The run is a session of a harness. |
+| `fw.session` | The session has the id `session`: the id of the session of opencode, or the session UUID of Claude Code. |
+| `fw.prompt` | The harness got the messages of the run up to the sequence number `seq`. |
+| `fw.answer` | The harness got the decision of the approval `approval`. |
+| `fw.idle` | The harness finished the exchange that the latest `fw.prompt` or `fw.answer` started. |
+
+An exchange without its `fw.idle` was cut by a stop of the process. The next driver continues it (19.5).
+
+A message without text, such as a blank follow-up or a note of the kernel, gives the harness nothing: the host records `fw.prompt` and `fw.idle` for it at once and finishes the run again. A message with attachments alone gets a text that names the files, such as `attachments/notes.txt`, which the harness reads in the directory of the run. A finished run stays finished until a follow-up reopens it. A run with a rubric (section 20) records `fw.outcome.evaluated` with the verdict `skipped` and the reason `a hosted harness has no grader` before it completes, once for each answer.
+
+opencode reports the usage of a model call when the call ends, after its tool calls ran, while the kernel records a call that asks a person before it runs. Such a model call therefore gets its `fw.model.responded` with no usage at the first permission request, and its usage follows as `fw.run.annotated` with the usage, the provider, and the model. The usage, the cost, the budget, and the metrics count it in the same way (section 8.2). The model calls of a subagent count the same way and are not turns of the run.
+
+### 19.4 Policy and approvals
+
+The kernel names the tools of a harness in lower case, such as `bash`, `read`, `write`, `edit`, and `webfetch`, so one rule fits both kinds, for example `bash: git push*` or `write: filePath=*.env` (section 7.5). `bash` and the guards `external_directory` and `doom_loop` of opencode are destructive, so the default policy asks a person about them, as for the `bash` tool of the kernel. `read`, `glob`, `grep`, `list`, `ls`, `webfetch`, `websearch`, `skill`, and the to-do tools are read-only. Every other tool has no flag.
+
+opencode asks the kernel about every call. The kernel sets `OPENCODE_PERMISSION` to `ask` for every permission key, and the inline configuration `OPENCODE_CONFIG_CONTENT` sets `ask` for the agents `build`, `plan`, `general`, and `explore`, which win over the configuration of the project. The kernel prompts with the agent `build`. For each `permission.asked` event of the session or of a subagent, the kernel asks the policy of the run. It answers `allow` with `once` and `deny` with `reject` and the reason, on `POST /permission/{id}/reply`, or on `POST /session/{id}/permissions/{id}` of an older server.
+
+Claude Code asks the kernel through a `PreToolUse` hook of the type `http`. Each process gets the hook in `--settings`, with the URL `http://127.0.0.1:<port>/v1/harness/hook/<secret>` on the native API and `onFailure: block`, so a hook that fails blocks the call. The same settings set `disableAllHooks` to false, allow the URL of the hook in `allowedHttpHookUrls`, and set `permissions.defaultMode` to `default`. `--settings` wins over `.claude/settings.json` and `.claude/settings.local.json` of the repository, which the model can write, and the lists of `allowedHttpHookUrls` merge, so a file of the repository cannot turn the hook off or block it. The secret is new for each process and leaves with it. The route answers only a caller on the loopback address, and a secret that no process holds gets `deny`. The hook answers `allow` and `deny` from the policy, and `defer` where the policy asks. Claude Code ignores `defer` when one response makes several tool calls, and its own permission flow then runs a read inside the working directory without asking. The hook therefore answers `deny` with the reason `this call needs an approval; make it alone` for such a call. It counts the calls of a response from the lines that claude wrote before it called the hook, and waits up to two seconds for the driver to read them.
+
+Before it asks the policy, the host denies a call whose path resolves inside the home of the harness, the home of `fw`, or a reserved path: the paths that the file tracker skips (19.7). The fields are `file_path`, `filePath`, `path`, `notebook_path`, and the pattern of `glob` when it is absolute. A relative path starts in the directory of the run, `~` is the home of the harness, and links are followed. A read of one file in which the harness keeps the full output of a tool call that it cut, `projects/<project>/<session>/tool-results/<file>` of Claude Code or `.local/share/opencode/tool-output/<file>` of opencode, still passes; a listing or a search of that directory does not.
+
+A call that the policy asks about becomes `fw.approval.requested` with the tool, the call id, the input, and the reason of the rule. The run moves to `input-required`, the driver returns, and `GET /v1/status` reports the Task as idle (section 11.8), so the front can suspend it. A decision from any surface starts the driver again. A deny that the rules of the run gained meanwhile wins over an allow, as in the turn loop.
+
+### 19.5 Waiting, suspend, and a cold boot
+
+opencode waits inside its server. When the decision comes while the process lives, the kernel answers the permission that waits, and the session goes on. When the Task slept meanwhile, the server and its permission are gone, but the session is in the database of opencode under the home of the harness. The new driver starts `opencode serve` again, gives the open tool calls an error result, `not finished: the harness stopped before the call ended`, and sends the session a note: the process stopped and started again, the person allowed or denied the call, and the session continues from where it stopped. The driver records `fw.answer` for the decision after the prompt with the note, so a stop before it gives the note again. When the session makes the same call again, with the same tool and the same input, the kernel answers it from the decision and asks no person again. A session that worked when the process stopped gets the same note without a decision.
+
+Claude Code does not wait. On `defer` it exits with `stop_reason: tool_deferred` and the call in `deferred_tool_use`, and the kernel records the approval from it. After the decision, also after a cold boot, the kernel runs `claude -p --resume <session>` with the same flags and a new hook, the same call fires the hook again, and the hook answers it from the decision in the ledger. A process that a stop cut is resumed with the note of opencode.
+
+The process of a harness runs in a process group of its own and ends with `fw`. A cancel of a run that waits aborts its session of opencode.
+
+### 19.6 Budget
+
+The host asks `Hosted.Over` before each turn and after each usage, with the limits of the run, of its tree, and the deadline of its lineage (section 5.2), and every 15 seconds while it follows the harness, also when the harness sends nothing. The hook of Claude Code asks it before each call and denies the call at a limit. At a limit the host records `fw.budget.exceeded`, gives the open calls an error result, records the changed files, finishes the run as `failed` with the budget error, and stops the harness: it aborts the session of opencode or stops the process of Claude Code. A hosted run makes no final report. Claude Code also gets `--max-turns` with the turns that the run has left, and `--max-budget-usd` with the cost that it has left when the budget sets `maxCostUSD`.
+
+A harness that sends nothing for a long time counts as lost. opencode sends a heartbeat every 30 seconds, and its stream counts as lost after five minutes without any event, a heartbeat included: the driver aborts the session and starts again, as for a stream that ended, three times at most. Claude Code writes nothing while a tool call runs, so a process that writes no line for 30 minutes is stopped, and the run fails.
+
+### 19.7 Files
+
+A harness writes files without kernel events. The host keeps the size, the time, and the mode of each file under the directory of the run, and at the end of each turn with a tool that can write, and at the end of each exchange, it records each file that changed as `fw.file.changed`, with the SHA-256 of the content and the tool `opencode` or `claude-code`, as the `files` tool does (section 7.9). `run_file` and the result view then show the files. The comparison leaves out the home of `fw`, the reserved paths, the home of the harness, `.git`, and `node_modules`. A directory with more than 50,000 files gets no record and a warning in the log. A cold boot starts a new comparison, so a change that the harness made before the stop and after the last record is not in the ledger.
+
+### 19.8 Processes and their environment
+
+The host starts each process as the tool user, with the environment of a tool process (`fw.ToolEnv`) and the variables of `tools.bash.env`, in the directory of the run, as the shell of `bash` (section 7.12). `HOME` is the home of the harness, and `FW_RUN_DIR` names the directory of the run. The hooks of the linked packages (`fw.ExtendToolEnv`) get the run info of the run, as for a tool call, so the environment of section 18 waits for its install, or fails the run, before the process starts. `opencode serve` gets the environment of the first run that starts it, and starts again when the environment changed and no session works; a run that starts while a session works gets the server with the environment from before the change. When `opencode serve` ends, also by a crash, the host kills its process group. Then it adds what the harness needs on purpose:
+
+| Kind | Command | Variables |
+|---|---|---|
+| `opencode` | `opencode serve --port <port> --hostname 127.0.0.1`, once for the process, in the root of the workspace. A session for each run, created with `POST /session?directory=<directory of the run>`; a prompt with `POST /session/{id}/prompt_async` and the model `fw-<provider>/<model>`; the events from `GET /event`. | `OPENCODE_SERVER_PASSWORD`, a random password for the basic authentication of the kernel; `OPENCODE_CONFIG_CONTENT`, one provider of opencode for each provider of the kernel that a model of the configuration uses, with `baseURL` and `apiKey: {env:<apiKeyEnv>}`; `OPENCODE_PERMISSION`; `OPENCODE_DISABLE_MODELS_FETCH=1`; `OPENCODE_DISABLE_AUTOUPDATE=1`; the key under its `apiKeyEnv` |
+| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose --model <model> --settings <hook> --session-id <uuid>` for the first exchange, `--resume <uuid>` for each later one, and `--max-turns`, `--max-budget-usd`, and `--append-system-prompt` from the run | `CLAUDE_CONFIG_DIR` (the home), `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` from `providers.anthropic.baseUrl`, `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` |
+
+The instructions of the run go to the harness as its added system text: `system` of the prompt of opencode, and `--append-system-prompt` of Claude Code. The hooks, the skills, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, and `opencode.json` of the repository reach the harness unchanged. The output of a process goes to the log of `fw` at the level `debug`, with every secret replaced before the line is cut to 2000 bytes. The redactor knows the password of each `opencode serve` and the secret of the hook of each process of Claude Code (`Agent.AddSecret`), so a tool result that prints them reaches the ledger without them.
+
+### 19.9 Limits
+
+- The driver of opencode speaks the HTTP API of opencode 1, which `https://opencode.ai/docs/server/` documents. It was tested with opencode 1.19.3. opencode 2 has a new API under `/api` and needs a driver of its own.
+- Claude Code needs a model of the provider `anthropic` and its key. Its hook needs the native API on a plain HTTP listener, so `fw run`, which serves nothing, and a listener with TLS cannot host it. A call that the policy asks about must be the only call of its response (19.4). `AskUserQuestion` needs an answer in `updatedInput`, which the hook does not give yet.
+- A branch of a run whose session started (section 4.7) fails with `harness: a branch of a hosted run is not supported`, because the harness holds one session for the source and the branch. A branch from a point before the session started gets a session of its own.
+- The path check of 19.4 reads the path fields of a call. A search of a directory above a private path, such as the root of the workspace, can still list the files there when the tool does not skip hidden directories, and `bash`, which the default policy asks about, reaches every path of the tool user.
+- The key of the model reaches the harness, and so every process that the harness starts. The fix is a placeholder key and a credential that the egress gateway adds (docs/REVIEW_2026-10-20.md, section 6.2). The password of opencode and the secret of the hook are also readable by the processes of the harness, which run as the same user. The policy decides each call that the harness asks about; a shell that the policy allowed can do what the harness can. The boundary is the Task and the tool user, as for `bash`.
+- An agent that a repository defines for opencode under another name can loosen its own permissions; the kernel prompts with `build`. A policy that denies `task` keeps such an agent out.
+- The system prompt and the instructions of a profile do not reach the harness, only the instructions of the run. Attachments stay files in the directory `attachments` of the run: a message with attachments alone names them, and a message with text does not. The MCP servers of `tools.mcp` do not reach the harness yet. The terminal route of docs/REVIEW_2026-10-20.md, section 4.9, for `opencode attach` and `claude --resume` by a person, is not built yet.
+- The usage of a model call that a stop of the process cut is lost.
+
+## 20. Outcomes
+
+A run can claim work that nobody checked. Batch scenario1-a found pull request bodies with claims that no command showed. An outcome asks a second model context, the grader, to check the answer of a run against a rubric before the run finishes. When the grader finds a gap, the run gets one more turn to fix it. The kernel code is `fw/outcome.go`, and one call at the end of a successful run in `endTurn` (`fw/turn.go`) starts it.
+
+### 20.1 Configuration
+
+An agent profile and a run request can carry an `outcome` block with three keys:
+
+| Key | Default | What it does |
+|---|---|---|
+| `rubric` | empty | Plain text that the grader applies. A block without a rubric is off. |
+| `grader` | empty | The model of the grader, as a `provider/model` selector or a name from `models`. Empty means the model of the run. There is no other default, so an outcome never picks a paid model by itself. |
+| `iterations` | 1 | The most grader passes. 1 grades once and never asks for a revision. 2 or more give the run one more turn with the notes of the grader after each `needs_revision`, up to this number of passes. 0 means 1. The most is 10. |
+
+```yaml
+agents:
+  migrator:
+    outcome:
+      rubric: |
+        Every claim of the pull request body names the command that shows it.
+        The playbook runs twice without a change.
+      grader: ""        # the model of the run
+      iterations: 2
+```
+
+The block of a request replaces the block of the profile as a whole, so a request with `outcome: {}` turns the outcome of its profile off. An inline profile can carry the block too, below the block of the request. A child run never takes the outcome of its profile, neither a child of `spawn_task` nor a child in another process (`fw.parent`); only a block in its own request turns grading on for it. This rule keeps each child of a graded profile from paying for a grader of its own.
+
+The kernel resolves the outcome once, when it queues the run, and records it in the field `outcome` of `fw.run.queued`, with the grader resolved through `models`. A run therefore keeps its outcome for its life, as it keeps its resolved profile (section 12.5). A run without a rubric records no field, and its ledger is the same as before.
+
+The kernel refuses a block with more than 10 iterations or fewer than 0, a grader or a number of iterations without a rubric, a grader that is neither a selector nor a name from `models`, and a rubric longer than 256 KiB. A request gets `fw.ErrInvalidRequest`, which the native API answers with 400. A profile in `fw.yaml` stops the process at load with the key, such as `agents.migrator.outcome.iterations`. `Agent.CheckProfile` refuses such a profile from a linked package. The keys follow the rule of the variables (section 12.1), so `FW_AGENTS_MIGRATOR_OUTCOME_ITERATIONS=3` sets one.
+
+A Go caller passes `fw.WithOutcome(fw.Outcome{...})` or sets `RunRequest.Outcome`. The body of `POST /v1/runs` takes the field `outcome` with the same keys.
+
+### 20.2 The grader run
+
+The grade happens at the end of a successful run only: the last turn ended with an answer, and the run is about to finish as `completed`. A run that fails, stops at a limit with its final report, ends with a refusal, or is canceled gets no grade. A follow-up that arrives before the grade starts goes first, and the grade comes at the end of the turn that it starts.
+
+One pass takes these steps, each one from the ledger:
+
+1. The kernel closes the turn with `fw.turn.finished`.
+2. It checks the budget (section 20.4).
+3. It starts the grader run as a child of the run, in this process, through the same path as a child of `spawn_task` in this process. The grader never runs through `spawn.driver`, because it reads the files of the run, which only this process holds.
+4. It waits for the grader run and reads its verdict.
+5. It records `fw.outcome.evaluated` on the run, and for a revision the notes in the same step (section 20.3).
+
+The grader run is a run of the same agent profile with an inline profile on top:
+
+- The system prompt of the grader below replaces the system prompt of the profile. The instructions of the profile still follow it, as for any inline profile (section 12.5).
+- The model is `outcome.grader`, else the model of the run.
+- The only tool is `files`, and only when the profile and every ancestor allow it. Its rules deny the commands `create`, `str_replace`, and `insert`, so the grader can only view.
+- It has no skill and no outcome of its own, so a grader is never graded.
+- Its budget is 6 turns, 24 tool calls, 10 minutes of working time, and no final report. The budget of the run caps it, and its deadline never passes the deadline of the run, because a child counts the working time of each ancestor (section 5.2).
+- Its origin is `kernel`, its title is `Grade <n> of <title of the run>`, and its idempotency key is `outcome:<run>:<seq>`, where `<seq>` is the sequence number of the answer that it grades. A restart during a pass therefore takes the same grader run instead of a second one.
+- The grader works alone. The kernel denies every approval and every question of the grader run.
+
+`spawn.maxDepth`, `spawn.maxChildren`, `spawn.maxDescendants`, and `spawn.disabled` hold for the grader as for any child, and each pass counts as one child. A grader run shows among the children of the run on every surface.
+
+The input of the grader run is one message with these parts, each with a bound:
+
+- The rubric.
+- The task: the input of the run and every follow-up message that did not come from the kernel, up to 16 KiB together.
+- The final answer of the run, up to 32 KiB, and the number of the pass.
+- The notes of the earlier passes of the same task.
+- The files that the run changed, from its `fw.file.changed` events, with the content of each text file, up to 64 KiB for all files together and 200 files. A path is relative to the directory of the run (section 7.9), where the files tool of the grader works. A file that does not fit gets the start that fits or a line that says that it is not shown, and the input then tells the grader to read such a file with the files tool. A change that a shell command made has no `fw.file.changed` event and does not show.
+
+The text says what it cut, with the size before the cut. The system prompt of the grader is this text:
+
+```
+You are the grader of a run of an agent. You did not do the work of the run, and you do not do it now. You check it.
+
+The message holds the rubric of the run, the task that the run got, the final answer of the run, and the files that the run changed. Apply each criterion of the rubric to the work. Check each claim of the answer against the files and the facts in the message. A claim that nothing in front of you supports counts as not done. If you have the files tool, you can read a file of the run with its view command. Do not change a file.
+
+Write your notes for the agent that did the work. Name each criterion that the work does not meet, and say what must change. Keep the notes short and specific.
+
+The last line of your answer must hold one JSON object and nothing else, without a code fence:
+{"verdict": "satisfied", "notes": "..."} when the work meets every criterion of the rubric, or
+{"verdict": "needs_revision", "notes": "..."} when it does not.
+```
+
+The kernel reads the last line of the answer that is not empty. The line must hold one JSON object with exactly the keys `verdict` and `notes`, both strings, and nothing after it, and the verdict must be `satisfied` or `needs_revision`. A code fence, another key, or another verdict does not parse. The kernel keeps up to 8 KiB of the notes.
+
+### 20.3 The event and the loop
+
+`fw.outcome.evaluated` records one pass on the run:
+
+| Field | Value |
+|---|---|
+| `verdict` | One of the verdicts below |
+| `notes` | The notes of the grader |
+| `iteration` | The number of the pass, from 1 |
+| `iterations` | The most passes of the outcome |
+| `grader` | The id of the grader run, empty when none started |
+| `continue` | `true` when the run gets one more turn with the notes |
+| `reason` | Why the kernel recorded `max_iterations`, `unparsed`, or `skipped`, or why a `needs_revision` does not go on |
+| `answer` | The sequence number of the `fw.model.responded` whose answer the pass graded |
+
+| Verdict | Who says it | What follows |
+|---|---|---|
+| `satisfied` | the grader | The run finishes with its answer. |
+| `needs_revision` | the grader | Before the last pass, the run gets one more turn. When the budget leaves no room for that turn, the verdict stays, the reason says why, and the run finishes. |
+| `max_iterations` | the kernel | The grader asked for a revision at the last pass. The event keeps its notes, and the run finishes. |
+| `unparsed` | the kernel | The answer of the grader does not parse, or the grader run failed or was canceled. The loop ends, and the run finishes. |
+| `skipped` | the kernel | No grader run started (section 20.4). The run finishes. |
+
+For a revision, the kernel appends a `fw.message.received` with the role `user`, the origin `kernel`, and the note kind `outcome` in the same step as the verdict. It holds the notes, the number of the pass, and the instruction to fix what the notes name and to end the turn with the complete final answer. The next turn starts from it, as from a follow-up (section 5.5), and the end of that turn starts the next pass. A restart between the verdict and the notes gives the notes at the next step, so each verdict is recorded once and each revision gets its notes.
+
+The passes of a task count from the latest message that did not come from the kernel. A follow-up of a person to a finished run therefore starts again at pass 1, and the grader grades the new answer.
+
+The run finishes with its last answer as `completed`, whatever the verdict. The verdict is a grade next to the answer, not a failure of the run. The output is the answer of the last turn, so after a revision it is the revised answer.
+
+### 20.4 Budget
+
+A grader run is a child, so its tokens, its cost, and its tool calls count in the tree of the run and of every ancestor (section 5.2). Before a pass, the kernel checks the run: when the run or a tree of its lineage used up `maxTokens`, `maxCostUSD`, or `maxToolCalls`, or the lineage used up its working time, no grader starts. The kernel records `skipped` with the limit in the reason, and the run finishes with its answer. A grader run that `Start` refuses, for example at a spawn limit, gives `skipped` with the error as the reason. Before a revision turn, the kernel checks the turn as the check before the next model call does, `maxTurns` included, so a revision never starts a turn that the budget stops at once. A run of a hosted harness (section 19) starts no grader: it records `skipped` with the reason `a hosted harness has no grader`.
+
+### 20.5 The run object
+
+The run object has the field `outcome` with the latest pass: `verdict`, `notes`, `iterations` (the passes so far), `grader` (the id of the latest grader run), and `reason`. It is absent for a run without a rubric. During a revision turn it shows the `needs_revision` of the pass before. A follow-up to a finished run clears it together with the output. Every surface that returns the run object therefore shows the verdict next to the answer. The event lines of the native API and of `run_events` read `graded <verdict> in pass <n> of <m>` with the notes, and the event summary of `fw` gives the verdict, the pass, and the grader run without the notes.
+
+A front that builds the run object from the lifecycle events of its workers, as the fleet of the workbench does, sees the field only when `bus.egressTypes` of the workers includes `fw.outcome.evaluated`.
+
+### 20.6 What the ledger holds
+
+Unlike the system prompt of a profile, the rubric of a profile enters the ledger: `fw.run.queued` of the run holds the resolved outcome, and the input of each grader run holds the rubric, because the grader reads it from there. The content of the files in the input, up to 64 KiB for each pass, enters the ledger of the grader run too. The kernel replaces every secret in both, as in every event (section 4.2). A rubric therefore must hold nothing that a viewer of the run must not read.
+
+A replay (section 4.6) is a new run and resolves its outcome again: it takes the outcome of the named profile now, and the outcome of the request of the recorded run does not travel to it. Its grader runs call the model live, because a replay answers only the tool calls of the recorded run.
+
+## 21. fw ax and the doctor in a Task
+
+### 21.1 One Task from one profile file
+
+A developer without a front wants one Task from one profile file. Before `fw ax`, that took five steps: write the profile, render a Workspace and a Task by hand, apply them with `ax`, resume the Task, and wait for `/readyz` through the router. The verb `fw ax` in `cli/ax.go` does them in one command, with the manifest types of the ax API and the gRPC client that the spawner of section 11.9 uses:
+
+```
+fw ax render -f agents/reviewer.yaml --name reviewer --image <image@sha256:...> --egress deb.debian.org:80
+fw ax up     -f agents/reviewer.yaml --name reviewer --image <image@sha256:...> --server 127.0.0.1:8080 --router 127.0.0.1:8001
+fw ax status --name reviewer
+fw ax events --name reviewer <run-id>
+fw ax down   --name reviewer
+```
+
+| Flag | Verbs | Meaning |
+|---|---|---|
+| `--name` | all | The name of the Task, required. The Workspace is `<name>-ws`. |
+| `--atespace` | all | The atespace, `default` by default. |
+| `-f` | render, up | The profile file: a fragment of `fw.yaml`, such as `policy`, `access`, and `agents`, in the shape of `e2e/fleet/ax/profiles/*.yaml` of the lab. |
+| `--image` | render, up | The image by digest, `name@sha256:...`, required, because Substrate pulls an image by digest only. |
+| `--egress` | render, up | One more destination, repeated: `host:port` for an `http` rule, `tls:host:port`, `https:host:port`, or a URL. |
+| `--env` | render, up | One more `spec.env` entry, `NAME=VALUE`, repeated. It wins over a derived entry. |
+| `--workspace-file` | render, up | One more Workspace file, `path=localpath`, repeated. The path stays inside the workspace and is not `.fw/fw.yaml`. |
+| `--debug` | render, up | Sets `spec.debug`, which turns on the guest services of `ax ssh` (section 11.12). They carry no authentication. |
+| `--server` | up, status, down | The ax API. Else `AX_SERVER`, the variable of the ax command line, else `ax.server`. |
+| `--router` | up, status, events | The atenet router. Else `ax.router`. |
+| `--timeout` | up | How long `up` waits for `/readyz`, 10 minutes by default. |
+| `--format` | events | `jsonl`, the default, or `text`. |
+
+The verbs dial the addresses directly and never start a port-forward. The defaults of `ax.server` and `ax.router` are the addresses inside the cluster, so a laptop forwards the ports first and passes them. Each verb prints the addresses that it uses:
+
+```
+kubectl -n ax-system port-forward svc/ax-server 8080:8080
+kubectl -n ate-system port-forward svc/atenet-router 8001:80
+```
+
+### 21.2 What render writes
+
+`render` prints the Workspace and the Task as one stream of YAML documents, in the order of apply, with a comment that holds the warnings. The output is the same objects that `up` applies, with a placeholder `<secret: NAME>` in place of each secret value. It refuses a name that ax refuses, an image without a digest, a profile file with a key that the kernel does not know, a file path outside the workspace, and a Task that names no model. `fw ax` never chooses a model.
+
+The Workspace holds `.fw/fw.yaml`, which the kernel reads under ax (section 11.3). The file starts from the configuration of the caller, reduced to the keys that a Task shares with it: `model`, `models`, `effort`, `providers`, `bus`, `tokens`, and `tools.mcp`. A provider and an MCP server leave their headers behind, because a header can hold a secret, and each one that does gives a warning. A TLS file that a key names must reach the Task with `--workspace-file`. Each `$` of these values is doubled, so a value that the caller already expanded reaches the Task unchanged. The profile file goes on top as written: a key of the file replaces the same key, two mappings merge key by key, and a `${NAME}` of the file expands in the Task, from `spec.env`.
+
+The Task gets `spec.env` in this order: the static token when `auth.mode` holds `token`, the key of each model provider, the bearer of each MCP server, the credential for the token broker, the OTLP endpoints of the caller (`OTEL_EXPORTER_OTLP_ENDPOINT` and the endpoint of each signal), and the entries of `--env`. A secret takes its value from `--env`, else from the secrets driver of the caller. `render` prints a placeholder for each one, and for each `--env` entry with a secret name, and warns when the caller does not have a value. `up` refuses to start until every value is there.
+
+The egress rules come from the endpoints of the configuration of the Task, so no rule is forgotten: the base URL of each model provider, or the default endpoint of the adapter; each URL of the bus; `tokens.url`; the OTLP endpoints; and the endpoint of each MCP server. A child Task of `spawn.driver: ax`, an A2A peer, and an OIDC issuer need a rule from `--egress`. A plain `http` or `ws` URL gives an `http` rule and an `https`, `wss`, or `rediss` URL a `tls` passthrough rule, each for one host and its port. `--egress` adds more. The same rule appears once. An endpoint that no rule can carry gives a warning instead: a scheme such as `nats://` or `redis://`, because the egress gateway carries only HTTP and TLS, and `localhost` or an IP address, because a rule names a DNS name.
+
+### 21.3 up, status, events, and down
+
+`up` renders with the values, checks that the router answers, and only then changes anything. It applies the Workspace with `UpdateWorkspace`, creates the Task, and resumes it, because ax creates every Task suspended. Then it reads `/readyz` through the router until it answers 200. While it waits, it reads the phase of the Task and resumes a Task that ax reports as `Suspended` or `Failed`, up to three times, as the lab does after a crash at boot. Three misses of the router in a row stop the wait. A Task that exists already stops `up` with the advice to run `down`, because a Task does not change. At the end, `up` prints the address: the router and the header `ate-target-actor: <atespace>/<name>`.
+
+`status` prints the phase and the conditions of the Task from the ax API. While the Task runs, it also prints the body of `GET /v1/status` of the kernel, read through the router (section 11.8), as JSON, with `idle` and `idleSince`. It does not read the kernel of a Task that sleeps, because a request through the router wakes it. `events` reads the ledger of a run through the router, with `GET /v1/runs/{id}/events` and `Accept: application/json`, a page of 1,000 events at a time, and prints the lines of `fw events`. Both send the static token of the caller. `down` deletes the Task, tries again for a minute while Substrate refuses, waits until ax forgets the Task, and deletes the Workspace.
+
+### 21.4 The doctor in a Task
+
+A sandbox hides facts that the configuration does not show. `cli/doctor_ax.go` adds four lines to `fw doctor` through `cli.RegisterDoctorCheck`. They run inside the Task, through `ax ssh <task> -- fw doctor` or a Task with `spec.debug`, and need no cluster client. The process decides at its start: with `AX_TASK_YAML` or `AX_METADATA_URL` it registers the four lines, and otherwise one line, `ax: not under ax`. Without `AX_TASK_YAML`, the lines read the manifests from the metadata endpoints.
+
+| Line | What it checks | Verdict |
+|---|---|---|
+| `ax reach` | Each endpoint of section 21.2, with the MCP servers of the Workspaces. An `http` endpoint gets one GET without a credential, and any answer but the refusal of the egress gateway, a 403 with the body `egress denied`, passes. A `tls` endpoint gets a TLS handshake, which the gateway ends when no rule covers the name. Each probe has five seconds at most, and the probes run at the same time. | FAIL when an endpoint does not answer, with each endpoint and the fix |
+| `ax trust bundle` | The bundle of the egress gateway at `/run/ate/egress-trust-bundle/trust-bundle.pem`, where a SystemInfo volume puts it in `docs/egress-trust-bundle.md` of Agent Substrate. ax mounts no such volume yet, and an `https` rule needs the bundle, because the gateway terminates its TLS. | ok with the limit while the file is absent, because nobody in the Task can change it; ok with the number of certificates; FAIL when the file holds no certificate |
+| `ax tools user` | The user that runs the tools, as `ax.ApplyToConfig` chooses it, and whether it is a separate user from the one of `fw`. | ok with the reason when no separate user is in effect; FAIL when `tools.user` names a user that root cannot become |
+| `ax durable` | `FW_HOME` is under `/workspace` and writable, `/workspace` is a mount in `/proc/self/mountinfo`, and every binding is under it. | FAIL with each problem |
+
+Example lines for a Task of the lab in gVisor, with one egress rule missing:
+
+```
+FAIL  ax reach: 1 of 5 endpoints does not answer: mcp github github-mcp.fw-fleet.svc.cluster.local:8082 (the egress gateway denies it); fix the egress of the Task (fw ax render derives a rule for each endpoint); these answer: model openai ax-model.fw-fleet.svc.cluster.local:8080, bus nats.fw-fleet.svc.cluster.local:8080, tokens fw-front.fw-fleet.svc.cluster.local:8080, telemetry opentelemetry-collector.otel-system.svc.cluster.local:4318
+ok    ax trust bundle: absent at /run/ate/egress-trust-bundle/trust-bundle.pem; https egress rules need the SystemInfo volume there, so use http and tls rules
+ok    ax tools user: the tools run as root (0), the user of fw, because root lacks CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_SETGID, CAP_SETUID in this sandbox; no separate user is in effect, so a tool process can read the files of fw
+ok    ax durable: FW_HOME /workspace/.fw is writable on the volume at /workspace, with 1 binding on it
+```
+
+The trust bundle line counts the certificates once an ax patch mounts the SystemInfo volume at that path. The line of the kernel `tools user` names the default of ax only for root with the capabilities of section 7.12, as `ax.ApplyToConfig` does, and the `ax tools user` line adds whether the user is a separate one.

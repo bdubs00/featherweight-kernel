@@ -2,6 +2,7 @@ package fw
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -129,5 +130,56 @@ func TestToolSecretNames(t *testing.T) {
 	got := toolSecretNames(map[string]string{"NATS_URL": "x", "NPM_TOKEN": "y", "DB_PASS": "z"})
 	if !slices.Equal(got, []string{"DB_PASS", "NPM_TOKEN"}) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+// withToolEnvHook registers h for the length of a test.
+func withToolEnvHook(t *testing.T, h ToolEnvHook) {
+	t.Helper()
+	toolEnvHooks.mu.Lock()
+	saved := slices.Clone(toolEnvHooks.list)
+	toolEnvHooks.mu.Unlock()
+	RegisterToolEnv(h)
+	t.Cleanup(func() {
+		toolEnvHooks.mu.Lock()
+		toolEnvHooks.list = saved
+		toolEnvHooks.mu.Unlock()
+	})
+}
+
+// The hooks change the environment in the order of registration, and the
+// first error stops ExtendToolEnv.
+func TestExtendToolEnv(t *testing.T) {
+	cfg := DefaultConfig()
+	withToolEnvHook(t, func(_ context.Context, c *Config, env []string) ([]string, error) {
+		if c != cfg {
+			return env, nil
+		}
+		return append(env, "STEP=one"), nil
+	})
+	withToolEnvHook(t, func(ctx context.Context, c *Config, env []string) ([]string, error) {
+		if c != cfg {
+			return env, nil
+		}
+		if RunInfoFrom(ctx).RunID == "broken" {
+			return nil, errors.New("env: the environment failed")
+		}
+		return append(env, "STEP=two"), nil
+	})
+	env, err := ExtendToolEnv(context.Background(), cfg, []string{"PATH=/bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := envValue(env, "STEP"); v != "two" || !slices.Contains(env, "STEP=one") || !slices.Contains(env, "PATH=/bin") {
+		t.Fatalf("env = %v", env)
+	}
+	ctx := WithRunInfo(context.Background(), RunInfo{RunID: "broken"})
+	if _, err := ExtendToolEnv(ctx, cfg, nil); err == nil || !strings.Contains(err.Error(), "environment failed") {
+		t.Fatalf("err = %v", err)
+	}
+	// Another configuration gets the environment as it is.
+	env, err = ExtendToolEnv(ctx, DefaultConfig(), []string{"A=1"})
+	if err != nil || !slices.Equal(env, []string{"A=1"}) {
+		t.Fatalf("env = %v, err = %v", env, err)
 	}
 }
