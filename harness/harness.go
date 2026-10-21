@@ -13,8 +13,8 @@
 //
 // The package registers itself in init: it claims the block harness, it
 // gives the agent a fw.Runner, it stops the harness processes as a
-// fw.Service, and it serves the hook route of Claude Code on the native
-// API.
+// fw.Service, and it serves the hook route of Claude Code and the memory
+// route of both kinds on the native API (memory.go).
 package harness
 
 import (
@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/memory"
 	"github.com/bdubs00/featherweight-kernel/surface/native"
 )
 
@@ -98,10 +100,16 @@ type host struct {
 	// home of the harness, the home of fw, and the reserved paths, also
 	// with their links resolved.
 	private []string
+	// mem is the memory of the agent, or nil when tools.builtin names
+	// neither memory nor recall. memHTTP serves the MCP server of the
+	// memory route (memory.go).
+	mem     *memory.Store
+	memHTTP http.Handler
 
-	mu     sync.Mutex
-	hooks  map[string]*claudeProc // the running Claude Code processes, by the secret of their hook URL
-	mounts int                    // the native surfaces that serve the hook route
+	mu       sync.Mutex
+	hooks    map[string]*claudeProc // the running Claude Code processes, by the secret of their hook URL
+	memBinds map[string]*memBinding // the memory servers of the processes of the harness, by the secret of their URL
+	mounts   int                    // the native surfaces that serve the routes of the host
 }
 
 // newRunner builds the host when the configuration has the block harness.
@@ -130,7 +138,7 @@ func newHost(a *fw.Agent, c Config) (*host, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &host{a: a, cfg: c, home: home, log: a.Logger().With("harness", c.Kind), hooks: map[string]*claudeProc{}, tick: checkEvery}
+	h := &host{a: a, cfg: c, home: home, log: a.Logger().With("harness", c.Kind), hooks: map[string]*claudeProc{}, memBinds: map[string]*memBinding{}, tick: checkEvery}
 	switch c.Kind {
 	case KindOpencode:
 		h.drv, h.quiet = newOpencode(h), opencodeQuiet
@@ -150,6 +158,16 @@ func newHost(a *fw.Agent, c Config) (*host, error) {
 			if real := realPath(abs); real != abs {
 				h.private = append(h.private, real)
 			}
+		}
+	}
+	if cfg := a.Config(); builtin(cfg, "memory") || builtin(cfg, "recall") {
+		// The turn loop goes on without a tool that it cannot build, and
+		// so does the harness without the memory.
+		store, err := memory.New(cfg)
+		if err != nil {
+			h.log.Warn("harness: the harness gets no memory", "error", err)
+		} else {
+			h.mem, h.memHTTP = store, newMemHandler()
 		}
 	}
 	a.Observe(fw.ObserverFunc(h.observe))
@@ -273,8 +291,16 @@ func (h *host) prepare() error {
 	return nil
 }
 
-// Close stops every process of the harness.
-func (h *host) Close() error { return h.drv.Close() }
+// Close stops every process of the harness and closes the memory.
+func (h *host) Close() error {
+	err := h.drv.Close()
+	if h.mem != nil {
+		if cerr := h.mem.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("harness: close the memory: %w", cerr)
+		}
+	}
+	return err
+}
 
 // service stops the processes of the harness when the agent shuts down.
 func service(_ context.Context, a *fw.Agent) (io.Closer, error) {
@@ -286,13 +312,23 @@ func service(_ context.Context, a *fw.Agent) (io.Closer, error) {
 	return h, nil
 }
 
-// extend mounts the hook route of Claude Code on the native API.
+// extend mounts the hook route of Claude Code and the memory route of
+// both kinds on the native API. The memory route names its methods, so it
+// cannot clash with a route of another extension for every path, such as
+// GET /. A stateless MCP server answers 405 to GET and DELETE.
 func extend(k *native.Kit) error {
 	h, ok := k.Agent().Runner().(*host)
-	if !ok || h.cfg.Kind != KindClaudeCode {
+	if !ok || (h.cfg.Kind != KindClaudeCode && h.mem == nil) {
 		return nil
 	}
-	k.HandlePublic("POST "+hookPath+"{secret}", h.hook)
+	if h.cfg.Kind == KindClaudeCode {
+		k.HandlePublic("POST "+hookPath+"{secret}", h.hook)
+	}
+	if h.mem != nil {
+		for _, m := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+			k.HandlePublic(m+" "+memPath+"{secret}", h.memRoute)
+		}
+	}
 	h.mu.Lock()
 	h.mounts++
 	h.mu.Unlock()

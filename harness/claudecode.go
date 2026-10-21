@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os/exec"
 	"strconv"
@@ -45,6 +44,8 @@ type claude struct {
 type claudeProc struct {
 	r         *run
 	decisions map[string]decision // the decisions of the run, by call id
+	mem       *memBinding         // the memory server of the process, or nil
+	memRun    *memRun             // the run as the memory server needs it
 
 	mu       sync.Mutex
 	verdicts map[string]fw.Decision // the calls that the hook deferred, by call id
@@ -155,7 +156,7 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 	if m.key == "" {
 		return r.fail(ctx, "harness: claude-code needs the key of its model in "+m.keyEnv)
 	}
-	hook, err := c.hookURL(ctx)
+	base, err := c.nativeURL(ctx)
 	if err != nil {
 		return r.fail(ctx, err.Error())
 	}
@@ -182,8 +183,16 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 		st = r.rescan()
 		text, through := st.prompt()
 		var lines []string
+		briefed := false
 		switch {
 		case text != "":
+			if st.prompts == 0 {
+				// The index of the notes goes to the first prompt of the
+				// session alone, as data, never to the system text.
+				if block := r.memoryBlock(ctx); block != "" {
+					text, briefed = block+"\n\n"+text, true
+				}
+			}
 			lines = []string{text}
 		case answered:
 		case open:
@@ -220,7 +229,7 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 				return err
 			}
 		}
-		out, err := c.process(ctx, r, rec, m, hook, dir, sid, resume, lines, through)
+		out, err := c.process(ctx, r, rec, m, base, dir, sid, resume, lines, through, briefed)
 		if err != nil {
 			return err
 		}
@@ -235,10 +244,10 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 	}
 }
 
-// hookURL returns the loopback URL of the hook route, before its secret.
-// It waits for the native API to mount the route, since a run that a
-// restart resumes can start first.
-func (c *claude) hookURL(ctx context.Context) (string, error) {
+// nativeURL returns the loopback base URL of the native API, which serves
+// the hook route and the memory route. It waits for the native API to
+// mount the routes, since a run that a restart resumes can start first.
+func (c *claude) nativeURL(ctx context.Context) (string, error) {
 	cfg := c.h.a.Config()
 	if cfg.TLS.Provider != "" {
 		return "", errors.New("harness: claude-code calls its hook over plain HTTP on the loopback address, and the listener of fw uses TLS")
@@ -260,23 +269,21 @@ func (c *claude) hookURL(ctx context.Context) (string, error) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	host, port, err := net.SplitHostPort(cfg.Listen)
-	if err != nil {
-		return "", fmt.Errorf("harness: the listen address %q of fw: %w", cfg.Listen, err)
-	}
-	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port) + hookPath, nil
+	return c.h.listenBase()
 }
 
-// process runs one process of claude for one exchange.
-func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf, hook, dir, sid string, resume bool, lines []string, through uint64) (ccOutcome, error) {
+// process runs one process of claude for one exchange. briefed tells that
+// the first line starts with the index of the notes.
+func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf, base, dir, sid string, resume bool, lines []string, through uint64, briefed bool) (ccOutcome, error) {
 	p := newClaudeProc(r)
 	key := secret()
 	// The secret is in the arguments of the process, which a tool call of
-	// the harness can print, so the redactor knows it while it works.
+	// the harness can print, so the redactor knows it while it works. The
+	// same secret names the memory server of the process.
 	c.h.a.AddSecret(key)
+	if notes, recall := c.h.memoryTools(r.hr.Queued()); notes || recall {
+		p.mem, p.memRun = c.h.bindMemory(key, true), r.memRun()
+	}
 	c.h.mu.Lock()
 	c.h.hooks[key] = p
 	c.h.mu.Unlock()
@@ -284,14 +291,20 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		c.h.mu.Lock()
 		delete(c.h.hooks, key)
 		c.h.mu.Unlock()
+		c.h.unbindMemory(key)
 	}()
-	settings := mustJSON(hookSettings(hook, key))
+	settings := mustJSON(hookSettings(base+hookPath, key))
 	argv := append([]string(nil), c.h.cfg.Command...)
 	if len(argv) == 0 {
 		argv = []string{"claude"}
 	}
 	argv = append(argv, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--model", m.name, "--settings", settings)
+	if p.mem != nil {
+		// The memory server goes beside the servers of the repository, so
+		// --strict-mcp-config stays off.
+		argv = append(argv, "--mcp-config", mustJSON(claudeMCPConfig(base+memPath+key)))
+	}
 	if resume {
 		argv = append(argv, "--resume", sid)
 	} else {
@@ -304,8 +317,8 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 	if b.MaxCostUSD > 0 {
 		argv = append(argv, "--max-budget-usd", strconv.FormatFloat(max(b.MaxCostUSD-u.CostUSD, 0.0001), 'f', 4, 64))
 	}
-	if in := strings.TrimSpace(r.hr.Queued().Instructions); in != "" {
-		argv = append(argv, "--append-system-prompt", in)
+	if sys := r.systemText(p.mem != nil); sys != "" {
+		argv = append(argv, "--append-system-prompt", sys)
 	}
 	extra := []string{
 		"CLAUDE_CONFIG_DIR=" + c.h.home,
@@ -396,7 +409,7 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		}
 	}
 	if len(lines) > 0 {
-		if err := r.mark(ctx, EventData{Kind: KindPrompt, Seq: through}); err != nil {
+		if err := r.mark(ctx, EventData{Kind: KindPrompt, Seq: through, Context: briefed}); err != nil {
 			kill()
 			return 0, err
 		}
@@ -883,8 +896,7 @@ type hookInput struct {
 // of its run. Only a process that this kernel started knows the secret of
 // its URL, and only a caller on the loopback address reaches it.
 func (h *host) hook(w http.ResponseWriter, req *http.Request) {
-	ip, _, err := net.SplitHostPort(req.RemoteAddr)
-	if addr := net.ParseIP(ip); err != nil || addr == nil || !addr.IsLoopback() {
+	if !fromLoopback(req) {
 		http.NotFound(w, req)
 		return
 	}
@@ -926,12 +938,12 @@ func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) 
 		if allow, why := p.r.recheck(ctx, d); !allow {
 			return "deny", why
 		}
-		return "allow", ""
+		return p.allow(ctx, in.ToolUseID, tool, in.Input)
 	}
 	v := p.r.decide(ctx, in.ToolUseID, tool, in.Input)
 	switch v.Verdict {
 	case fw.VerdictAllow:
-		return "allow", ""
+		return p.allow(ctx, in.ToolUseID, tool, in.Input)
 	case fw.VerdictDeny:
 		return "deny", "denied by policy: " + v.Reason
 	}
@@ -945,6 +957,17 @@ func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) 
 	p.verdicts[in.ToolUseID] = v
 	p.mu.Unlock()
 	return "defer", v.Reason
+}
+
+// allow answers a call that the policy allowed. A call of the memory
+// server is armed first, so the memory server makes it for this run.
+func (p *claudeProc) allow(ctx context.Context, id, tool string, input json.RawMessage) (string, string) {
+	if t := memToolOf(KindClaudeCode, tool); t != "" && p.mem != nil {
+		if _, err := p.mem.arm(ctx, &memArm{tool: t, input: input, callID: id, run: p.memRun}); err != nil {
+			return "deny", "harness: " + err.Error()
+		}
+	}
+	return "allow", ""
 }
 
 // answerHook writes the answer of a PreToolUse hook.

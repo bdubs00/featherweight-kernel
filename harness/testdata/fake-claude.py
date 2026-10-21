@@ -3,6 +3,9 @@
 # stream-json lines of claude -p, asks the PreToolUse hook that it finds in
 # --settings about one Write call, exits with tool_deferred when the hook
 # says defer, and continues the deferred call when it runs with --resume.
+# It records each message that it reads in fake-prompts.jsonl, and it calls
+# the remember tool of the MCP server that --mcp-config names, as an MCP
+# client of the revision 2025-06-18 does.
 import json
 import os
 import sys
@@ -41,6 +44,29 @@ def ask(tid, name, inp):
     req = urllib.request.Request(hook, data=body, headers={"Content-Type": "application/json"})
     resp = json.load(opener.open(req))["hookSpecificOutput"]
     return resp["permissionDecision"], resp.get("permissionDecisionReason", "")
+
+
+def mcp_call(tool, inp):
+    # initialize, notifications/initialized, and tools/call, each a POST
+    # of its own, as the streamable HTTP transport sends them.
+    url = json.loads(arg("--mcp-config"))["mcpServers"]["fw-memory"]["url"]
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+
+    def post(msg, version=None):
+        h = dict(headers)
+        if version:
+            h["MCP-Protocol-Version"] = version
+        req = urllib.request.Request(url, data=json.dumps(msg).encode(), headers=h)
+        body = opener.open(req).read().decode()
+        return json.loads(body) if body.strip() else None
+
+    init = post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fake-claude", "version": "1"}}})
+    version = init["result"]["protocolVersion"]
+    post({"jsonrpc": "2.0", "method": "notifications/initialized"}, version)
+    res = post({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": inp}}, version)["result"]
+    text = "\n".join(c.get("text", "") for c in res.get("content", []))
+    return text, bool(res.get("isError"))
 
 
 def result(text, **extra):
@@ -87,7 +113,29 @@ if resume and state.get("deferred"):
 for line in sys.stdin:
     msg = json.loads(line)
     text = msg["message"]["content"]
-    if "show settings" in text:
+    with open(os.path.join(home, "fake-prompts.jsonl"), "a") as f:
+        f.write(json.dumps({"text": text}) + "\n")
+    if "remember that" in text:
+        # One call of the remember tool of the memory server of fw.
+        tid, name = "toolu_m", "mcp__fw-memory__remember"
+        inp = {"path": "prefs.md", "text": "The user likes tea."}
+        out({"type": "assistant", "parent_tool_use_id": None,
+             "message": {"id": "msg_m", "model": arg("--model"), "role": "assistant", "stop_reason": "tool_use",
+                         "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}], "usage": usage}})
+        decision, reason = ask(tid, name, inp)
+        with open(os.path.join(home, "fake-decisions.jsonl"), "a") as f:
+            f.write(json.dumps({"id": tid, "decision": decision, "reason": reason}) + "\n")
+        if decision == "allow":
+            content, err = mcp_call("remember", inp)
+        else:
+            content, err = reason, True
+        out({"type": "user", "parent_tool_use_id": None,
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": content, "is_error": err}]}})
+        out({"type": "assistant", "parent_tool_use_id": None,
+             "message": {"id": "msg_m2", "model": arg("--model"), "role": "assistant", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "Remembered."}], "usage": usage}})
+        result("Remembered.")
+    elif "show settings" in text:
         # A tool call whose result holds the arguments of the process, as
         # the output of ps does.
         inp = {"file_path": "x.txt"}

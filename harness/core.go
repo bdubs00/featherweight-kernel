@@ -35,6 +35,9 @@ import (
 //   - fw.start: the run is a session of a harness.
 //   - fw.session: the harness created the session Session.
 //   - fw.prompt: the harness got the messages of the run up to Seq.
+//     Context is true when the prompt started with the index of the
+//     notes of the run as data, which only the first prompt of a session
+//     holds.
 //   - fw.answer: the harness got the decision of the approval Approval.
 //   - fw.idle: the harness finished the exchange that the latest
 //     fw.prompt or fw.answer started.
@@ -48,6 +51,7 @@ type EventData struct {
 	Session  string          `json:"session,omitempty"`
 	Seq      uint64          `json:"seq,omitempty"`
 	Approval string          `json:"approval,omitempty"`
+	Context  bool            `json:"context,omitempty"`
 	Data     json.RawMessage `json:"data,omitempty"`
 }
 
@@ -67,6 +71,7 @@ type state struct {
 	session  string
 	sessSeq  uint64 // the fw.harness.event that named the session
 	prompted uint64 // the latest message that the harness got
+	prompts  int    // the fw.prompt events: 0 before the first prompt of the session
 	exchange uint64 // the latest fw.prompt or fw.answer
 	idle     uint64 // the latest fw.idle
 	lastSeq  uint64
@@ -185,6 +190,7 @@ func scan(evs []fw.Event) *state {
 			case KindSession:
 				s.session, s.sessSeq = d.Session, e.Seq
 			case KindPrompt:
+				s.prompts++
 				s.prompted = max(s.prompted, d.Seq)
 				s.exchange = e.Seq
 			case KindAnswer:
@@ -549,23 +555,29 @@ func toolSpec(name string) fw.ToolSpec {
 }
 
 // readOnly reports whether a tool of a harness changes nothing in the
-// workspace.
+// workspace. recall and list of the memory server read the memory alone.
 func readOnly(name string) bool {
 	switch name {
 	case "read", "glob", "grep", "list", "ls", "lsp", "skill", "webfetch", "websearch", "codesearch",
 		"todoread", "todowrite", "bashoutput", "question", "askuserquestion", "exitplanmode":
 		return true
 	}
-	return false
+	return memReadOnly(name)
 }
 
 // decide asks the policy of the run about a tool call of the harness. A
 // call with a path inside a private path of the host gets a deny first,
 // whatever the policy says, as the file tracker skips those paths: the
-// home of the harness holds the transcripts of every run.
+// home of the harness holds the transcripts of every run. A call of the
+// memory server gets a deny first when the run has no memory tool.
 func (r *run) decide(ctx context.Context, callID, tool string, input json.RawMessage) fw.Decision {
 	if len(input) == 0 || !json.Valid(input) {
 		input = json.RawMessage(`{}`)
+	}
+	if t := memToolOf(r.h.cfg.Kind, tool); t != "" {
+		if why := r.memDenied(t); why != "" {
+			return fw.Decision{Verdict: fw.VerdictDeny, Reason: why}
+		}
 	}
 	if p := r.privatePath(tool, input); p != "" {
 		return fw.Decision{Verdict: fw.VerdictDeny, Reason: "the path " + p + " is inside the home of the harness, the home of fw, or a path that fw keeps for itself"}
