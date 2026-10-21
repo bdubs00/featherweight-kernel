@@ -5,13 +5,15 @@ package fw
 // loop finds the point to continue from in the log itself:
 //
 //   - a fw.model.requested without a response sends the request again;
-//   - a fw.tool.requested without a result runs an idempotent tool again, and
-//     asks with the reason "rerun after resume" before another tool, unless
-//     its Continuer can finish from recorded questions and their answers;
+//   - a fw.tool.requested without a result runs the call again when the
+//     tool says that the call is safe to repeat (rerunSafe), and asks with
+//     the reason "rerun after resume" before any other call, unless its
+//     Continuer can finish from recorded questions and their answers;
 //   - a pending fw.approval.requested waits for Decide.
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -232,4 +234,17 @@ func (a *Agent) resume(runs []*runState) {
 		}
 		rs.mu.Unlock()
 	}
+}
+
+// rerunSafe reports whether a call that a restart cut before its result
+// can run again without an approval. A tool that implements
+// CallIdempotency decides for each call from its input, in place of
+// ToolSpec.Idempotent, so a view of the memory tool runs again and an
+// insert asks. Any other tool decides for all its calls with
+// ToolSpec.Idempotent.
+func rerunSafe(t Tool, spec ToolSpec, input json.RawMessage) bool {
+	if c, ok := callIdempotencyOf(t); ok {
+		return c.IdempotentCall(input)
+	}
+	return spec.Idempotent
 }

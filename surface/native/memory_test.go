@@ -1,10 +1,15 @@
 package native
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -179,4 +184,137 @@ func TestMemoryRoutesPrincipalScope(t *testing.T) {
 			decodeProblem(t, resp, b, http.StatusNotFound)
 		})
 	}
+}
+
+// syncBuffer is a log sink that several goroutines write.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestMemoryRoutesSharedScopeNeedsAdmin checks that a note of the shared
+// scope, which every profile of the process reads, is written and removed
+// by an admin of the process only, and that each write and removal goes to
+// the log with the caller, the op, the size, and the hash, never the text.
+func TestMemoryRoutesSharedScopeNeedsAdmin(t *testing.T) {
+	cfg := fw.DefaultConfig()
+	cfg.Home = t.TempDir()
+	cfg.Tools.Memory.Scope = "shared"
+	cfg.Access.Admins = []string{"alice"}
+	// Bob owns the profile, so he edits it, but he is no admin.
+	cfg.Agents = map[string]fw.AgentProfile{"default": {Access: &fw.Access{Owners: []string{"bob"}}}}
+	logs := &syncBuffer{}
+	a := newAgent(t, newScript(endTurn("ok")).model(), fw.WithConfig(cfg), fw.WithAuthn(people),
+		fw.WithLogger(slog.New(slog.NewJSONHandler(logs, nil))))
+	srv := serve(t, a)
+	notes := srv.URL + "/v1/memory/notes"
+	put := func(path, body, auth string) (*http.Response, []byte) {
+		req, err := http.NewRequest("PUT", notes+"/"+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", auth)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		out, _ := io.ReadAll(res.Body)
+		return res, out
+	}
+
+	resp, b := put("team.md", "the secret plan of bob", asBob)
+	p := decodeProblem(t, resp, b, http.StatusForbidden)
+	if !strings.Contains(p.Detail, "access.admins") {
+		t.Fatalf("refusal = %q", p.Detail)
+	}
+	resp, b = put("team.md", "the team decision\n", asAlice)
+	var rec fw.MemoryRecord
+	decodeJSON(t, resp, b, http.StatusOK, &rec)
+	if rec.Ref != "mem://shared/team.md" {
+		t.Fatalf("ref = %q", rec.Ref)
+	}
+	resp, b = do(t, "DELETE", notes+"/team.md", "", "Authorization", asBob)
+	decodeProblem(t, resp, b, http.StatusForbidden)
+	// Whoever runs the profile reads the shared notes.
+	var list noteList
+	resp, b = do(t, "GET", notes, "", "Authorization", asBob)
+	decodeJSON(t, resp, b, http.StatusOK, &list)
+	if list.Scope != "shared" || len(list.Notes) != 1 {
+		t.Fatalf("bob reads %+v", list)
+	}
+	resp, b = do(t, "DELETE", notes+"/team.md", "", "Authorization", asAlice)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete = %d: %s", resp.StatusCode, b)
+	}
+
+	var lines []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(l), &m) == nil && strings.HasPrefix(fmt.Sprint(m["msg"]), "native: memory note") {
+			lines = append(lines, m)
+		}
+	}
+	if len(lines) != 2 {
+		t.Fatalf("memory log lines = %v", lines)
+	}
+	for i, op := range []string{fw.FileCreated, fw.FileRemoved} {
+		l := lines[i]
+		if l["caller"] != "alice" || l["op"] != op || l["ref"] != "mem://shared/team.md" || l["scope"] != "shared" ||
+			l["size"] != float64(len("the team decision\n")) || l["sha256"] != rec.Hash {
+			t.Errorf("log line %d = %v", i, l)
+		}
+	}
+	if strings.Contains(logs.String(), "decision") || strings.Contains(logs.String(), "secret plan") {
+		t.Fatalf("the log holds the text of a note:\n%s", logs.String())
+	}
+}
+
+// TestMemoryRoutesHideAgents checks that the routes answer an agent that
+// the caller cannot view as they answer an agent that does not exist, as
+// GET /v1/agents/{name} does, and that a directory is a bad request.
+func TestMemoryRoutesHideAgents(t *testing.T) {
+	a := manageAgent(t, newScript(endTurn("ok")).model())
+	srv := serve(t, a)
+	notes := srv.URL + "/v1/memory/notes"
+	detail := func(method, url, auth string, status int) string {
+		t.Helper()
+		resp, b := do(t, method, url, "", "Authorization", auth)
+		return decodeProblem(t, resp, b, status).Detail
+	}
+	for _, url := range []string{notes + "?agent=%s", notes + "/a.md?agent=%s", srv.URL + "/v1/memory?q=x&agent=%s"} {
+		hidden := detail("GET", fmt.Sprintf(url, "private"), asBob, http.StatusNotFound)
+		missing := detail("GET", fmt.Sprintf(url, "nobody"), asBob, http.StatusNotFound)
+		if strings.Replace(hidden, "private", "nobody", 1) != missing {
+			t.Errorf("%s: hidden %q, missing %q", url, hidden, missing)
+		}
+	}
+	if d := detail("PUT", notes+"/a.md?agent=private", asBob, http.StatusNotFound); !strings.Contains(d, `"private"`) {
+		t.Errorf("a write to a hidden agent = %q", d)
+	}
+	if got, want := detail("GET", srv.URL+"/v1/agents/private", asBob, http.StatusNotFound), detail("GET", notes+"?agent=private", asBob, http.StatusNotFound); got != want {
+		t.Errorf("/v1/agents says %q, /v1/memory says %q", got, want)
+	}
+
+	// A directory is not a note: a bad request, never a server error.
+	resp, b := do(t, "PUT", notes+"/dir/inner.md?agent=reviewer", "x", "Authorization", asAlice)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("put = %d: %s", resp.StatusCode, b)
+	}
+	resp, b = do(t, "GET", notes+"/dir?agent=reviewer", "", "Authorization", asAlice)
+	decodeProblem(t, resp, b, http.StatusBadRequest)
+	resp, b = do(t, "PUT", notes+"/dir?agent=reviewer", "x", "Authorization", asAlice)
+	decodeProblem(t, resp, b, http.StatusBadRequest)
 }

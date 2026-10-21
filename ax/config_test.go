@@ -207,6 +207,25 @@ func TestApplyToConfigPerRun(t *testing.T) {
 	}
 }
 
+// Under ax each person keeps the notes of the memory apart unless the
+// configuration names a scope.
+func TestApplyToConfigMemoryScope(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	cfg := fw.DefaultConfig()
+	ApplyToConfig(cfg, &Task{}, nil)
+	if cfg.Tools.Memory.Scope != fw.MemoryScopePrincipal {
+		t.Errorf("scope under ax = %q, want principal", cfg.Tools.Memory.Scope)
+	}
+	for _, scope := range []string{fw.MemoryScopeAgent, fw.MemoryScopeShared} {
+		cfg = fw.DefaultConfig()
+		cfg.Tools.Memory.Scope = scope
+		ApplyToConfig(cfg, &Task{}, nil)
+		if cfg.Tools.Memory.Scope != scope {
+			t.Errorf("an explicit scope %s became %q", scope, cfg.Tools.Memory.Scope)
+		}
+	}
+}
+
 // The goal of a binding prepares the workspace that every run shares, so
 // its run works in the root of the files tool, also with perRun.
 func TestBootstrapWorksInTheRoot(t *testing.T) {

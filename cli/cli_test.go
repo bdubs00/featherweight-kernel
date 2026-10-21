@@ -794,8 +794,22 @@ func TestInitVerb(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the starter does not load: %v", err)
 	}
-	if cfg.Agents["default"].System != fw.DefaultSystemPrompt+"\n" || cfg.Budget.MaxRepeats != 5 || cfg.Model != "anthropic/claude-opus-5-5" {
+	// The starter names no model: there is no paid default, and fw init
+	// says that a model must be set.
+	if cfg.Agents["default"].System != fw.DefaultSystemPrompt+"\n" || cfg.Budget.MaxRepeats != 5 || cfg.Model != "" {
 		t.Errorf("loaded = model %q budget %+v system %q", cfg.Model, cfg.Budget, cfg.Agents["default"].System)
+	}
+	if !strings.Contains(out, modelNeeded) {
+		t.Errorf("the output does not say that a model must be set:\n%s", out)
+	}
+	starter, _ := os.ReadFile(filepath.Join(dir, "fw.yaml"))
+	for _, want := range []string{"# model: anthropic/", "# model: gemini/", "# model: openai/", "principal", "shared"} {
+		if !strings.Contains(string(starter), want) {
+			t.Errorf("the starter lacks %q", want)
+		}
+	}
+	if cfg.Tools.Memory.Scope != "" {
+		t.Errorf("the starter sets the memory scope %q", cfg.Tools.Memory.Scope)
 	}
 	if !slices.Equal(cfg.Tools.Builtin, fw.DefaultConfig().Tools.Builtin) || cfg.Time != fw.DefaultConfig().Time {
 		t.Errorf("starter builtin %v, time %+v; want the defaults", cfg.Tools.Builtin, cfg.Time)

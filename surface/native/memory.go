@@ -5,10 +5,11 @@ package native
 // The scope of a request comes from the agent that the request names and
 // the principal that signed it, never from a field of the request, so a
 // caller reads and writes only the notes that a run of that caller reads
-// and writes.
+// and writes. Each write and each removal goes to the log with the subject
+// of the caller, the operation, the ref, the scope, the size, and the hash
+// of the note, never its text, because no run records it in a ledger.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -39,10 +40,18 @@ func (s *server) memoryRoutes() []struct {
 }
 
 // memoryScope checks the agent of the request and the action of the caller
-// on it, and returns the scope of the caller in that agent. Reading needs
-// the right to run the agent. Writing a note that every person of the agent
-// reads, in the agent or the shared scope, needs the right to edit the
-// agent; writing a note of the principal scope needs the right to run it.
+// on it, and returns the scope of the caller in that agent.
+//
+// An agent that does not exist and an agent that the caller cannot view
+// get the same answer, 404 with the same text, as GET /v1/agents/{name}
+// gives, so the routes do not tell which agents exist. A caller who can
+// view the agent and lacks the action gets 403.
+//
+// Reading needs the right to run the agent. Writing a note of the principal
+// scope needs the right to run the agent too. Writing a note of the agent
+// scope, which every person of the agent reads, needs the right to edit the
+// agent. Writing a note of the shared scope, which every profile of the
+// process reads, needs the admin role of the process (access.admins).
 func (s *server) memoryScope(w http.ResponseWriter, r *http.Request, write bool) (fw.MemoryScope, bool) {
 	if s.mem == nil {
 		problem(w, r, http.StatusServiceUnavailable, "the memory is not available: "+s.memErr.Error())
@@ -52,8 +61,24 @@ func (s *server) memoryScope(w http.ResponseWriter, r *http.Request, write bool)
 	if agent == "" {
 		agent = "default"
 	}
-	if !memory.ValidAgentName(agent) || !s.agentExists(agent) {
+	unknown := func() {
 		problem(w, r, http.StatusNotFound, "no agent profile has the name "+strconv.Quote(agent))
+	}
+	if !memory.ValidAgentName(agent) {
+		unknown()
+		return fw.MemoryScope{}, false
+	}
+	if _, real := s.a.ProfileNamed(agent); real {
+		switch err := s.a.Authorize(r.Context(), fw.ActionAgentView, fw.Target{Agent: agent}); {
+		case errors.Is(err, fw.ErrForbidden):
+			unknown()
+			return fw.MemoryScope{}, false
+		case err != nil:
+			s.fail(w, r, err)
+			return fw.MemoryScope{}, false
+		}
+	} else if agent != "default" {
+		unknown()
 		return fw.MemoryScope{}, false
 	}
 	info := fw.RunInfo{Agent: agent}
@@ -61,28 +86,33 @@ func (s *server) memoryScope(w http.ResponseWriter, r *http.Request, write bool)
 		info.Principal = p.Subject
 	}
 	scope := s.mem.Scope(info)
-	action := fw.ActionAgentRun
-	if write && scope.Kind != fw.MemoryPrincipalScope {
-		action = fw.ActionAgentEdit
+	action, target := fw.ActionAgentRun, fw.Target{Agent: agent}
+	if write {
+		switch scope.Kind {
+		case fw.MemoryAgentScope:
+			action = fw.ActionAgentEdit
+		case fw.MemorySharedScope:
+			action, target = fw.ActionAdmin, fw.Target{}
+		}
 	}
-	if err := s.a.Authorize(r.Context(), action, fw.Target{Agent: agent}); err != nil {
+	if err := s.a.Authorize(r.Context(), action, target); err != nil {
+		if action == fw.ActionAdmin && errors.Is(err, fw.ErrForbidden) {
+			problem(w, r, http.StatusForbidden, "a note of the shared scope reaches every profile of this process, so writing or removing one needs the admin role of the process (access.admins)")
+			return fw.MemoryScope{}, false
+		}
 		s.fail(w, r, err)
 		return fw.MemoryScope{}, false
 	}
 	return scope, true
 }
 
-// agentExists reports whether the agent is the default profile or a
-// configured one.
-func (s *server) agentExists(name string) bool {
-	if name == "default" {
-		return true
+// callerOf returns the subject of the caller of a request, for a log line,
+// or "" for a call of the process itself.
+func callerOf(r *http.Request) string {
+	if p := fw.PrincipalFrom(r.Context()); p != nil {
+		return p.Subject
 	}
-	all, err := s.a.ListProfiles(context.Background())
-	if err != nil {
-		return false
-	}
-	return slices.ContainsFunc(all, func(p fw.AgentProfile) bool { return p.Name == name })
+	return ""
 }
 
 // searchMemory answers GET /v1/memory?agent=&q=&kinds=&limit= with the
@@ -125,15 +155,19 @@ func (s *server) searchMemory(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = min(n, memory.MaxLimit)
 	}
-	hits, err := s.mem.Search(fw.WithAgent(r.Context(), s.a), scope, fw.MemoryQuery{Text: text, Kinds: kinds, Limit: limit})
+	res, err := s.mem.Recall(fw.WithAgent(r.Context(), s.a), scope, fw.MemoryQuery{Text: text, Kinds: kinds, Limit: limit})
 	if err != nil {
 		problem(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
-	if hits == nil {
-		hits = []fw.MemoryHit{}
+	if res.Hits == nil {
+		res.Hits = []fw.MemoryHit{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scope": scope.Kind, "hits": hits})
+	out := map[string]any{"scope": scope.Kind, "hits": res.Hits}
+	if len(res.Notes) > 0 {
+		out["notes"] = res.Notes
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // listNotes answers GET /v1/memory/notes?agent= with the notes of the
@@ -228,12 +262,17 @@ func (s *server) putNote(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(r.Header.Get("If-None-Match")) == "*" {
 		ifHash = "absent"
 	}
-	rec, err := s.mem.Remember(r.Context(), scope, fw.MemoryRecord{Ref: ref, Body: string(body)}, ifHash)
+	// No run records this write in a ledger, so the change that the store
+	// records goes to the log, with the caller.
+	var change fw.MemoryChangedData
+	ctx := fw.WithMemoryRecorder(r.Context(), func(d fw.MemoryChangedData) { change = d })
+	rec, err := s.mem.Remember(ctx, scope, fw.MemoryRecord{Ref: ref, Body: string(body)}, ifHash)
 	if err != nil {
 		s.failMemory(w, r, err)
 		return
 	}
-	s.a.Logger().Info("native: memory note written", "agent", scope.Agent, "scope", scope.Kind, "ref", rec.Ref, "size", rec.Size, "sha256", rec.Hash)
+	s.a.Logger().Info("native: memory note written", "caller", callerOf(r), "op", change.Op, "agent", scope.Agent, "scope", scope.Kind,
+		"ref", rec.Ref, "size", change.Size, "sha256", change.SHA256)
 	w.Header().Set("ETag", strconv.Quote(rec.Hash))
 	writeJSON(w, http.StatusOK, rec)
 }
@@ -249,11 +288,13 @@ func (s *server) deleteNote(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.mem.Forget(r.Context(), scope, ref); err != nil {
+	gone, err := s.mem.ForgetNote(r.Context(), scope, ref)
+	if err != nil {
 		s.failMemory(w, r, err)
 		return
 	}
-	s.a.Logger().Info("native: memory note removed", "agent", scope.Agent, "scope", scope.Kind, "ref", ref)
+	s.a.Logger().Info("native: memory note removed", "caller", callerOf(r), "op", fw.FileRemoved, "agent", scope.Agent, "scope", scope.Kind,
+		"ref", gone.Ref, "size", gone.Size, "sha256", gone.Hash)
 	w.WriteHeader(http.StatusNoContent)
 }
 

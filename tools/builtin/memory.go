@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -88,8 +89,9 @@ type memoryTool struct {
 }
 
 var (
-	_ fw.Briefer        = (*memoryTool)(nil)
-	_ fw.ContextBriefer = (*memoryTool)(nil)
+	_ fw.Briefer         = (*memoryTool)(nil)
+	_ fw.ContextBriefer  = (*memoryTool)(nil)
+	_ fw.CallIdempotency = (*memoryTool)(nil)
 )
 
 func newMemory(cfg *fw.Config) (fw.Tool, error) {
@@ -108,23 +110,67 @@ func newMemory(cfg *fw.Config) (fw.Tool, error) {
 // Close implements io.Closer.
 func (t *memoryTool) Close() error { return t.store.Close() }
 
-// Spec implements fw.Tool.
+// Spec implements fw.Tool. The spec leaves Idempotent false, because
+// insert and str_replace change a note again when they run twice; the tool
+// tells the kernel for each call through IdempotentCall.
 func (t *memoryTool) Spec() fw.ToolSpec {
 	s := newSpec("memory", memoryDescription, memorySchema)
 	s.Native = fw.NativeMemory
-	// ToolSpec classifies every command together. insert and str_replace
-	// can change a file again on retry, so even a view needs recovery approval
-	// when the result of an interrupted call is missing.
 	return s
 }
 
-// Call implements fw.Tool. The run in the context selects the scope.
+// memoryCommand returns the command of an input, or "" when the input
+// cannot be read.
+func memoryCommand(input json.RawMessage) string {
+	var in struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(input, &in) != nil {
+		return ""
+	}
+	return in.Command
+}
+
+// IdempotentCall implements fw.CallIdempotency. After a restart cut a call
+// before its result, view, create, delete, and rename run again without an
+// approval: a second run leaves the notes as the first one did, or fails
+// because the first one already moved or removed the note. insert and
+// str_replace change the note again, so they wait for an approval.
+func (t *memoryTool) IdempotentCall(input json.RawMessage) bool {
+	switch memoryCommand(input) {
+	case "view", "create", "delete", "rename":
+		return true
+	}
+	return false
+}
+
+// Call implements fw.Tool. The run in the context selects the scope. A
+// command that writes runs while it holds the lock of the scope
+// (memory.Store.Locked), so the read of str_replace and insert and their
+// write are one step, and a concurrent write through the native API or of
+// another run is never lost.
 func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResult, error) {
-	files, err := t.store.Notes(ctx, t.store.Scope(fw.RunInfoFrom(ctx)))
+	scope := t.store.Scope(fw.RunInfoFrom(ctx))
+	if cmd := memoryCommand(input); cmd == "view" || !slices.Contains(memoryCommands, cmd) {
+		files, err := t.store.Notes(ctx, scope)
+		if err != nil {
+			return fw.ErrorResult("Error: " + err.Error()), nil
+		}
+		return t.ed.call(ctx, files, input)
+	}
+	var res fw.ToolResult
+	err := t.store.Locked(ctx, scope, func(files fw.Files) error {
+		var err error
+		res, err = t.ed.call(ctx, files, input)
+		return err
+	})
 	if err != nil {
+		if ctx.Err() != nil {
+			return canceled(ctx, "memory")
+		}
 		return fw.ErrorResult("Error: " + err.Error()), nil
 	}
-	return t.ed.call(ctx, files, input)
+	return res, nil
 }
 
 // Brief implements fw.Briefer. It returns the memory section of the system

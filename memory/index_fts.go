@@ -36,8 +36,10 @@ type ftsIndex struct {
 func newNoteIndex(string) noteIndex { return &ftsIndex{dbs: map[string]*sql.DB{}} }
 
 // schemaVersion is the version of the database. A file with another version
-// is built again from the notes.
-const schemaVersion = 2
+// is built again from the notes. Version 3 turns on the secure delete of
+// FTS5, so a file of version 2, which can hold the words of a removed
+// note, goes.
+const schemaVersion = 3
 
 // applicationID marks a database of this index ("FWME").
 const applicationID = 0x46574D45
@@ -213,6 +215,9 @@ func prepare(db *sql.DB) error {
 			INSERT INTO notes_fts(notes_fts, rowid, path, title, body) VALUES ('delete', old.id, old.path, old.title, old.body);
 			INSERT INTO notes_fts(rowid, path, title, body) VALUES (new.id, new.path, new.title, new.body);
 		END`,
+		// A delete takes the words of the row out of the full-text index at
+		// once, not at a later merge of its segments.
+		`INSERT INTO notes_fts(notes_fts, rank) VALUES ('secure-delete', 1)`,
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("memory: prepare index: %w", err)
@@ -270,12 +275,14 @@ func rebuildable(err error) bool {
 }
 
 // openDB opens one database file with one connection, a busy timeout,
-// immediate transactions, and a rollback journal. A journal in WAL mode
-// needs shared memory, which a sandbox volume does not always give. An idle
-// connection closes after a minute, so the file of a scope that nobody
-// searches holds no descriptor.
+// immediate transactions, a rollback journal, and secure delete. A journal
+// in WAL mode needs shared memory, which a sandbox volume does not always
+// give. Secure delete writes zeros over the content that a delete frees, so
+// the text of a removed note does not stay in the file. An idle connection
+// closes after a minute, so the file of a scope that nobody searches holds
+// no descriptor; each new connection sets the pragmas again.
 func openDB(file string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", file+"?_busy_timeout=5000&_txlock=immediate&_pragma=journal_mode(DELETE)")
+	db, err := sql.Open("sqlite", file+"?_busy_timeout=5000&_txlock=immediate&_pragma=journal_mode(DELETE)&_pragma=secure_delete(1)")
 	if err != nil {
 		return nil, fmt.Errorf("memory: open index: %w", err)
 	}
@@ -286,9 +293,10 @@ func openDB(file string) (*sql.DB, error) {
 
 // syncNotes reads the notes of dir and updates the rows that changed, by
 // modification time, size, and inode. It removes the rows whose notes are
-// gone.
+// gone. After a walk that a bound cut, a row that the walk did not reach
+// stays while its note exists.
 func syncNotes(ctx context.Context, db *sql.DB, dir string) error {
-	notes, err := walkNotes(ctx, dir, 0)
+	notes, cut, err := walkNotes(ctx, dir, 0)
 	if err != nil {
 		return err
 	}
@@ -315,7 +323,7 @@ func syncNotes(ctx context.Context, db *sql.DB, dir string) error {
 		return err
 	}
 	var files fs.FS
-	if len(notes) > 0 {
+	if len(notes) > 0 || cut {
 		f, err := fw.DirFiles(dir)
 		if err != nil {
 			return err
@@ -341,11 +349,43 @@ func syncNotes(ctx context.Context, db *sql.DB, dir string) error {
 		}
 	}
 	for name := range known {
+		if cut {
+			if _, err := fs.Stat(files, name); err == nil {
+				continue
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM notes WHERE path = ?`, name); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// Remove deletes the row of the note name, and the rows of every note
+// under name when it is a directory, from the index in indexDir. An index
+// that does not exist has no rows, so Remove creates nothing. The triggers
+// of the schema take the words out of the full-text index, and secure
+// delete writes zeros over the freed content.
+func (x *ftsIndex) Remove(ctx context.Context, indexDir, name string) error {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	db, ok := x.dbs[indexDir]
+	if !ok {
+		if _, err := os.Stat(filepath.Join(indexDir, "notes.db")); err != nil {
+			return nil
+		}
+		var err error
+		if db, err = x.open(indexDir); err != nil {
+			return err
+		}
+	}
+	// The paths under name sort from name+"/" up to name+"0", because '0'
+	// follows '/' in the byte order of the column.
+	_, err := db.ExecContext(ctx, `DELETE FROM notes WHERE path = ? OR (path >= ? AND path < ?)`, name, name+"/", name+"0")
+	if err != nil {
+		return fmt.Errorf("memory: remove %s from the index: %w", name, err)
+	}
+	return nil
 }
 
 // ftsMatch turns words into an FTS5 query. Each word is a quoted string,

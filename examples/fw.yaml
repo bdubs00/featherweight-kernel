@@ -72,7 +72,12 @@ access:                         # who does what; an entry is a subject, a glob, 
   creators: []                  # who can create agents through the API; empty is the admins, plus everyone when default is open
   # external: { mcp: control, tool: authorize }   # a control plane decides every request, and the entries above do not apply; FW_ACCESS_EXTERNAL_MCP
 
-model: anthropic/claude-opus-5-5  # no default: without this key, FW_MODEL, or a profile model, every run is refused
+# A model must be set: there is no default model, and without this key,
+# FW_MODEL, or the model of a profile, every run is refused. Remove the # of
+# one line, or write another provider/model selector.
+# model: anthropic/claude-opus-5-5  # the credential comes from ANTHROPIC_API_KEY
+# model: gemini/gemini-3.8-flash    # the credential comes from GEMINI_API_KEY
+# model: openai/<model>             # the credential comes from OPENAI_API_KEY; providers.openai.baseUrl names a local server
 models:                         # named selectors that profiles can reference; FW_MODELS_<NAME>
   fast: anthropic/claude-haiku-5-5
 effort: high                    # low | medium | high | xhigh | max
@@ -151,7 +156,7 @@ tools:
       NATS_URL: ${NATS_URL:-nats://nats:4222}
     timeout: 0s                 # one command; 0 leaves the limit to tools.limits
   memory:
-    scope: agent                # agent: notes per profile under <home>/memory/agents/<agent> | principal: notes per person and profile under <home>/memory/principals/<agent>/<hash> | shared: one set under <home>/memory/shared
+    scope: ""                   # empty is agent, and principal under ax | agent: notes per profile under <home>/memory/agents/<agent> | principal: notes per person and profile under <home>/memory/principals/<agent>/<hash> | shared: one set under <home>/memory/shared, which only access.admins write through the API
   limits:                       # every tool call, from the built-in tools, MCP servers, and Go options alike
     maxInputBytes: 262144       # a larger input does not run
     maxOutputBytes: 102400      # a larger result keeps its head and its tail, and the full text goes to .fw-tool/<call id>.txt of the run; a local model wants less, such as 16384

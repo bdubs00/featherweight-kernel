@@ -64,6 +64,12 @@ func (d *doctor) fail(format string, args ...any) {
 	fmt.Fprintf(d.g.stdout, "FAIL  "+format+"\n", args...)
 }
 
+// warn prints a line that names a risk of a working setup. It does not
+// count as a problem, so the exit code stays 0.
+func (d *doctor) warn(format string, args ...any) {
+	fmt.Fprintf(d.g.stdout, "warn  "+format+"\n", args...)
+}
+
 func cmdDoctor(ctx context.Context, g *globals, args []string) int {
 	fs := g.newFlagSet("doctor", "")
 	timeout := fs.Duration("timeout", 10*time.Second, "the `limit` of each check that reaches a provider or a server")
@@ -575,7 +581,7 @@ func (d *doctor) checkModel(ctx context.Context, cfg *fw.Config, secrets fw.Secr
 		secrets = fw.EnvSecrets{}
 	}
 	if cfg.Model == "" {
-		d.ok("model: none configured; this process serves and refuses every run until model, FW_MODEL, or the profile of a run names one")
+		d.warn("model: none configured, so this process serves and refuses every run until model in fw.yaml, FW_MODEL, or the profile of a run names one; there is no default model")
 		return
 	}
 	m, err := openModel(ctx, cfg.Model, cfg, secrets)
@@ -765,24 +771,55 @@ func (d *doctor) checkLedger(ctx context.Context, cfg *fw.Config) {
 }
 
 // checkMemory reports the scope and the index of the memory (section 7.8),
-// and the notes of the default profile.
+// and the notes of the default profile in the directory of that scope.
+// Inside an ax Task, an empty scope is principal, as ax.ApplyToConfig sets
+// it for fw serve, and the scope agent gets a warning, because the runs of
+// several people follow one another in one Task.
 func (d *doctor) checkMemory(cfg *fw.Config) {
-	store, err := memory.New(cfg)
+	ctx := context.Background()
+	inAX := underAX()
+	scope := strings.ToLower(strings.TrimSpace(cfg.Tools.Memory.Scope))
+	if scope == "" {
+		scope = fw.MemoryScopeAgent
+		if inAX {
+			scope = fw.MemoryScopePrincipal
+		}
+	}
+	store, err := memory.New(&fw.Config{Home: cfg.Home, Tools: fw.ToolsConfig{Memory: fw.MemoryToolConfig{Scope: scope}}})
 	if err != nil {
 		d.fail("memory: %v", err)
 		return
 	}
 	defer store.Close()
-	scope := cfg.Tools.Memory.Scope
-	if scope == "" {
-		scope = fw.MemoryScopeAgent
+	switch scope {
+	case fw.MemoryScopePrincipal:
+		people, notes, err := store.PrincipalNotes(ctx, "default")
+		if err != nil {
+			d.fail("memory: %v", err)
+			return
+		}
+		local, err := store.List(ctx, store.Scope(fw.RunInfo{}))
+		if err != nil {
+			d.fail("memory: %v", err)
+			return
+		}
+		d.ok("memory: scope principal, index %s, %d %s of %d %s in the profile default, and %d %s of its runs without a principal",
+			memory.IndexDriver, notes, plural(notes, "note", "notes"), people, plural(people, "person", "people"), len(local), plural(len(local), "note", "notes"))
+	default:
+		notes, err := store.List(ctx, store.Scope(fw.RunInfo{}))
+		if err != nil {
+			d.fail("memory: %v", err)
+			return
+		}
+		what := plural(len(notes), "note", "notes") + " of the profile default"
+		if scope == fw.MemoryScopeShared {
+			what = plural(len(notes), "note that every profile shares", "notes that every profile shares")
+		}
+		d.ok("memory: scope %s, index %s, %d %s", scope, memory.IndexDriver, len(notes), what)
 	}
-	notes, err := store.List(context.Background(), store.Scope(fw.RunInfo{}))
-	if err != nil {
-		d.fail("memory: %v", err)
-		return
+	if inAX && scope == fw.MemoryScopeAgent {
+		d.warn("memory: tools.memory.scope is agent in an ax Task, so each person who runs a profile reads the notes that the runs of other people wrote; set principal unless one person uses the Task")
 	}
-	d.ok("memory: scope %s, index %s, %d notes of the profile default", scope, memory.IndexDriver, len(notes))
 }
 
 // checkSkills reports each skills directory. A directory that tools.skills

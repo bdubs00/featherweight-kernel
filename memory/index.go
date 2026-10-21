@@ -36,53 +36,29 @@ type note struct {
 
 // walkNotes lists the notes of dir, newest first, and reads the first line
 // of the first titles of them, or of every note when titles is negative.
-// It visits at most maxWalk entries. A missing directory has no notes.
-// Every read goes through os.Root, so a symbolic link cannot leave the
-// directory.
-func walkNotes(ctx context.Context, dir string, titles int) ([]note, error) {
+// It visits at most maxWalk notes and maxWalk other entries (walkScope);
+// cut reports a walk that stopped there, so notes can be missing from the
+// list. A missing directory has no notes. Every read goes through os.Root,
+// so a symbolic link cannot leave the directory.
+func walkNotes(ctx context.Context, dir string, titles int) (notes []note, cut bool, err error) {
 	r, err := os.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer r.Close()
 	fsys := r.FS()
-	var notes []note
-	seen := 0
-	err = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == "." {
-				return err
-			}
-			return nil // an unreadable entry leaves the list
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		seen++
-		if seen > maxWalk {
-			return fs.SkipAll
-		}
-		if p != "." && strings.HasPrefix(d.Name(), ".") {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
+	cut, err = walkScope(ctx, fsys, maxWalk, func(p string, d fs.DirEntry) {
 		info, err := d.Info()
 		if err != nil {
-			return nil
+			return // a note that went during the walk leaves the list
 		}
 		notes = append(notes, note{name: p, mod: info.ModTime(), size: info.Size(), ino: inodeOf(info)})
-		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	slices.SortFunc(notes, func(a, b note) int {
 		if c := b.mod.Compare(a.mod); c != 0 {
@@ -96,24 +72,26 @@ func walkNotes(ctx context.Context, dir string, titles int) ([]note, error) {
 		}
 		notes[i].title = firstLine(fsys, notes[i].name)
 	}
-	return notes, nil
+	return notes, cut, nil
 }
 
 // Index returns the lines of the index of a scope, "- /memories/<path>:
 // <first line>", newest first, within IndexMaxNotes and IndexMaxBytes.
-// more counts the notes that do not fit. It creates nothing.
+// more counts the notes that do not fit. A path is escaped (EscapeName),
+// so a file that a person put in the directory with a newline in its name
+// cannot forge a line. It creates nothing.
 func (s *Store) Index(ctx context.Context, scope fw.MemoryScope) (lines []string, more int, err error) {
 	dir, err := s.Dir(scope)
 	if err != nil {
 		return nil, 0, err
 	}
-	notes, err := walkNotes(ctx, dir, IndexMaxNotes)
+	notes, _, err := walkNotes(ctx, dir, IndexMaxNotes)
 	if err != nil {
 		return nil, 0, fmt.Errorf("memory: index of %s: %w", dir, err)
 	}
 	size := 0
 	for _, n := range notes {
-		line := "- " + Prefix + "/" + n.name
+		line := "- " + Prefix + "/" + EscapeName(n.name)
 		if n.title != "" {
 			line += ": " + n.title
 		}
@@ -162,6 +140,27 @@ func firstLine(fsys fs.FS, name string) string {
 		}
 	}
 	return ""
+}
+
+// EscapeName returns a note name for a line of text: each control
+// character, each line or paragraph separator, and each backslash becomes
+// an escape such as \x0a or \u2028, so the name stays on its line. A name
+// that CheckName accepts and that holds no backslash comes back as it is.
+func EscapeName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(name, "\ufffd") {
+		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r < 0x80 && unicode.IsControl(r):
+			fmt.Fprintf(&b, `\x%02x`, r)
+		case unicode.IsControl(r) || r == '\u2028' || r == '\u2029':
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // ClipLine replaces control characters with spaces and cuts s to LineMax

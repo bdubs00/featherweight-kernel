@@ -29,7 +29,14 @@ const starterConfig = `# fw.yaml: the configuration of one fw process.
 # overrides home.
 
 home: .                          # runs, memory, agents, and skills live under this directory
-model: anthropic/claude-opus-5-5 # provider/model; the credential comes from ANTHROPIC_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY
+
+# A model must be set: without model here, FW_MODEL, or the model of a
+# profile, fw refuses every run. There is no default model, and each model
+# costs what its provider charges. Remove the # of one line, or write
+# another provider/model selector.
+# model: anthropic/claude-opus-5-5  # the credential comes from ANTHROPIC_API_KEY
+# model: gemini/gemini-3.8-flash    # the credential comes from GEMINI_API_KEY
+# model: openai/<model>             # the credential comes from OPENAI_API_KEY; providers.openai.baseUrl names a local server
 effort: high                     # low, medium, high, xhigh, or max
 
 tools:
@@ -39,7 +46,10 @@ tools:
   http:
     allow: []                    # URL globs the http tool can fetch, for example https://api.github.com/*
   memory:
-    scope: agent                 # agent: each profile keeps its own notes; shared: every profile reads the same notes
+    scope: ""                    # empty is agent here and principal in an ax Task
+                                 # agent: every person who runs a profile reads its notes
+                                 # principal: each person keeps their own notes in each profile
+                                 # shared: every profile reads the same notes
 
 budget:                          # limits of every run; a profile or a request can lower them
   maxTurns: 200                  # model turns
@@ -80,8 +90,13 @@ agents:                          # profiles; fw run -agent <name> selects one, a
 # on a listener that nothing outside the host can reach.
 `
 
+// modelNeeded is the sentence of fw init about the model, which the
+// starter fw.yaml leaves unset.
+const modelNeeded = "A model must be set: without model in fw.yaml, FW_MODEL, or the model of a profile, fw refuses every run."
+
 // cmdInit writes a starter fw.yaml, prompts/default.md, and the agents and
-// skills directories into a directory. It never overwrites a file.
+// skills directories into a directory. It never overwrites a file. The
+// starter names no model, because no paid model is a built-in choice.
 func cmdInit(_ context.Context, g *globals, args []string) int {
 	fs := g.newFlagSet("init", "[<dir>]")
 	pos, err := parseArgs(fs, args)
@@ -127,7 +142,8 @@ func cmdInit(_ context.Context, g *globals, args []string) int {
 	fmt.Fprintf(g.stdout, "wrote %s\n", filepath.Join(dir, "prompts", "default.md"))
 	fmt.Fprintf(g.stdout, "made  %s%c\n", filepath.Join(dir, "agents"), filepath.Separator)
 	fmt.Fprintf(g.stdout, "made  %s%c\n", filepath.Join(dir, "skills"), filepath.Separator)
-	fmt.Fprintf(g.stdout, "next: export ANTHROPIC_API_KEY, then run fw doctor and fw run \"hello\"\n")
+	fmt.Fprintln(g.stdout, modelNeeded)
+	fmt.Fprintf(g.stdout, "next: set model in %s or export FW_MODEL, export the credential of its provider, then run fw doctor and fw run \"hello\"\n", filepath.Join(dir, "fw.yaml"))
 	return exitOK
 }
 

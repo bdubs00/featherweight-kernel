@@ -1172,7 +1172,7 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 			}
 		case rec.requestedSeq > 0:
 			// The call started before a restart and has no result.
-			if !p.spec.Idempotent {
+			if !rerunSafe(p.tool, p.spec, u.Input) {
 				answered, ok := continueAsk(p.tool, rec)
 				if !ok {
 					return a.requestApproval(ctx, rs, u, "rerun after resume")

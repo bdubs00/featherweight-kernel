@@ -2,10 +2,13 @@ package builtin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -326,5 +329,100 @@ func TestMemoryPrincipalScope(t *testing.T) {
 		if strings.Contains(e.Name(), "alice") || strings.Contains(e.Name(), "bob") || strings.Contains(e.Name(), "@") {
 			t.Fatalf("a principal directory names the subject: %s", e.Name())
 		}
+	}
+}
+
+// TestMemoryEditsLoseNoWrite checks that the edits of the memory tool hold
+// the lock of the scope from the read to the write: concurrent inserts of
+// two tools, and a write with a hash through the store, lose no change.
+func TestMemoryEditsLoseNoWrite(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	cfg := fw.DefaultConfig()
+	cfg.Home = home
+	first, err := fw.NewBuiltinTool("memory", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fw.NewBuiltinTool("memory", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	mustOK(t, call(t, ctx, first, `{"command":"create","path":"/memories/log.md","file_text":"end\n"}`))
+	store, err := memory.New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	scope := store.Scope(fw.RunInfo{})
+	var wg sync.WaitGroup
+	var swaps atomic.Int32
+	for i := range 16 {
+		tool := first
+		if i%2 == 1 {
+			tool = second
+		}
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if res := call(t, ctx, tool, fmt.Sprintf(`{"command":"insert","path":"/memories/log.md","insert_line":0,"insert_text":"insert %d"}`, i)); res.IsError {
+				t.Errorf("insert %d: %s", i, text(res))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			// A compare-and-swap of the native API: it either wins on the
+			// note as it is, or fails; it never overwrites an edit.
+			cur, err := store.Get(ctx, scope, memory.NoteRef(scope, "log.md"))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if _, err := store.Remember(ctx, scope, fw.MemoryRecord{Ref: cur.Ref, Body: cur.Body + fmt.Sprintf("swap %d\n", i)}, cur.Hash); err == nil {
+				swaps.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	got := readFile(t, filepath.Join(home, "memory", "agents", "default", "log.md"))
+	for i := range 16 {
+		if !strings.Contains(got, fmt.Sprintf("insert %d\n", i)) {
+			t.Errorf("insert %d is lost:\n%s", i, got)
+		}
+	}
+	if n := strings.Count(got, "swap "); n != int(swaps.Load()) {
+		t.Errorf("%d swaps won, and the note holds %d:\n%s", swaps.Load(), n, got)
+	}
+}
+
+// TestMemoryIdempotentCall checks which commands of the memory tool are
+// safe to run again after a restart.
+func TestMemoryIdempotentCall(t *testing.T) {
+	cfg := fw.DefaultConfig()
+	cfg.Home = t.TempDir()
+	m, err := fw.NewBuiltinTool("memory", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok := m.(fw.CallIdempotency)
+	if !ok {
+		t.Fatal("the memory tool does not implement fw.CallIdempotency")
+	}
+	for input, want := range map[string]bool{
+		`{"command":"view","path":"/memories"}`:                                          true,
+		`{"command":"create","path":"/memories/a.md","file_text":"x"}`:                   true,
+		`{"command":"delete","path":"/memories/a.md"}`:                                   true,
+		`{"command":"rename","old_path":"/memories/a.md","new_path":"/memories/b.md"}`:   true,
+		`{"command":"insert","path":"/memories/a.md","insert_line":0,"insert_text":"x"}`: false,
+		`{"command":"str_replace","path":"/memories/a.md","old_str":"x","new_str":"y"}`:  false,
+		`{"command":"unknown"}`: false,
+		`not json`:              false,
+	} {
+		if got := c.IdempotentCall(json.RawMessage(input)); got != want {
+			t.Errorf("IdempotentCall(%s) = %v, want %v", input, got, want)
+		}
+	}
+	if m.Spec().Idempotent {
+		t.Error("the spec marks every call of the memory tool safe")
 	}
 }

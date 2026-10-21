@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -70,6 +71,11 @@ func BootstrapTimeout() time.Duration {
 //   - Tools.Files.PerRun is true when it is unset: each run gets a
 //     directory of its own under the root of the files tool, because the
 //     runs of a Task, of several people, follow one another on one volume.
+//   - Tools.Memory.Scope is principal when it is unset, for the same
+//     reason: each person keeps the notes of the memory tool apart in each
+//     profile. A run without a principal uses the notes of its agent. A
+//     configuration that wants one set of notes for every person of a
+//     profile sets the scope agent.
 //   - Every spec.mcp.servers entry joins Tools.MCP unless an entry with the
 //     same name exists. The fw.yaml entry wins. spec.mcp.registries entries
 //     are logged and skipped.
@@ -104,6 +110,11 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 	if cfg.Tools.Files.PerRun == nil {
 		on := true
 		cfg.Tools.Files.PerRun = &on
+		log.Info("ax: tools.files.perRun is on, because the runs of several people follow one another on one volume; set it to false to share one directory")
+	}
+	if strings.TrimSpace(cfg.Tools.Memory.Scope) == "" {
+		cfg.Tools.Memory.Scope = fw.MemoryScopePrincipal
+		log.Info("ax: tools.memory.scope is principal, because the runs of several people follow one another in one Task; set it to agent to share the notes of a profile")
 	}
 	for _, p := range append([]string{DefaultWorkspacePath}, bindingPaths(bindings)...) {
 		if !slices.Contains(cfg.Workspaces, p) {

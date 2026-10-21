@@ -101,8 +101,11 @@ type MemoryWriter interface {
 
 // MemoryChangedData is the payload of fw.memory.changed: one change that a
 // tool made to a memory note. Op is one of the operations of
-// FileChangedData. It never holds the content, the principal, or the text
-// of the note, so the ledger and the bus carry no note.
+// FileChangedData. It never holds the text of the note or the principal:
+// it is the audit record of a change, not a copy of the note. The text
+// still reaches the ledger and the bus in other events of the run: the
+// input and the result of the tool call that wrote or read the note, and
+// the index of the notes that fw.run.started holds in its field context.
 type MemoryChangedData struct {
 	CallID string          `json:"callId,omitempty"`
 	Tool   string          `json:"tool,omitempty"`

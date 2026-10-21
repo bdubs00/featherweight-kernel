@@ -2,9 +2,11 @@ package builtin
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,4 +162,110 @@ func TestRecallRunsFilesAndSkills(t *testing.T) {
 	if !strings.Contains(got, "Use the changelog.") {
 		t.Fatalf("get skill = %q", got)
 	}
+}
+
+// TestRecallRunsCarryThePrincipal checks that the recall tool reads the
+// runs with the principal of its run: the kernel authorizes each run for
+// that person, and a run of another person or of nobody never matches.
+func TestRecallRunsCarryThePrincipal(t *testing.T) {
+	home := t.TempDir()
+	cfg := fw.DefaultConfig()
+	cfg.Home = home
+	cfg.Tools.Files.Root = t.TempDir()
+	var mu sync.Mutex
+	seen := map[string]string{} // subject to kind, of each run.view check
+	authz := fw.AuthzFunc(func(_ context.Context, p *fw.Principal, action string, tg fw.Target) error {
+		if action != fw.ActionRunView || tg.Run == nil {
+			return nil
+		}
+		mu.Lock()
+		seen[p.Subject] = p.Kind
+		mu.Unlock()
+		if strings.Contains(tg.Run.Input, "hidden") {
+			return fmt.Errorf("%w: not this run", fw.ErrForbidden)
+		}
+		return nil
+	})
+	script := newRestartScript(endTurnOf("ok"), endTurnOf("ok"), endTurnOf("ok"), endTurnOf("ok"))
+	a, err := fw.New(fw.WithoutDefaults(), fw.WithConfig(cfg), fw.WithLedger(fw.NewMemLedger()), fw.WithBus(fw.NewMemBus()),
+		fw.WithAuthn(fw.NoAuthn{}), fw.WithAuthz(authz), fw.WithModel(script.Model()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close(context.Background()) })
+	start := func(who, input string) string {
+		t.Helper()
+		ctx := context.Background()
+		if who != "" {
+			ctx = fw.WithPrincipal(ctx, &fw.Principal{Subject: who, Kind: fw.KindUser})
+		}
+		r, err := a.Run(ctx, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.ID
+	}
+	mine := start("alice", "the zeppelin of alice")
+	hidden := start("alice", "the hidden zeppelin of alice")
+	bobs := start("bob", "the zeppelin of bob")
+	nobodys := start("", "the zeppelin of nobody")
+
+	tool := newRecallTool(t, home, "principal")
+	ctx := fw.WithAgent(fw.WithRunInfo(context.Background(), fw.RunInfo{RunID: "run-1", Agent: "default", Principal: "alice", PrincipalKind: fw.KindUser}), a)
+	got := mustOK(t, call(t, ctx, tool, `{"query":"zeppelin","kinds":["run"]}`))
+	if !strings.Contains(got, "run://"+mine) {
+		t.Fatalf("alice does not find her run: %q", got)
+	}
+	for _, id := range []string{hidden, bobs, nobodys} {
+		if strings.Contains(got, id) {
+			t.Fatalf("alice finds run %s: %q", id, got)
+		}
+		mustFail(t, call(t, ctx, tool, `{"ref":"run://`+id+`"}`), "no memory record")
+	}
+	if seen["alice"] != fw.KindUser {
+		t.Fatalf("the kernel did not authorize the runs for alice: %v", seen)
+	}
+	// A run without a principal finds only the runs without one.
+	none := fw.WithAgent(recallCtx("default", ""), a)
+	got = mustOK(t, call(t, none, tool, `{"query":"zeppelin","kinds":["run"]}`))
+	if !strings.Contains(got, nobodys) || strings.Contains(got, mine) || strings.Contains(got, bobs) {
+		t.Fatalf("a run without a principal finds %q", got)
+	}
+}
+
+// TestRecallHonorsTheSkillsAllowlist checks that recall finds and reads
+// only the skills that the profile of the run allows, as its system prompt
+// lists them.
+func TestRecallHonorsTheSkillsAllowlist(t *testing.T) {
+	home := t.TempDir()
+	for name, body := range map[string]string{
+		"release-notes": "---\nname: release-notes\ndescription: Write release notes\n---\nUse the changelog.\n",
+		"secret-ops":    "---\nname: secret-ops\ndescription: Operate production\n---\nUse the changelog of prod.\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(home, "skills", name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "skills", name, fw.SkillFile), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := fw.DefaultConfig()
+	cfg.Home = home
+	cfg.Tools.Files.Root = t.TempDir()
+	cfg.Tools.Skills = []string{filepath.Join(home, "skills")}
+	cfg.Agents = map[string]fw.AgentProfile{"default": {Skills: []string{"release-*"}}}
+	a, err := fw.New(fw.WithoutDefaults(), fw.WithConfig(cfg), fw.WithLedger(fw.NewMemLedger()), fw.WithBus(fw.NewMemBus()),
+		fw.WithAuthn(fw.NoAuthn{}), fw.WithModel(newRestartScript(endTurnOf("ok")).Model()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close(context.Background()) })
+	tool := newRecallTool(t, home, "")
+	ctx := fw.WithAgent(recallCtx("default", ""), a)
+	got := mustOK(t, call(t, ctx, tool, `{"query":"changelog","kinds":["skill"]}`))
+	if !strings.Contains(got, "skill://release-notes") || strings.Contains(got, "secret-ops") {
+		t.Fatalf("skill search = %q", got)
+	}
+	mustFail(t, call(t, ctx, tool, `{"ref":"skill://secret-ops"}`), "no memory record")
+	mustOK(t, call(t, ctx, tool, `{"ref":"skill://release-notes"}`))
 }

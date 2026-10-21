@@ -19,14 +19,30 @@ const (
 	maxRuns      = 500
 	maxFiles     = 5000
 	maxRead      = 64 << 10
-	snippetLen   = 240
+	// MaxSearchBytes bounds the bytes that one search reads from the files
+	// of the workspace, and apart from them the bytes that a scan reads
+	// from the notes. A search that reaches it stops that kind and says so
+	// in a note of its result.
+	MaxSearchBytes = 16 << 20
+	snippetLen     = 240
 )
 
 // noteIndex is the optional index of the notes. The build without the
 // memory_sqlite tag has no index and scans the notes.
 type noteIndex interface {
 	Search(ctx context.Context, scope fw.MemoryScope, notesDir, indexDir string, terms []string, limit int) ([]fw.MemoryHit, error)
+	// Remove removes the note name, and every note under name when it is
+	// a directory, from the index in indexDir, when that index exists.
+	Remove(ctx context.Context, indexDir, name string) error
 	Close() error
+}
+
+// RecallResult is the answer of Recall: the hits, best first, and notes
+// for the reader, such as a bound that stopped the search of one kind
+// before it read everything.
+type RecallResult struct {
+	Hits  []fw.MemoryHit `json:"hits"`
+	Notes []string       `json:"notes,omitempty"`
 }
 
 // AllKinds lists every kind that a recall searches.
@@ -50,14 +66,22 @@ func ParseKinds(names []string) ([]fw.MemoryKind, error) {
 	return out, nil
 }
 
-// Search implements fw.Memory. It searches the notes of the scope, the
-// runs of its agent and its principal, the workspace of the run in ctx,
-// and the skills of the agent in ctx. The runs, the files, and the skills
-// need the agent in ctx (fw.AgentFrom); without it, only notes match.
+// Search implements fw.Memory. It is Recall without the notes of the
+// result.
 func (s *Store) Search(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQuery) ([]fw.MemoryHit, error) {
+	res, err := s.Recall(ctx, scope, q)
+	return res.Hits, err
+}
+
+// Recall searches the notes of the scope, the runs of its agent that its
+// principal started, the workspace of the run in ctx, and the skills that
+// the profile of the run allows. The runs, the files, and the skills need
+// the agent in ctx (fw.AgentFrom); without it, only notes match. The
+// result says in its notes when a bound stopped a search early.
+func (s *Store) Recall(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQuery) (RecallResult, error) {
 	terms := strings.Fields(strings.ToLower(q.Text))
 	if len(terms) == 0 {
-		return nil, errors.New("a recall needs words to find")
+		return RecallResult{}, errors.New("a recall needs words to find")
 	}
 	limit := q.Limit
 	if limit <= 0 {
@@ -71,16 +95,23 @@ func (s *Store) Search(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQue
 		kinds = AllKinds
 	}
 	var hits []fw.MemoryHit
+	var notes []string
+	add := func(h []fw.MemoryHit, note string) {
+		hits = append(hits, h...)
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
 	for _, k := range kinds {
 		switch k {
 		case fw.MemoryKindNote:
-			hits = append(hits, s.searchNotes(ctx, scope, terms)...)
+			add(s.searchNotes(ctx, scope, terms))
 		case fw.MemoryKindRun:
-			hits = append(hits, searchRuns(ctx, scope, terms)...)
+			add(searchRuns(ctx, scope, terms), "")
 		case fw.MemoryKindFile:
-			hits = append(hits, searchFiles(ctx, terms)...)
+			add(searchFiles(ctx, terms))
 		case fw.MemoryKindSkill:
-			hits = append(hits, searchSkills(ctx, terms)...)
+			add(searchSkills(ctx, scope, terms), "")
 		}
 	}
 	sort.SliceStable(hits, func(i, j int) bool {
@@ -95,7 +126,7 @@ func (s *Store) Search(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQue
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
-	return hits, nil
+	return RecallResult{Hits: hits, Notes: notes}, nil
 }
 
 // Get implements fw.Memory. A ref starts with mem://, run://, file://, or
@@ -109,36 +140,47 @@ func (s *Store) Get(ctx context.Context, scope fw.MemoryScope, ref string) (fw.M
 	case strings.HasPrefix(ref, "file://"):
 		return getFile(ctx, strings.TrimPrefix(ref, "file://"))
 	case strings.HasPrefix(ref, "skill://"):
-		return getSkill(ctx, strings.TrimPrefix(ref, "skill://"))
+		return getSkill(ctx, scope, strings.TrimPrefix(ref, "skill://"))
 	}
 	return fw.MemoryRecord{}, fmt.Errorf("the ref %q must start with mem://, run://, file://, or skill://", ref)
 }
 
 // searchNotes searches the notes of the scope: through the index when the
-// build has one, else by a bounded scan.
-func (s *Store) searchNotes(ctx context.Context, scope fw.MemoryScope, terms []string) []fw.MemoryHit {
+// build has one, else by a scan that reads at most MaxSearchBytes. It
+// returns a note for the reader when a bound stopped the scan.
+func (s *Store) searchNotes(ctx context.Context, scope fw.MemoryScope, terms []string) ([]fw.MemoryHit, string) {
 	dir, err := s.Dir(scope)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	if s.index != nil {
 		if idx, err := s.indexDir(scope); err == nil {
 			if hits, err := s.index.Search(ctx, scope, dir, idx, terms, MaxLimit); err == nil {
-				return hits
+				return hits, ""
 			}
 		}
 	}
-	notes, err := walkNotes(ctx, dir, -1)
+	notes, cut, err := walkNotes(ctx, dir, -1)
 	if err != nil || len(notes) == 0 {
-		return nil
+		return nil, ""
 	}
 	files, err := fw.DirFiles(dir)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
+	note := ""
+	if cut {
+		note = fmt.Sprintf("The search of the notes stopped after %d entries of the memory directory, so some notes were not searched.", maxWalk)
+	}
+	budget := int64(MaxSearchBytes)
 	var hits []fw.MemoryHit
 	for _, n := range notes {
+		if budget < min(n.size, maxRead) {
+			note = fmt.Sprintf("The search of the notes stopped after it read %d MB, so some notes were not searched.", MaxSearchBytes>>20)
+			break
+		}
 		body := readBounded(files, n.name, maxRead)
+		budget -= int64(len(body))
 		score, snippet := matchScore(terms, n.name, n.title, body)
 		if score == 0 {
 			continue
@@ -160,18 +202,20 @@ func (s *Store) searchNotes(ctx context.Context, scope fw.MemoryScope, terms []s
 			Why:     "scan",
 		})
 	}
-	return hits
+	return hits, note
 }
 
-// searchRuns searches the runs of the agent of the scope. When the scope
-// has a principal, a run of another principal never matches. It reads the
-// run projection, not every event, so a search stays bounded.
+// searchRuns searches the runs of the agent of the scope that the
+// principal of the scope started (runVisible). It lists them with the
+// principal in ctx, so the kernel also authorizes each run for that
+// principal (runCtx). It reads the run projection, not every event, so a
+// search stays bounded.
 func searchRuns(ctx context.Context, scope fw.MemoryScope, terms []string) []fw.MemoryHit {
 	a := fw.AgentFrom(ctx)
 	if a == nil {
 		return nil
 	}
-	runs, err := a.List(ctx)
+	runs, err := a.List(runCtx(ctx, scope))
 	if err != nil {
 		return nil
 	}
@@ -222,8 +266,11 @@ func searchRuns(ctx context.Context, scope fw.MemoryScope, terms []string) []fw.
 	return hits
 }
 
-// runVisible reports whether a run belongs to the agent of the scope and,
-// when the scope has a principal, to that principal.
+// runVisible reports whether a run belongs to the agent of the scope and
+// to the principal of the scope. An empty principal equals only an empty
+// principal: a run that nobody started, such as a local run or a job of a
+// publisher that names nobody, sees only such runs, and a run of a person
+// never sees them.
 func runVisible(scope fw.MemoryScope, r *fw.Run) bool {
 	if r == nil {
 		return false
@@ -232,26 +279,44 @@ func runVisible(scope fw.MemoryScope, r *fw.Run) bool {
 	if agent == "" {
 		agent = "default"
 	}
-	if scope.Agent != "" && agent != scope.Agent {
-		return false
+	return agent == scope.Agent && r.Principal == scope.Principal
+}
+
+// runCtx returns ctx with the principal of the scope in it, when ctx holds
+// no principal, so the kernel authorizes List and Get of the runs for the
+// person whose run reads them. A scope without a principal leaves ctx as
+// it is.
+func runCtx(ctx context.Context, scope fw.MemoryScope) context.Context {
+	if fw.PrincipalFrom(ctx) != nil {
+		return ctx
 	}
-	return scope.Principal == "" || r.Principal == "" || r.Principal == scope.Principal
+	return fw.WithRunPrincipal(ctx, fw.RunInfo{Principal: scope.Principal})
 }
 
 // searchFiles searches the workspace of the run in ctx. It reads small text
-// files for content and skips binaries. The walk and the reads are
-// bounded.
-func searchFiles(ctx context.Context, terms []string) []fw.MemoryHit {
+// files for content and skips binaries. The walk visits at most maxFiles
+// files and reads at most MaxSearchBytes; it returns a note for the reader
+// when a bound stopped it.
+func searchFiles(ctx context.Context, terms []string) ([]fw.MemoryHit, string) {
 	work := fw.FilesFrom(ctx)
 	if work == nil {
-		return nil
+		return nil, ""
 	}
 	var hits []fw.MemoryHit
+	note := ""
+	budget := int64(MaxSearchBytes)
 	seen := 0
 	_ = fs.WalkDir(work, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if name == "." {
+			// The root is unreadable only when it has no entry. The workspace
+			// also reports an entry it could not read, such as a link that
+			// leaves the workspace, as an error on "." with the entries, and
+			// that must not end the walk.
+			if name == "." && d == nil {
 				return err
+			}
+			if name == "." {
+				return nil
 			}
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
@@ -275,6 +340,7 @@ func searchFiles(ctx context.Context, terms []string) []fw.MemoryHit {
 			return nil
 		}
 		if seen++; seen > maxFiles {
+			note = fmt.Sprintf("The search of the files stopped after %d files, so some files were not searched.", maxFiles)
 			return fs.SkipAll
 		}
 		info, err := d.Info()
@@ -283,7 +349,12 @@ func searchFiles(ctx context.Context, terms []string) []fw.MemoryHit {
 		}
 		body := ""
 		if info.Size() <= maxRead {
+			if budget < info.Size() {
+				note = fmt.Sprintf("The search of the files stopped after it read %d MB, so some files were not searched.", MaxSearchBytes>>20)
+				return fs.SkipAll
+			}
 			body = readBounded(work, name, maxRead)
+			budget -= int64(len(body))
 			if bytes.IndexByte([]byte(body), 0) >= 0 {
 				return nil
 			}
@@ -308,17 +379,23 @@ func searchFiles(ctx context.Context, terms []string) []fw.MemoryHit {
 		})
 		return nil
 	})
-	return hits
+	return hits, note
 }
 
-// searchSkills searches the skills of the agent in ctx.
-func searchSkills(ctx context.Context, terms []string) []fw.MemoryHit {
+// skillsOf returns the skills that the profile of the run of the scope
+// allows, as the system prompt of the run lists them (fw.SkillsOfRun).
+func skillsOf(a *fw.Agent, scope fw.MemoryScope) []fw.Skill {
+	return a.SkillsOfRun(fw.RunInfo{RunID: scope.Task, Agent: scope.Agent})
+}
+
+// searchSkills searches the skills that the profile of the run allows.
+func searchSkills(ctx context.Context, scope fw.MemoryScope, terms []string) []fw.MemoryHit {
 	a := fw.AgentFrom(ctx)
 	if a == nil {
 		return nil
 	}
 	var hits []fw.MemoryHit
-	for _, sk := range a.Skills() {
+	for _, sk := range skillsOf(a, scope) {
 		body, err := sk.Body()
 		if err != nil {
 			continue
@@ -349,7 +426,7 @@ func getRun(ctx context.Context, scope fw.MemoryScope, id string) (fw.MemoryReco
 	if a == nil {
 		return fw.MemoryRecord{}, fw.ErrMemoryUnsupported
 	}
-	r, err := a.Get(ctx, id)
+	r, err := a.Get(runCtx(ctx, scope), id)
 	if err != nil || !runVisible(scope, r) {
 		return fw.MemoryRecord{}, fw.ErrMemoryNotFound
 	}
@@ -388,6 +465,14 @@ func getFile(ctx context.Context, name string) (fw.MemoryRecord, error) {
 	if !fs.ValidPath(name) || name == "." {
 		return fw.MemoryRecord{}, fmt.Errorf("the ref %q is not a file of the workspace", "file://"+name)
 	}
+	// A hidden part names the state of fw, of a harness, or of a tool, such
+	// as the ledger or the transcripts of other runs. The search skips those
+	// paths, and a ref does not read them either.
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasPrefix(part, ".") {
+			return fw.MemoryRecord{}, fmt.Errorf("the ref %q names a hidden path, which recall does not read", "file://"+name)
+		}
+	}
 	info, err := work.Stat(name)
 	if err != nil || info.IsDir() {
 		return fw.MemoryRecord{}, fw.ErrMemoryNotFound
@@ -404,12 +489,19 @@ func getFile(ctx context.Context, name string) (fw.MemoryRecord, error) {
 	}, nil
 }
 
-func getSkill(ctx context.Context, name string) (fw.MemoryRecord, error) {
+func getSkill(ctx context.Context, scope fw.MemoryScope, name string) (fw.MemoryRecord, error) {
 	a := fw.AgentFrom(ctx)
 	if a == nil {
 		return fw.MemoryRecord{}, fw.ErrMemoryUnsupported
 	}
-	sk, ok := a.SkillNamed(name)
+	var sk fw.Skill
+	ok := false
+	for _, s := range skillsOf(a, scope) {
+		if s.Name == name {
+			sk, ok = s, true
+			break
+		}
+	}
 	if !ok {
 		return fw.MemoryRecord{}, fw.ErrMemoryNotFound
 	}

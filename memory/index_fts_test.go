@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -203,5 +204,99 @@ func TestFTSIndexSeesASameSizeRewrite(t *testing.T) {
 	}
 	if search("gamma") != 1 || search("alpha") != 0 {
 		t.Fatal("a rewrite of the same size and time was missed")
+	}
+}
+
+// TestFTSForgetRemovesTheText checks that Forget and a delete of the tool
+// take a note out of the index at once, not at the next search, that the
+// database runs with secure delete, and that the words of the note leave
+// the file.
+func TestFTSForgetRemovesTheText(t *testing.T) {
+	ctx := context.Background()
+	s, home := newStore(t, "")
+	scope := s.Scope(fw.RunInfo{Agent: "reviewer"})
+	for name, body := range map[string]string{
+		"secret.md":     "the quokkavortex plan\n",
+		"keep.md":       "the zeppelin plan\n",
+		"dir/inner.md":  "the wombatcyclone plan\n",
+		"dir2/other.md": "the zeppelin other plan\n",
+	} {
+		if _, err := s.Remember(ctx, scope, fw.MemoryRecord{Ref: NoteRef(scope, name), Body: body}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if hits, err := s.Search(ctx, scope, fw.MemoryQuery{Text: "quokkavortex wombatcyclone zeppelin", Kinds: []fw.MemoryKind{fw.MemoryKindNote}}); err != nil || len(hits) != 4 || hits[0].Why != "fts5" {
+		t.Fatalf("hits before forget = %+v, %v", hits, err)
+	}
+	if err := s.Forget(ctx, scope, NoteRef(scope, "secret.md")); err != nil {
+		t.Fatal(err)
+	}
+	files, err := s.Notes(ctx, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := files.Remove("dir"); err != nil {
+		t.Fatal(err)
+	}
+	x := s.index.(*ftsIndex)
+	dir := filepath.Join(home, "memory", "index", "agents", "reviewer")
+	x.mu.Lock()
+	db := x.dbs[dir]
+	x.mu.Unlock()
+	if db == nil {
+		t.Fatal("the index of the scope is not open")
+	}
+	var paths []string
+	rows, err := db.QueryContext(ctx, `SELECT path FROM notes ORDER BY path`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	rows.Close()
+	if fmt.Sprint(paths) != "[dir2/other.md keep.md]" {
+		t.Fatalf("rows after forget = %v", paths)
+	}
+	var secure int
+	if err := db.QueryRowContext(ctx, `PRAGMA secure_delete`).Scan(&secure); err != nil || secure != 1 {
+		t.Fatalf("secure_delete = %d, %v", secure, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "notes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, word := range []string{"quokkavortex", "wombatcyclone"} {
+		if strings.Contains(string(raw), word) {
+			t.Errorf("the database file still holds %q", word)
+		}
+	}
+	if !strings.Contains(string(raw), "zeppelin") {
+		t.Error("the database file lost the text of a kept note")
+	}
+}
+
+// TestFTSRemoveCreatesNoIndex checks that a removal in a scope that has
+// no index creates none.
+func TestFTSRemoveCreatesNoIndex(t *testing.T) {
+	ctx := context.Background()
+	s, home := newStore(t, "")
+	scope := s.Scope(fw.RunInfo{Agent: "reviewer"})
+	ref := NoteRef(scope, "a.md")
+	if _, err := s.Remember(ctx, scope, fw.MemoryRecord{Ref: ref, Body: "x"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Forget(ctx, scope, ref); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "memory", "index", "agents", "reviewer", "notes.db")); !os.IsNotExist(err) {
+		t.Fatalf("a forget created the index: %v", err)
 	}
 }

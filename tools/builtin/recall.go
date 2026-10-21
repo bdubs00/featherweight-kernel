@@ -82,7 +82,11 @@ type recallInput struct {
 	Limit int      `json:"limit"`
 }
 
-// Call implements fw.Tool. The run in the context selects the scope.
+// Call implements fw.Tool. The run in the context selects the scope. The
+// call reads the runs with the principal of the run in its context
+// (fw.WithRunPrincipal), so the kernel authorizes each run for the person
+// who started this run, and a run of another person, or a run without a
+// principal, never matches.
 func (t *recallTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResult, error) {
 	var in recallInput
 	if err := decode(input, &in); err != nil {
@@ -91,7 +95,9 @@ func (t *recallTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 	if err := ctx.Err(); err != nil {
 		return canceled(ctx, "recall")
 	}
-	scope := t.store.Scope(fw.RunInfoFrom(ctx))
+	info := fw.RunInfoFrom(ctx)
+	scope := t.store.Scope(info)
+	ctx = fw.WithRunPrincipal(ctx, info)
 	if ref := strings.TrimSpace(in.Ref); ref != "" {
 		rec, err := t.store.Get(ctx, scope, ref)
 		switch {
@@ -117,17 +123,26 @@ func (t *recallTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 		limit = memory.DefaultLimit
 	}
 	limit = min(limit, recallMaxLimit)
-	hits, err := t.store.Search(ctx, scope, fw.MemoryQuery{Text: query, Kinds: kinds, Limit: limit})
+	res, err := t.store.Recall(ctx, scope, fw.MemoryQuery{Text: query, Kinds: kinds, Limit: limit})
 	if err != nil {
 		return fw.ErrorResult("Error: " + err.Error()), nil
 	}
-	if len(hits) == 0 {
-		return fw.TextResult(fmt.Sprintf("No memory records match %q.", query)), nil
+	if len(res.Hits) == 0 {
+		return fw.TextResult(withNotes(fmt.Sprintf("No memory records match %q.", query), res.Notes)), nil
 	}
-	return fw.TextResult(formatHits(query, hits)), nil
+	return fw.TextResult(formatHits(query, res.Hits, res.Notes)), nil
 }
 
-func formatHits(query string, hits []fw.MemoryHit) string {
+// withNotes adds the notes of a recall, such as a bound that stopped a
+// search early, after text.
+func withNotes(text string, notes []string) string {
+	for _, n := range notes {
+		text += "\nNote: " + n
+	}
+	return text
+}
+
+func formatHits(query string, hits []fw.MemoryHit, notes []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Memory records that match %q:\n", query)
 	for i, h := range hits {
@@ -138,6 +153,11 @@ func formatHits(query string, hits []fw.MemoryHit) string {
 		if h.Snippet != "" && !strings.EqualFold(h.Snippet, h.Record.Title) {
 			fmt.Fprintf(&b, "   %s\n", memory.ClipLine(h.Snippet))
 		}
+	}
+	if len(notes) > 0 {
+		b.WriteString("\n")
+		b.WriteString(strings.TrimPrefix(withNotes("", notes), "\n"))
+		b.WriteString("\n")
 	}
 	out, _ := truncate(b.String(), maxOutput)
 	return out

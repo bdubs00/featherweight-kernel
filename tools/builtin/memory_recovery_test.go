@@ -79,13 +79,6 @@ func TestMemoryFileLedgerRecovery(t *testing.T) {
 			once:  "original expanded\n",
 			twice: "original expanded expanded\n",
 		},
-		{
-			// The current ToolSpec contract cannot classify a view separately.
-			name:  "view",
-			input: `{"command":"view","path":"/memories/note.txt"}`,
-			once:  "original\n",
-			twice: "original\n",
-		},
 	} {
 		for _, decision := range []string{"deny", "allow"} {
 			t.Run(command.name+"/"+decision, func(t *testing.T) {
@@ -189,5 +182,79 @@ func TestMemoryFileLedgerRecovery(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestMemoryFileLedgerRecoverySafeCommands checks that a view or a create
+// that a restart cut before its result runs again at once, without an
+// approval: the memory tool marks these calls safe to repeat
+// (fw.CallIdempotency), so an unattended run goes on by itself.
+func TestMemoryFileLedgerRecoverySafeCommands(t *testing.T) {
+	for _, command := range []struct {
+		name, input, want string
+	}{
+		{name: "view", input: `{"command":"view","path":"/memories/note.txt"}`, want: "original\n"},
+		{name: "create", input: `{"command":"create","path":"/memories/note.txt","file_text":"created\n"}`, want: "created\n"},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			ctx := restartCtx(t)
+			root := t.TempDir()
+			cfg := fw.DefaultConfig()
+			cfg.Home = filepath.Join(root, "home")
+			cfg.Tools.Files.Root = root
+			cfg.Model = "fake/test"
+			dir := filepath.Join(cfg.Home, "memory", "agents", "default")
+			note := filepath.Join(dir, "note.txt")
+			writeNote(t, dir, "note.txt", "original\n", 0)
+			ledgerRoot := filepath.Join(root, "runs")
+			original := openRunsAt(t, ledgerRoot)
+			cut := &memoryResultCutLedger{Ledger: original, hit: make(chan struct{})}
+			first := newRestartScript(&fw.Response{
+				StopReason: fw.StopToolUse,
+				Content:    []fw.Block{toolUseOf("memory-1", "memory", command.input)},
+			})
+			a := memoryRecoveryAgent(t, cfg, cut, first.Model())
+			r, err := a.Start(ctx, "read my note")
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-cut.hit:
+			case <-ctx.Done():
+				t.Fatal("memory call never reached its unrecorded result")
+			}
+			closeMemoryRecoveryAgent(a)
+			if err := original.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			second := newRestartScript(endTurnOf("done"))
+			b := memoryRecoveryAgent(t, cfg, openRunsAt(t, ledgerRoot), second.Model())
+			r, err = b.WaitFor(ctx, r.ID, func(r *fw.Run) bool { return r.State.Terminal() || r.State == fw.StateInputRequired })
+			if err != nil || r.State != fw.StateCompleted {
+				t.Fatalf("recovery = %+v, err = %v; want a completed run without an approval", r, err)
+			}
+			if got := readFile(t, note); got != command.want {
+				t.Fatalf("file after the rerun = %q, want %q", got, command.want)
+			}
+			events := ledgerOf(t, b, r.ID)
+			if n := countOfType(events, fw.EvApprovalRequested); n != 0 {
+				t.Fatalf("%d approvals for a call that is safe to repeat", n)
+			}
+			if n := countOfType(events, fw.EvToolResponded); n != 1 {
+				t.Fatalf("%d tool results, want 1", n)
+			}
+			for _, e := range events {
+				if e.Type == fw.EvToolResponded {
+					var data fw.ToolRespondedData
+					if err := e.Decode(&data); err != nil {
+						t.Fatal(err)
+					}
+					if data.IsError {
+						t.Fatalf("the rerun failed: %+v", data)
+					}
+				}
+			}
+		})
 	}
 }

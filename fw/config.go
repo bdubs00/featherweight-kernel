@@ -433,15 +433,19 @@ const (
 )
 
 // MemoryToolConfig configures the memory tool and the recall tool. Scope is
-// MemoryScopeAgent, MemoryScopePrincipal, or MemoryScopeShared. With
-// MemoryScopeAgent, the notes of the profile "reviewer" live under
+// MemoryScopeAgent, MemoryScopePrincipal, or MemoryScopeShared. An empty
+// Scope, the default, is MemoryScopeAgent, except under ax, where
+// ax.ApplyToConfig sets MemoryScopePrincipal, because one Task serves many
+// people one after another.
+//
+// With MemoryScopeAgent, the notes of the profile "reviewer" live under
 // $FW_HOME/memory/agents/reviewer, and every person who runs that profile
 // shares them. With MemoryScopePrincipal, the notes of one person in that
 // profile live under $FW_HOME/memory/principals/reviewer/<hash>, where the
 // hash names the subject of the person; a run without a principal, such as
-// a local run, uses the directory of MemoryScopeAgent. With
-// MemoryScopeShared, the notes of every profile live under
-// $FW_HOME/memory/shared.
+// a local run under open access or a job whose publisher names nobody,
+// uses the directory of MemoryScopeAgent. With MemoryScopeShared, the notes
+// of every profile live under $FW_HOME/memory/shared.
 type MemoryToolConfig struct {
 	Scope string `yaml:"scope" json:"scope"`
 }
@@ -690,7 +694,7 @@ func DefaultConfig() *Config {
 				ReadOnly:     []string{".git"},
 				MaxFileBytes: DefaultMaxFileBytes,
 			},
-			Memory: MemoryToolConfig{Scope: MemoryScopeAgent},
+			Memory: MemoryToolConfig{},
 			Limits: ToolLimits{Limit: Limit{
 				MaxInputBytes:  DefaultMaxInputBytes,
 				MaxOutputBytes: DefaultMaxOutputBytes,
