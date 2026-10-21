@@ -56,10 +56,18 @@ const (
 type FileLedger struct {
 	dir string
 
+	// egressMu serializes the egress cursors. egressDirs holds the cursor
+	// directories whose entries this ledger made durable, so each costs its
+	// fsyncs once.
+	egressMu   sync.Mutex
+	egressDirs map[string]bool
+
 	mu      sync.Mutex
 	runs    map[string]*fileRun
 	indexed map[string]bool
 
+	reads  atomic.Int64 // number of event lines decoded by Read, for tests
+	esyncs atomic.Int64 // number of fsync calls for egress cursors, for tests
 	syncs  atomic.Int64 // number of fsync calls on run files, for tests
 	dsyncs atomic.Int64 // number of fsync calls on run directories, for tests
 	rsyncs atomic.Int64 // number of fsync calls on the ledger root, for tests
@@ -89,8 +97,15 @@ type fileRun struct {
 	opened   bool
 	rootSync bool // the entry of the run directory owes an fsync of the root
 	dirSync  bool // the entry of the ledger file owes an fsync of the directory of the run
-	f        *os.File
-	watchers []*ledgerWatcher
+	// cursorSynced says an egress cursor of this run paid the fsyncs of
+	// the entries behind the ledger file once in this ledger. markSeq and
+	// markOff are the sequence number and the byte offset of the line of
+	// the last egress cursor, so a Read after it starts there.
+	cursorSynced bool
+	markSeq      uint64
+	markOff      int64
+	f            *os.File
+	watchers     []*ledgerWatcher
 }
 
 // keepsDone reports whether an event leaves a finished run finished. An
@@ -505,6 +520,30 @@ func (l *FileLedger) Read(ctx context.Context, runID string, from uint64) iter.S
 			yield(Event{}, err)
 			return
 		}
+		// A Read after the last event ends here. A Read after the last
+		// egress cursor starts at the line of the cursor and not at the
+		// first line, so the egress of a long run reads only its new
+		// events. The lock of the appends guards the snapshot: a later
+		// append is in the next Read.
+		var start int64
+		var startSeq uint64
+		if from > 0 {
+			r := l.run(runID)
+			r.mu.Lock()
+			err := l.loadLocked(runID, r)
+			caughtUp := from > r.seq
+			if r.markSeq > 0 && r.markSeq < from {
+				start, startSeq = r.markOff, r.markSeq
+			}
+			r.mu.Unlock()
+			if err != nil {
+				yield(Event{}, err)
+				return
+			}
+			if caughtUp {
+				return
+			}
+		}
 		f, err := os.Open(l.ledgerPath(runID))
 		if errors.Is(err, fs.ErrNotExist) {
 			return
@@ -514,25 +553,47 @@ func (l *FileLedger) Read(ctx context.Context, runID string, from uint64) iter.S
 			return
 		}
 		defer f.Close()
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			yield(Event{}, fmt.Errorf("fw: file ledger: read %s: %w", runID, err))
+			return
+		}
 		br := bufio.NewReader(f)
+		check := start > 0
 		for {
 			if err := ctx.Err(); err != nil {
 				yield(Event{}, err)
 				return
 			}
 			line, err := br.ReadBytes('\n')
-			if err == io.EOF {
-				return
-			}
-			if err != nil {
+			if err != nil && err != io.EOF {
 				yield(Event{}, fmt.Errorf("fw: file ledger: read %s: %w", runID, err))
 				return
 			}
 			var e Event
-			if err := json.Unmarshal(line, &e); err != nil {
-				yield(Event{}, fmt.Errorf("fw: file ledger: %s holds a line that is not an event: %w", runID, err))
+			uerr := io.EOF
+			if err == nil {
+				uerr = json.Unmarshal(line, &e)
+			}
+			if check {
+				check = false
+				if uerr != nil || e.Seq != startSeq {
+					// The hint does not hold. Read from the first line.
+					if _, err := f.Seek(0, io.SeekStart); err != nil {
+						yield(Event{}, fmt.Errorf("fw: file ledger: read %s: %w", runID, err))
+						return
+					}
+					br.Reset(f)
+					continue
+				}
+			}
+			if err == io.EOF {
 				return
 			}
+			if uerr != nil {
+				yield(Event{}, fmt.Errorf("fw: file ledger: %s holds a line that is not an event: %w", runID, uerr))
+				return
+			}
+			l.reads.Add(1)
 			if e.Seq < from {
 				continue
 			}
