@@ -24,11 +24,14 @@ Without a build tag the binary carries every driver. `TAGS=lean` builds the core
 ## Start here
 
 ```
-export ANTHROPIC_API_KEY=...
 ./bin/fw init      # writes fw.yaml, prompts/default.md, agents/, and skills/
+export FW_MODEL=anthropic/claude-opus-5-5   # or set model in fw.yaml; there is no default model
+export ANTHROPIC_API_KEY=...                # the credential of that provider
 ./bin/fw doctor    # checks the credential, the model, the drivers, and the skills
 ./bin/fw run "List the files in this directory and say which one is the largest."
 ```
+
+A model must be set. The `fw.yaml` of `fw init` shows one commented `model` line for each provider, and `fw init` says so. Without a model, `fw` refuses every run, and `fw doctor` warns about it.
 
 `fw run` prints one line per event to standard error and the final answer to standard output. When a tool needs an approval, it asks on the terminal. The flags shape the run without a configuration change. `-system` and `-i` take a text or `@path` to a file. `-tools` and `-skills` take globs. `-model`, `-effort`, `-time-zone`, `-max-turns`, `-deadline`, and `-max-tool-calls` set the rest. `-agent` selects a profile from `fw.yaml`, and `-json` prints the run object.
 
@@ -48,11 +51,11 @@ A profile holds a system prompt, instruction texts, a tool allowlist, a skill al
 
 A long run does not outgrow the context window. Before each model call, the kernel estimates the size of the context from the usage that the provider reports. At 150,000 tokens, the model writes a summary of the run, and the summary replaces the history. If a model call fails because the context is full, the run gets a summary and one more try. A local model with a small window therefore needs no setting. `compaction.at` changes the size, and `compaction.model` sends the summary call to another model.
 
-The `memory` tool keeps notes between runs as Markdown files, by default in one directory per agent profile under `memory/agents/`. At the start of a run, the first user message lists each note with its first line, inside a `<context>` block that the system prompt marks as data and not as instructions. The model therefore knows what it learned without a tool call, and a planted note never gains the authority of the system prompt. `tools.memory.scope: principal` gives each person their own notes in each profile, which a profile that more than one person runs wants; `shared` gives every profile the same notes. A note holds at most 128 KB, a scope at most 2,000 notes, and each change that a run makes appears in its ledger as `fw.memory.changed`, without the text.
+The `memory` tool keeps notes between runs as Markdown files, by default in one directory per agent profile under `memory/agents/`. At the start of a run, the first user message lists each note with its first line, inside a `<context>` block that the system prompt marks as data and not as instructions. The model therefore knows what it learned without a tool call, and a planted note never gains the authority of the system prompt. `tools.memory.scope: principal` gives each person their own notes in each profile, which a profile that more than one person runs wants, and it is the default inside an ax Task, where the runs of many people follow one another. The notes of one person stay out of the runs of another, but a run records what it read: anyone who can view the run reads the notes that the run read and wrote, in its ledger. `shared` gives every profile the same notes, and through the API only an admin writes them. A note holds at most 128 KB, a scope at most 2,000 notes, and a note name at most 8 parts, with no control character. Each change that a run makes appears in its ledger as `fw.memory.changed`, without the text, and each write through the API goes to the log with its caller.
 
-The `recall` tool searches the notes, the earlier runs of the agent, the files of the workspace, and the skills, and reads one record by its ref, such as `mem://agent/default/build.md` or `run://<id>`. The routes `/v1/memory` of the native API search the memory and read and write notes, so a person, a script, or another harness can seed and curate the memory of an agent without a run. The build tag `memory_sqlite` adds a SQLite FTS5 index of the notes, for about 4 MB; without it, a search scans the notes. Section 7.8 of the architecture has the details.
+The `recall` tool searches the notes, the earlier runs of the agent that the same person started, the files of the workspace, and the skills that the profile allows, and reads one record by its ref, such as `mem://agent/default/build.md` or `run://<id>`. A run without a principal sees only the runs without one. The routes `/v1/memory` of the native API search the memory and read and write notes, so a person, a script, or another harness can seed and curate the memory of an agent without a run. The build tag `memory_sqlite` adds a SQLite FTS5 index of the notes, for about 4 MB; without it, a search scans the notes. Section 7.8 of the architecture has the details.
 
-An interrupted memory call needs approval before it runs again, because an insert can already have changed the file. Approval authorizes a rerun, which can repeat the edit.
+An interrupted `insert` or `str_replace` needs approval before it runs again, because it can already have changed the file. Approval authorizes a rerun, which can repeat the edit. An interrupted `view`, `create`, `delete`, or `rename` runs again at once, so an unattended job does not wait for a person after a suspend.
 
 ## Time
 
@@ -91,9 +94,9 @@ curl -s -H "Authorization: Bearer secret" -H "Content-Type: application/json" \
 
 Follow the ledger of a run as server-sent events with `GET /v1/runs/{id}/events`, or on the command line with `fw events <id> --follow`. Each run has a title, such as "Fix checkout retries". It comes from the request, or else from the first sentence of the input. The workbench lets a model write one and records it on the run.
 
-Each file ledger has one writer process. Another writer gets an ownership error; `fw events` can read while the server runs. Use separate homes and ledgers for workers. The file driver syncs accepted runs, external follow-ups, budget changes, approvals, and unsafe tool intents before acknowledging them. See [the durability contract](docs/ARCHITECTURE.md#43-storage) for the complete boundaries and recovery rules.
+Each file ledger has one writer process. Another writer gets an ownership error; `fw events` can read while the server runs. A server that boots while another process holds the ledger, such as `fw run` through `ax ssh`, waits up to 30 seconds for it and then exits with a message that names the other holder; `fw run` and `fw replay` beside a server fail at once. Use separate homes and ledgers for workers. The file driver syncs accepted runs, external follow-ups, budget changes, approvals, and unsafe tool intents before acknowledging them. See [the durability contract](docs/ARCHITECTURE.md#43-storage) for the complete boundaries and recovery rules.
 
-`maxQueuedRuns` bounds the backlog behind `maxRuns`; zero selects 64 extra admitted root drivers. A full queue returns HTTP 429 with `Retry-After`. A storage failure makes `/readyz` return 503 and blocks execution until storage is repaired and the process restarts. Open runs expose `blocked` alongside their last recorded state.
+`maxQueuedRuns` bounds the backlog behind `maxRuns`; zero selects 64 extra admitted root drivers. A full queue refuses a new run: the native API returns HTTP 429 with `Retry-After`, and the A2A server returns the JSON-RPC server error -32000 with the reason `SATURATED` and `retryAfterSeconds` in its data, or HTTP 429 with `Retry-After` on its REST binding. A follow-up or an approval of an accepted run is never refused. A storage failure makes `/readyz` return 503 and blocks execution until storage is repaired and the process restarts; A2A answers it with the reason `STORAGE_UNAVAILABLE`. Open runs expose `blocked` alongside their last recorded state, and `GET /v1/status` reports `blocked: true` and the process idle since the failure, so a controller can suspend it.
 
 ## Observability
 
@@ -146,7 +149,7 @@ See section 11 of the architecture for the boot sequence, suspend and resume, `a
 
 ## Models
 
-The selector `provider/model` picks the adapter: `anthropic/claude-opus-5-5`, `gemini/gemini-3.8-flash`, or `openai/<model>`. There is no default. A process without a model boots and serves, and refuses every run until `model`, `FW_MODEL`, or the profile of the run names one. The OpenAI adapter speaks the chat completions API to OpenAI, to Azure OpenAI, and to a local server such as vLLM or Ollama. The key `providers.openai` in `fw.yaml` holds the base URL, the headers, the TLS configuration, and the options.
+The selector `provider/model` picks the adapter: `anthropic/claude-opus-5-5`, `gemini/gemini-3.8-flash`, or `openai/<model>`. There is no default, and a paid model is never a built-in choice: `fw init` and `examples/fw.yaml` show the `model` line as a comment. A process without a model boots and serves, and refuses every run until `model`, `FW_MODEL`, or the profile of the run names one. The OpenAI adapter speaks the chat completions API to OpenAI, to Azure OpenAI, and to a local server such as vLLM or Ollama. The key `providers.openai` in `fw.yaml` holds the base URL, the headers, the TLS configuration, and the options.
 
 ## Layout
 
