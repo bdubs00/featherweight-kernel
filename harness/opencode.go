@@ -56,6 +56,7 @@ type ocServer struct {
 	base   string
 	pass   string
 	mem    string          // the secret of its memory route, or "" when it has no memory server
+	memWhy string          // why it has no memory server, for an agent with memory
 	models map[string]bool // the selectors that its configuration holds
 	env    string          // the digest of its environment (envDigest)
 	client *http.Client
@@ -89,10 +90,15 @@ type ocSession struct {
 	step       *ocStep            // the model call that runs
 	busy       bool               // the session worked in this exchange
 	failure    string             // the latest error of the session
+	// memWhy says why the memory server of the server does not serve this
+	// session, such as a project configuration that changes its entry
+	// (ocMemEntry), or "".
+	memWhy string
 }
 
 type ocTool struct {
-	tool   string
+	tool   string // the name of the tool in lower case
+	name   string // the name of the tool as opencode reports it
 	input  json.RawMessage
 	state  string
 	result string // the output or the error of a call that ended
@@ -100,11 +106,12 @@ type ocTool struct {
 }
 
 // ocPerm is a permission that waits for its answer, with the tool call
-// that asked for it. input is nil when the host did not see the input of
-// the call.
+// that asked for it. tool is the name of the tool in lower case, and name
+// the name as opencode reports it. input is nil when the host did not see
+// the input of the call.
 type ocPerm struct {
-	id, session, callID, tool string
-	input                     json.RawMessage
+	id, session, callID, tool, name string
+	input                           json.RawMessage
 }
 
 // ocStep is one model call of the session: one turn of the run.
@@ -322,7 +329,8 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 	// The memory server of the process has a secret of its own, which maps
 	// to no run: each call that the kernel allowed names its run (memory.go).
 	memKey, memURL := "", ""
-	if base := o.h.memBase(); base != "" {
+	base, memWhy := o.h.memBase(ctx)
+	if base != "" {
 		memKey = secret()
 		memURL = base + memPath + memKey
 	}
@@ -343,7 +351,7 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 		// The URL of the memory server is in the environment of the
 		// process, which a tool call of the harness can print.
 		o.h.a.AddSecret(memKey)
-		o.h.bindMemory(memKey, false)
+		o.h.bindMemory(memKey)
 	}
 	extra := []string{
 		"OPENCODE_SERVER_PASSWORD=" + pass,
@@ -368,7 +376,7 @@ func (o *opencode) server(ctx context.Context, r *run, m modelConf) (*ocServer, 
 	}
 	go o.h.logLines(stdout, "stdout")
 	go o.h.logLines(stderr, "stderr")
-	s = &ocServer{cmd: cmd, base: "http://127.0.0.1:" + strconv.Itoa(port), pass: pass, mem: memKey, models: map[string]bool{}, env: digest, done: make(chan struct{}),
+	s = &ocServer{cmd: cmd, base: "http://127.0.0.1:" + strconv.Itoa(port), pass: pass, mem: memKey, memWhy: memWhy, models: map[string]bool{}, env: digest, done: make(chan struct{}),
 		client: &http.Client{Transport: &http.Transport{Proxy: nil, DisableCompression: true}}}
 	for _, mc := range models {
 		s.models[mc.provider+"/"+mc.name] = true
@@ -681,6 +689,9 @@ func (o *opencode) session(ctx context.Context, r *run, srv *ocServer, m modelCo
 	}
 	s = &ocSession{srv: srv, id: sid, dir: dir, queue: queue, stop: cancel, model: m,
 		family: map[string]bool{sid: true}, assistants: map[string]bool{}, tools: map[string]*ocTool{}, perms: map[string]ocPerm{}}
+	if srv.mem != "" {
+		s.memWhy = o.memCheck(ctx, srv, dir)
+	}
 	// The events name the provider of the kernel, so the price table of
 	// the kernel prices the calls.
 	s.rec = newRecorder(r, m.provider, m.name, newTracker(o.h, dir, rel))
@@ -688,6 +699,27 @@ func (o *opencode) session(ctx context.Context, r *run, srv *ocServer, m modelCo
 	o.sessions[r.hr.ID()] = s
 	o.mu.Unlock()
 	return s, true, nil
+}
+
+// memCheck checks that opencode serves the directory dir with the memory
+// server of the inline configuration of the kernel, and with nothing that
+// a configuration of the project added to it (ocMemEntry). It returns why
+// the session gets no memory calls, or "". The URL of the server holds its
+// secret, so no log line holds the configuration.
+func (o *opencode) memCheck(ctx context.Context, srv *ocServer, dir string) string {
+	var conf json.RawMessage
+	why := ""
+	if _, err := srv.call(ctx, http.MethodGet, "/config", url.Values{"directory": {dir}}, nil, &conf); err != nil {
+		why = "fw cannot read the configuration of opencode: " + o.h.a.Redact(err.Error())
+	} else if base, err := o.h.listenBase(); err != nil {
+		why = err.Error()
+	} else {
+		why = ocMemEntry(conf, base+memPath+srv.mem)
+	}
+	if why != "" {
+		o.h.log.Warn("harness: opencode does not serve this session with the memory server of fw; its memory calls get a deny", "dir", dir, "reason", why)
+	}
+	return why
 }
 
 func (q *ocQueue) isClosed() bool {
@@ -825,13 +857,14 @@ func (o *opencode) exchange(ctx context.Context, r *run, s *ocSession, fresh boo
 		fresh = false
 		switch {
 		case text != "":
-			briefed := false
-			if st.prompts == 0 {
-				// The index of the notes goes to the first prompt of the
-				// session alone, as data, never to the system text.
-				if block := r.memoryBlock(ctx); block != "" {
-					text, briefed = joinText(block, text), true
-				}
+			if notes, recall := o.h.memoryTools(r.hr.Queued()); (notes || recall) && s.srv.mem == "" {
+				o.h.noServer(s.srv.memWhy)
+			}
+			// The index of the notes goes to the first prompt of the
+			// session alone, as data, never to the system text.
+			text, briefed, err := r.brief(ctx, st, text, s.memServed())
+			if err != nil {
+				return 0, err
 			}
 			if err := o.prompt(ctx, r, s, text); err != nil {
 				return 0, err
@@ -904,7 +937,7 @@ func (o *opencode) prompt(ctx context.Context, r *run, s *ocSession, text string
 		"agent": "build",
 		"parts": []map[string]string{{"type": "text", "text": text}},
 	}
-	if sys := r.systemText(s.srv.mem != ""); sys != "" {
+	if sys := r.systemText(s.memServed()); sys != "" {
 		body["system"] = sys
 	}
 	s.busy, s.failure = false, ""
@@ -912,23 +945,34 @@ func (o *opencode) prompt(ctx context.Context, r *run, s *ocSession, text string
 	return err
 }
 
+// memServed reports whether the memory server of fw serves the session.
+func (s *ocSession) memServed() bool { return s.srv.mem != "" && s.memWhy == "" }
+
 // reply answers a permission of opencode. An allowed call of the memory
-// server is armed first, so the memory server makes it for the run r.
+// server is armed first, with its canonical input, so the memory server
+// makes it for the run r. A call that cannot be armed gets a reject with
+// the reason, at once.
 func (o *opencode) reply(ctx context.Context, r *run, s *ocSession, p ocPerm, allow bool, why string) error {
 	var drop func()
-	if t := memToolOf(KindOpencode, p.tool); allow && t != "" {
-		if b := o.h.binding(s.srv.mem); b == nil {
+	if t := memToolOf(KindOpencode, p.name); allow && t != "" {
+		b := o.h.binding(s.srv.mem)
+		switch {
+		case b == nil:
 			allow, why = false, "harness: the memory server of fw is not available in this session"
-		} else if p.input == nil {
-			// The policy decided without the input of the call, so an armed
-			// call would match any arguments. The harness makes it again.
-			allow, why = false, "harness: the input of this memory call did not reach fw before its permission; make the call again"
-		} else {
-			d, err := b.arm(ctx, &memArm{tool: t, input: p.input, callID: p.callID, run: r.memRun()})
-			if err != nil {
-				return err
+		case s.memWhy != "":
+			allow, why = false, "harness: the memory server of fw does not serve this session: "+s.memWhy
+		case p.input == nil:
+			// The policy decided without the input of the call, so the host
+			// cannot arm it. The harness makes it again.
+			allow, why = false, memUnseen
+		default:
+			canon, err := memCanon(t, p.input)
+			if err == nil {
+				drop, err = b.arm(&memArm{tool: t, input: canon, callID: p.callID, run: r.memRun()})
 			}
-			drop = d
+			if err != nil {
+				allow, why = false, "harness: "+strings.TrimPrefix(err.Error(), "harness: ")
+			}
 		}
 	}
 	err := o.answer(ctx, s, p, allow, why)
@@ -937,6 +981,10 @@ func (o *opencode) reply(ctx context.Context, r *run, s *ocSession, p ocPerm, al
 	}
 	return err
 }
+
+// memUnseen is the reason of a reject of a memory call whose input did not
+// reach the host before its permission.
+const memUnseen = "harness: the input of this memory call did not reach fw before its permission; make the call again"
 
 // answer sends the answer of a permission to opencode.
 func (o *opencode) answer(ctx context.Context, s *ocSession, p ocPerm, allow bool, why string) error {
@@ -1171,7 +1219,7 @@ func (o *opencode) part(ctx context.Context, r *run, s *ocSession, session strin
 			return r.raw(ctx, "message.part.updated", map[string]any{"session": session, "type": pt.Type, "reason": pt.Reason, "cost": pt.Cost})
 		}
 		if pt.Type == "tool" && pt.CallID != "" {
-			s.tools[pt.CallID] = &ocTool{tool: strings.ToLower(pt.Tool), input: pt.State.Input, state: pt.State.Status}
+			s.tools[pt.CallID] = &ocTool{tool: strings.ToLower(pt.Tool), name: pt.Tool, input: pt.State.Input, state: pt.State.Status}
 		}
 		return nil
 	}
@@ -1207,7 +1255,7 @@ func (o *opencode) part(ctx context.Context, r *run, s *ocSession, session strin
 			s.tools[pt.CallID] = t
 			st.order = append(st.order, "tool:"+pt.CallID)
 		}
-		t.tool = strings.ToLower(pt.Tool)
+		t.tool, t.name = strings.ToLower(pt.Tool), pt.Tool
 		if len(pt.State.Input) > 0 && string(pt.State.Input) != "null" {
 			t.input = pt.State.Input
 		}
@@ -1312,11 +1360,11 @@ func (o *opencode) toolDone(ctx context.Context, s *ocSession, id string) error 
 
 // ask answers a permission of opencode from the policy of the run.
 func (o *opencode) ask(ctx context.Context, r *run, s *ocSession, id, session, permission, callID string, patterns []string, meta json.RawMessage) (ocOutcome, bool, error) {
-	tool := strings.ToLower(permission)
+	tool, name := strings.ToLower(permission), permission
 	var input, seen json.RawMessage
 	if t := s.tools[callID]; t != nil {
 		if tool != "external_directory" && tool != "doom_loop" {
-			tool = t.tool
+			tool, name = t.tool, t.name
 		}
 		input = t.input
 	}
@@ -1328,7 +1376,7 @@ func (o *opencode) ask(ctx context.Context, r *run, s *ocSession, id, session, p
 	if callID == "" {
 		callID = id
 	}
-	perm := ocPerm{id: id, session: session, callID: callID, tool: tool, input: seen}
+	perm := ocPerm{id: id, session: session, callID: callID, tool: tool, name: name, input: seen}
 	if err := r.raw(ctx, "permission.asked", map[string]string{"id": id, "permission": permission, "callID": callID}); err != nil {
 		return 0, false, err
 	}
@@ -1351,14 +1399,20 @@ func (o *opencode) ask(ctx context.Context, r *run, s *ocSession, id, session, p
 			}
 		}
 	}
+	mem := memToolOf(KindOpencode, name)
+	if mem != "" && seen == nil {
+		// The policy cannot decide a memory call on the patterns of the
+		// permission, and the host never arms a call without its input.
+		return 0, false, o.reply(ctx, r, s, perm, false, memUnseen)
+	}
 	for i, d := range s.carried {
-		if d.req.Tool == tool && sameJSON(d.req.Input, input) {
+		if d.req.Tool == tool && (mem == "" && sameJSON(d.req.Input, input) || mem != "" && memSame(mem, d.req.Input, input)) {
 			s.carried = append(s.carried[:i], s.carried[i+1:]...)
 			ok, why := r.recheck(ctx, d)
 			return 0, false, o.reply(ctx, r, s, perm, ok, why)
 		}
 	}
-	v := r.decide(ctx, callID, tool, input)
+	v := r.decide(ctx, callID, name, input)
 	switch v.Verdict {
 	case fw.VerdictAllow:
 		return 0, false, o.reply(ctx, r, s, perm, true, "")

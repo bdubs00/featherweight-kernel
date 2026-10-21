@@ -42,21 +42,30 @@ type claude struct {
 
 // claudeProc is one running process of claude and what its hook needs.
 type claudeProc struct {
-	r         *run
-	decisions map[string]decision // the decisions of the run, by call id
-	mem       *memBinding         // the memory server of the process, or nil
-	memRun    *memRun             // the run as the memory server needs it
+	r      *run
+	mem    *memBinding // the memory server of the process, or nil
+	memRun *memRun     // the run as the memory server needs it
 
-	mu       sync.Mutex
-	verdicts map[string]fw.Decision // the calls that the hook deferred, by call id
-	msgOf    map[string]string      // the message of each tool call that the mapper read, by call id
-	calls    map[string]int         // the tool calls of each message, by message id
-	read     chan struct{}          // closed and replaced at each line that the mapper reads
+	mu sync.Mutex
+	// decisions holds the decisions that this process answers, by call
+	// id: the decisions that the driver gave the session before it started
+	// the process. The hook uses each one once.
+	decisions map[string]decision
+	verdicts  map[string]fw.Decision // the calls that the hook deferred, by call id
+	msgOf     map[string]string      // the message of each tool call that the mapper read, by call id
+	calls     map[string]int         // the tool calls of each message, by message id
+	read      chan struct{}          // closed and replaced at each line that the mapper reads
 }
 
-func newClaudeProc(r *run) *claudeProc {
-	return &claudeProc{r: r, decisions: r.st.decisions, verdicts: map[string]fw.Decision{},
+func newClaudeProc(r *run, decided []decision) *claudeProc {
+	p := &claudeProc{r: r, decisions: map[string]decision{}, verdicts: map[string]fw.Decision{},
 		msgOf: map[string]string{}, calls: map[string]int{}, read: make(chan struct{})}
+	for _, d := range decided {
+		if d.req.CallID != "" {
+			p.decisions[d.req.CallID] = d
+		}
+	}
+	return p
 }
 
 // The waits of the hook for the lines of a message (claudeProc.batch).
@@ -171,7 +180,8 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 			return nil
 		}
 		answered := false
-		for _, d := range st.decided {
+		decided := st.decided
+		for _, d := range decided {
 			// The hook answers the call from the decision in the ledger
 			// when the resumed process asks again.
 			if err := r.mark(ctx, EventData{Kind: KindAnswer, Approval: d.req.ApprovalID}); err != nil {
@@ -186,12 +196,8 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 		briefed := false
 		switch {
 		case text != "":
-			if st.prompts == 0 {
-				// The index of the notes goes to the first prompt of the
-				// session alone, as data, never to the system text.
-				if block := r.memoryBlock(ctx); block != "" {
-					text, briefed = block+"\n\n"+text, true
-				}
+			if text, briefed, err = r.brief(ctx, st, text, true); err != nil {
+				return err
 			}
 			lines = []string{text}
 		case answered:
@@ -229,7 +235,7 @@ func (c *claude) drive(ctx context.Context, r *run) error {
 				return err
 			}
 		}
-		out, err := c.process(ctx, r, rec, m, base, dir, sid, resume, lines, through, briefed)
+		out, err := c.process(ctx, r, rec, m, base, dir, sid, resume, lines, through, briefed, decided)
 		if err != nil {
 			return err
 		}
@@ -273,16 +279,17 @@ func (c *claude) nativeURL(ctx context.Context) (string, error) {
 }
 
 // process runs one process of claude for one exchange. briefed tells that
-// the first line starts with the index of the notes.
-func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf, base, dir, sid string, resume bool, lines []string, through uint64, briefed bool) (ccOutcome, error) {
-	p := newClaudeProc(r)
+// the first line starts with the index of the notes. decided holds the
+// decisions that the process answers.
+func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf, base, dir, sid string, resume bool, lines []string, through uint64, briefed bool, decided []decision) (ccOutcome, error) {
+	p := newClaudeProc(r, decided)
 	key := secret()
 	// The secret is in the arguments of the process, which a tool call of
 	// the harness can print, so the redactor knows it while it works. The
 	// same secret names the memory server of the process.
 	c.h.a.AddSecret(key)
 	if notes, recall := c.h.memoryTools(r.hr.Queued()); notes || recall {
-		p.mem, p.memRun = c.h.bindMemory(key, true), r.memRun()
+		p.mem, p.memRun = c.h.bindMemory(key), r.memRun()
 	}
 	c.h.mu.Lock()
 	c.h.hooks[key] = p
@@ -302,7 +309,8 @@ func (c *claude) process(ctx context.Context, r *run, rec *recorder, m modelConf
 		"--model", m.name, "--settings", settings)
 	if p.mem != nil {
 		// The memory server goes beside the servers of the repository, so
-		// --strict-mcp-config stays off.
+		// --strict-mcp-config stays off. The settings reject a server of the
+		// .mcp.json of the repository with the same name (hookSettings).
 		argv = append(argv, "--mcp-config", mustJSON(claudeMCPConfig(base+memPath+key)))
 	}
 	if resume {
@@ -570,11 +578,16 @@ func (c *claude) ended(ctx context.Context, r *run, rec *recorder, m *ccMapper, 
 // stays allowed when a file of the repository limits the URLs. The
 // permission mode default keeps a mode such as acceptEdits or dontAsk of
 // a file of the repository from the calls that the hook does not decide.
+// disabledMcpjsonServers rejects a server named fw-memory in the .mcp.json
+// of the repository. Without it, such a server can pose as the memory
+// server of fw and get the text of each note and query. A rejection wins
+// over an approval in any settings file.
 func hookSettings(hook, key string) map[string]any {
 	return map[string]any{
-		"disableAllHooks":     false,
-		"allowedHttpHookUrls": []string{hook + "*"},
-		"permissions":         map[string]any{"defaultMode": "default"},
+		"disableAllHooks":        false,
+		"allowedHttpHookUrls":    []string{hook + "*"},
+		"permissions":            map[string]any{"defaultMode": "default"},
+		"disabledMcpjsonServers": []string{memServer},
 		"hooks": map[string]any{"PreToolUse": []any{map[string]any{
 			"matcher": "*",
 			"hooks":   []any{map[string]any{"type": "http", "url": hook + key, "timeout": 120, "onFailure": "block"}},
@@ -922,9 +935,16 @@ func (h *host) hook(w http.ResponseWriter, req *http.Request) {
 // a limit of its budget gets a deny for every call, so the limits of the
 // tool calls, of the tree, and the deadline stop the next call, not the
 // next turn.
+//
+// A decision answers only the call that a person decided: the same call
+// id, the same tool, and for a tool of the memory server the same
+// canonical input, and the hook uses it once. The host then arms that
+// approved call, never the call of the request, so a process that read the
+// secret cannot post another tool or input under the id of an approved
+// call.
 func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) {
-	tool := strings.ToLower(in.Tool)
-	d, decided := p.decisions[in.ToolUseID]
+	mem := memToolOf(KindClaudeCode, in.Tool)
+	d, decided, mismatch := p.decision(in, mem)
 	if !decided {
 		// Once the mapper read the line of this call, the run holds every
 		// call before it, so the budget counts them. A resumed call that
@@ -935,15 +955,37 @@ func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) 
 		return "deny", msg
 	}
 	if decided {
+		if mismatch != "" {
+			return "deny", mismatch
+		}
 		if allow, why := p.r.recheck(ctx, d); !allow {
 			return "deny", why
 		}
-		return p.allow(ctx, in.ToolUseID, tool, in.Input)
+		if mem == "" {
+			return "allow", ""
+		}
+		if why := p.r.memDenied(mem); why != "" {
+			return "deny", why
+		}
+		canon, err := memCanon(mem, d.req.Input)
+		if err != nil {
+			return "deny", "harness: " + err.Error()
+		}
+		return p.allow(in.ToolUseID, mem, canon)
 	}
-	v := p.r.decide(ctx, in.ToolUseID, tool, in.Input)
+	v := p.r.decide(ctx, in.ToolUseID, in.Tool, in.Input)
 	switch v.Verdict {
 	case fw.VerdictAllow:
-		return p.allow(ctx, in.ToolUseID, tool, in.Input)
+		if mem == "" {
+			return "allow", ""
+		}
+		// The policy allowed the canonical input of the call, so the input
+		// has one.
+		canon, err := memCanon(mem, in.Input)
+		if err != nil {
+			return "deny", "harness: " + err.Error()
+		}
+		return p.allow(in.ToolUseID, mem, canon)
 	case fw.VerdictDeny:
 		return "deny", "denied by policy: " + v.Reason
 	}
@@ -959,13 +1001,37 @@ func (p *claudeProc) decide(ctx context.Context, in hookInput) (string, string) 
 	return "defer", v.Reason
 }
 
-// allow answers a call that the policy allowed. A call of the memory
-// server is armed first, so the memory server makes it for this run.
-func (p *claudeProc) allow(ctx context.Context, id, tool string, input json.RawMessage) (string, string) {
-	if t := memToolOf(KindClaudeCode, tool); t != "" && p.mem != nil {
-		if _, err := p.mem.arm(ctx, &memArm{tool: t, input: input, callID: id, run: p.memRun}); err != nil {
-			return "deny", "harness: " + err.Error()
-		}
+// decision returns the decision of a person that this process answers for
+// the call id of a hook, if the hook did not use it yet, and uses it up
+// when the call of the hook is the call that the person decided: the same
+// tool, and for the tool mem of the memory server the same canonical
+// input. Otherwise mismatch says why the decision does not answer the
+// call, and the decision stays for the call that it answers.
+func (p *claudeProc) decision(in hookInput, mem string) (d decision, ok bool, mismatch string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	d, ok = p.decisions[in.ToolUseID]
+	switch {
+	case !ok:
+		return d, false, ""
+	case d.req.Tool != strings.ToLower(in.Tool) || memPoses(KindClaudeCode, in.Tool):
+		return d, true, "harness: the call " + in.ToolUseID + " is not the call that a person decided"
+	case mem != "" && !memSame(mem, d.req.Input, in.Input):
+		return d, true, "harness: the input of the call " + in.ToolUseID + " is not the input that a person decided"
+	}
+	delete(p.decisions, in.ToolUseID)
+	return d, true, ""
+}
+
+// allow answers a call of the memory server that the policy or a person
+// allowed: the host arms the call with its canonical input first, so the
+// memory server makes it for this run.
+func (p *claudeProc) allow(id, mem string, canon json.RawMessage) (string, string) {
+	if p.mem == nil {
+		return "deny", "harness: the memory server of fw is not available in this process"
+	}
+	if _, err := p.mem.arm(&memArm{tool: mem, input: canon, callID: id, run: p.memRun}); err != nil {
+		return "deny", err.Error()
 	}
 	return "allow", ""
 }

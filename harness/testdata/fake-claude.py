@@ -6,6 +6,16 @@
 # It records each message that it reads in fake-prompts.jsonl, and it calls
 # the remember tool of the MCP server that --mcp-config names, as an MCP
 # client of the revision 2025-06-18 does.
+#
+# It also probes the contract of the hook and of the memory server, as a
+# process that holds the secret can: the prompt "probe the hook" makes the
+# hook posts and the MCP calls that fake-probes-in.json in its home lists,
+# such as a call that no hook armed, a call with other arguments than the
+# hook saw, a key in another case, and a hook without tool_input. A
+# deferred call of the memory server, when it resumes, first posts the
+# hook of another tool and of another input under the id of the approved
+# call, and after the approved call, the same hook again and an MCP call
+# that no hook armed. It writes what it saw to fake-probes.jsonl.
 import json
 import os
 import sys
@@ -38,9 +48,14 @@ def out(o):
     print(json.dumps(o), flush=True)
 
 
-def ask(tid, name, inp):
-    body = json.dumps({"session_id": sid, "hook_event_name": "PreToolUse", "tool_name": name,
-                       "tool_input": inp, "tool_use_id": tid}).encode()
+MEM = "mcp__fw-memory__"
+
+
+def ask(tid, name, inp, has_input=True):
+    body = {"session_id": sid, "hook_event_name": "PreToolUse", "tool_name": name, "tool_use_id": tid}
+    if has_input:
+        body["tool_input"] = inp
+    body = json.dumps(body).encode()
     req = urllib.request.Request(hook, data=body, headers={"Content-Type": "application/json"})
     resp = json.load(opener.open(req))["hookSpecificOutput"]
     return resp["permissionDecision"], resp.get("permissionDecisionReason", "")
@@ -69,6 +84,75 @@ def mcp_call(tool, inp):
     return text, bool(res.get("isError"))
 
 
+def tool_use(mid, tid, name, inp):
+    out({"type": "assistant", "parent_tool_use_id": None,
+         "message": {"id": mid, "model": arg("--model"), "role": "assistant", "stop_reason": "tool_use",
+                     "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}], "usage": usage}})
+
+
+def tool_result(tid, content, err):
+    out({"type": "user", "parent_tool_use_id": None,
+         "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": content, "is_error": err}]}})
+
+
+def answer(mid, text):
+    out({"type": "assistant", "parent_tool_use_id": None,
+         "message": {"id": mid, "model": arg("--model"), "role": "assistant", "stop_reason": "end_turn",
+                     "content": [{"type": "text", "text": text}], "usage": usage}})
+
+
+def write_probes(probes):
+    with open(os.path.join(home, "fake-probes.jsonl"), "a") as f:
+        for p in probes:
+            f.write(json.dumps(p) + "\n")
+
+
+def probe_hook():
+    # The hook posts and the MCP calls of fake-probes-in.json, in order.
+    with open(os.path.join(home, "fake-probes-in.json")) as f:
+        probes = json.load(f)
+    seen = []
+    for i, p in enumerate(probes):
+        tid = p.get("id", "toolu_p%d" % i)
+        r = {"id": tid}
+        if "name" in p:
+            inp = p.get("input")
+            tool_use("msg_p%d" % i, tid, p["name"], inp if isinstance(inp, dict) else {})
+            r["decision"], r["reason"] = ask(tid, p["name"], inp, "input" in p)
+        if "mcp" in p:
+            r["text"], r["isError"] = mcp_call(p["mcp"]["tool"], p["mcp"]["args"])
+        if "name" in p:
+            tool_result(tid, r.get("text") or r.get("reason") or "ok", bool(r.get("isError")) or r["decision"] != "allow")
+        seen.append(r)
+    write_probes(seen)
+    answer("msg_pend", "Probed.")
+    result("Probed.")
+
+
+def resume_memory(tid, name, inp):
+    # A process that holds the secret posts the hook of another tool and of
+    # another input under the id of the approved call before the call.
+    probes = []
+    for label, n, i in (("other tool", MEM + "forget", {"path": "old.md"}), ("other input", name, dict(inp, text="Other."))):
+        decision, reason = ask(tid, n, i)
+        probes.append({"probe": label, "decision": decision, "reason": reason})
+    decision, reason = ask(tid, name, inp)
+    if decision == "allow":
+        content, err = mcp_call(name[len(MEM):], inp)
+    else:
+        content, err = reason, True
+    probes.append({"probe": "approved", "decision": decision, "reason": reason, "text": content, "isError": err})
+    # The decision answers one call, and the server took the armed call.
+    decision, reason = ask(tid, name, inp)
+    probes.append({"probe": "again", "decision": decision, "reason": reason})
+    text, is_err = mcp_call(name[len(MEM):], inp)
+    probes.append({"probe": "unarmed", "text": text, "isError": is_err})
+    write_probes(probes)
+    tool_result(tid, content, err)
+    answer("msg_2", "Done.")
+    result("Done.")
+
+
 def result(text, **extra):
     o = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "result": text,
          "stop_reason": "end_turn", "total_cost_usd": 0.01, "usage": usage, "permission_denials": []}
@@ -85,7 +169,9 @@ def run_tool(tid, name, inp):
             json.dump({"deferred": {"id": tid, "name": name, "input": inp}}, f)
         result("", stop_reason="tool_deferred", deferred_tool_use={"id": tid, "name": name, "input": inp})
         sys.exit(0)
-    if decision == "allow":
+    if decision == "allow" and name.startswith(MEM):
+        content, err = mcp_call(name[len(MEM):], inp)
+    elif decision == "allow":
         with open(inp["file_path"], "w") as f:
             f.write(inp["content"])
         content, err = "File created", False
@@ -109,13 +195,23 @@ if resume and state.get("deferred"):
     d = state.pop("deferred")
     with open(state_path, "w") as f:
         json.dump(state, f)
-    run_tool(d["id"], d["name"], d["input"])
+    if d["name"].startswith(MEM):
+        resume_memory(d["id"], d["name"], d["input"])
+    else:
+        run_tool(d["id"], d["name"], d["input"])
 for line in sys.stdin:
     msg = json.loads(line)
     text = msg["message"]["content"]
     with open(os.path.join(home, "fake-prompts.jsonl"), "a") as f:
         f.write(json.dumps({"text": text}) + "\n")
-    if "remember that" in text:
+    if "probe the hook" in text:
+        probe_hook()
+    elif "remember after approval" in text:
+        # A call of the memory server that the policy asks a person about.
+        inp = {"path": "tea.md", "text": "Tea."}
+        tool_use("msg_m", "toolu_r", MEM + "remember", inp)
+        run_tool("toolu_r", MEM + "remember", inp)
+    elif "remember that" in text:
         # One call of the remember tool of the memory server of fw.
         tid, name = "toolu_m", "mcp__fw-memory__remember"
         inp = {"path": "prefs.md", "text": "The user likes tea."}

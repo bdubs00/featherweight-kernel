@@ -106,10 +106,15 @@ type host struct {
 	mem     *memory.Store
 	memHTTP http.Handler
 
+	// noServerOnce logs once that the memory server cannot be served
+	// (host.noServer).
+	noServerOnce sync.Once
+
 	mu       sync.Mutex
 	hooks    map[string]*claudeProc // the running Claude Code processes, by the secret of their hook URL
 	memBinds map[string]*memBinding // the memory servers of the processes of the harness, by the secret of their URL
 	mounts   int                    // the native surfaces that serve the routes of the host
+	serving  bool                   // the process runs its services, as fw serve does (service)
 }
 
 // newRunner builds the host when the configuration has the block harness.
@@ -185,11 +190,14 @@ const (
 	claudeQuiet   = 30 * time.Minute
 )
 
-// observe tells the driver about a run that was canceled.
+// observe tells the driver about a run that was canceled, and removes the
+// armed memory calls of a run that finished, so an armed call never
+// outlives its run.
 func (h *host) observe(e fw.Event) {
 	if e.Type != fw.EvRunFinished {
 		return
 	}
+	h.dropArms(e.Subject)
 	var d fw.RunFinishedData
 	if e.Decode(&d) == nil && d.Outcome == fw.OutcomeCanceled {
 		h.drv.canceled(e.Subject)
@@ -303,11 +311,16 @@ func (h *host) Close() error {
 }
 
 // service stops the processes of the harness when the agent shuts down.
+// Only a process that serves, such as fw serve, runs the services, so the
+// host then knows that the native API can mount its routes (memBase).
 func service(_ context.Context, a *fw.Agent) (io.Closer, error) {
 	h, ok := a.Runner().(*host)
 	if !ok {
 		return nil, nil
 	}
+	h.mu.Lock()
+	h.serving = true
+	h.mu.Unlock()
 	h.log.Info("harness on", "home", h.home)
 	return h, nil
 }

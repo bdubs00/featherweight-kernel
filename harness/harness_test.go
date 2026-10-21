@@ -262,7 +262,8 @@ func waitFor(t *testing.T, cond func() bool) {
 
 // TestPrivatePath denies a tool call with a path inside the home of the
 // harness, the home of fw, or a reserved path, with or without a link,
-// and passes a path of the workspace and a file of cut tool output.
+// and passes a path of the workspace and a file of cut tool output. A file
+// ref of recall names a path under the root of the workspace.
 func TestPrivatePath(t *testing.T) {
 	d := newDirs(t)
 	if err := os.Symlink(d.home, filepath.Join(d.ws, "link")); err != nil {
@@ -295,6 +296,9 @@ func TestPrivatePath(t *testing.T) {
 			{"read", `{"filePath":"` + d.home + `/.local/share/opencode/tool-output/tool_1"}`, false},
 			{"list", `{"path":"` + d.home + `/.local/share/opencode/tool-output"}`, true},
 			{"edit", `{"filePath":"src/main.go","oldString":"a","newString":"b"}`, false},
+			{"fw-memory_recall", `{"ref":"file://link/projects/p/s.jsonl"}`, true},
+			{"fw-memory_recall", `{"ref":"file://src/main.go"}`, false},
+			{"fw-memory_recall", `{"ref":"mem://agent/default/notes.md"}`, false},
 		},
 	} {
 		cfg := testConfig(t, d, "kind: "+kind)

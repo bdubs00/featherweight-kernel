@@ -34,6 +34,11 @@ import (
 //
 //   - fw.start: the run is a session of a harness.
 //   - fw.session: the harness created the session Session.
+//   - fw.brief: the first prompt with text of the session goes to the
+//     harness next. Context is true when it starts with the index of the
+//     notes of the run as data. The host records it before it sends the
+//     prompt, so a stop between the two never sends the index twice; a
+//     message without text records none.
 //   - fw.prompt: the harness got the messages of the run up to Seq.
 //     Context is true when the prompt started with the index of the
 //     notes of the run as data, which only the first prompt of a session
@@ -59,6 +64,7 @@ type EventData struct {
 const (
 	KindStart   = "fw.start"
 	KindSession = "fw.session"
+	KindBrief   = "fw.brief"
 	KindPrompt  = "fw.prompt"
 	KindAnswer  = "fw.answer"
 	KindIdle    = "fw.idle"
@@ -72,6 +78,7 @@ type state struct {
 	sessSeq  uint64 // the fw.harness.event that named the session
 	prompted uint64 // the latest message that the harness got
 	prompts  int    // the fw.prompt events: 0 before the first prompt of the session
+	briefed  bool   // the first prompt with text of the session went out: fw.brief, or a fw.prompt with context
 	exchange uint64 // the latest fw.prompt or fw.answer
 	idle     uint64 // the latest fw.idle
 	lastSeq  uint64
@@ -189,7 +196,10 @@ func scan(evs []fw.Event) *state {
 			switch d.Kind {
 			case KindSession:
 				s.session, s.sessSeq = d.Session, e.Seq
+			case KindBrief:
+				s.briefed = true
 			case KindPrompt:
+				s.briefed = s.briefed || d.Context
 				s.prompts++
 				s.prompted = max(s.prompted, d.Seq)
 				s.exchange = e.Seq
@@ -565,19 +575,24 @@ func readOnly(name string) bool {
 	return memReadOnly(name)
 }
 
-// decide asks the policy of the run about a tool call of the harness. A
-// call with a path inside a private path of the host gets a deny first,
-// whatever the policy says, as the file tracker skips those paths: the
-// home of the harness holds the transcripts of every run. A call of the
-// memory server gets a deny first when the run has no memory tool.
-func (r *run) decide(ctx context.Context, callID, tool string, input json.RawMessage) fw.Decision {
+// decide asks the policy of the run about a tool call of the harness. name
+// is the name of the tool as the harness reports it, and the policy sees
+// it in lower case. A call with a path inside a private path of the host
+// gets a deny first, whatever the policy says, as the file tracker skips
+// those paths: the home of the harness holds the transcripts of every run.
+// A call of the memory server goes to memDecide, and a tool that poses as
+// one gets a deny.
+func (r *run) decide(ctx context.Context, callID, name string, input json.RawMessage) fw.Decision {
+	kind := r.h.cfg.Kind
+	if t := memToolOf(kind, name); t != "" {
+		return r.memDecide(ctx, callID, t, input)
+	}
+	if memPoses(kind, name) {
+		return fw.Decision{Verdict: fw.VerdictDeny, Reason: "the tool " + name + " is not a tool of the memory server of fw; the name " + memServer + " belongs to fw"}
+	}
+	tool := strings.ToLower(name)
 	if len(input) == 0 || !json.Valid(input) {
 		input = json.RawMessage(`{}`)
-	}
-	if t := memToolOf(r.h.cfg.Kind, tool); t != "" {
-		if why := r.memDenied(t); why != "" {
-			return fw.Decision{Verdict: fw.VerdictDeny, Reason: why}
-		}
 	}
 	if p := r.privatePath(tool, input); p != "" {
 		return fw.Decision{Verdict: fw.VerdictDeny, Reason: "the path " + p + " is inside the home of the harness, the home of fw, or a path that fw keeps for itself"}
@@ -594,11 +609,16 @@ var pathFields = []string{"file_path", "filePath", "path", "notebook_path", "not
 // directory of the run, ~ is the home of the harness, and the links of
 // the part of the path that exists are resolved. The pattern of glob
 // counts when it is absolute; the pattern of grep is a regular
-// expression and does not.
+// expression and does not. A file ref in the field ref, such as
+// file://src/main.go of recall, names a path under the root of the
+// workspace.
 func (r *run) privatePath(tool string, input json.RawMessage) string {
 	var in map[string]any
 	if json.Unmarshal(input, &in) != nil {
 		return ""
+	}
+	if s, ok := in["ref"].(string); ok && r.h.refPrivate(strings.TrimSpace(s)) {
+		return s
 	}
 	var paths []string
 	for _, k := range pathFields {

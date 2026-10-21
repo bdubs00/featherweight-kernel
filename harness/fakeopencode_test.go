@@ -31,10 +31,21 @@ type fakeOC struct {
 	calls    int
 	oldRoute bool // the server answers 404 on /permission/{id}/reply
 	failNext int  // the server answers 500 on this many prompts
-	sick     bool // the health route answers 503
-	probes   int  // the requests to the health route
-	script   func(f *fakeOC, p fakePrompt)
-	started  chan fakePrompt
+	// hang makes the server take this many prompts and then answer none
+	// until the request ends, as when fw stops after opencode got a
+	// prompt and before fw recorded it. drop does the same without taking
+	// the prompt, as when fw stops before the prompt reaches opencode.
+	hang, drop int
+	// envFile is the environment that the fake command wrote, which holds
+	// the inline configuration of the kernel (ocBlock). project is the
+	// configuration of the project: GET /config merges the inline
+	// configuration over it, key by key, as opencode 1.19 does.
+	envFile string
+	project map[string]any
+	sick    bool // the health route answers 503
+	probes  int  // the requests to the health route
+	script  func(f *fakeOC, p fakePrompt)
+	started chan fakePrompt
 }
 
 type fakePrompt struct {
@@ -93,11 +104,37 @@ func newFakeOC(t *testing.T, script func(f *fakeOC, p fakePrompt)) *fakeOC {
 			http.Error(w, `{"name":"UnknownError"}`, http.StatusInternalServerError)
 			return
 		}
+		if f.drop > 0 {
+			f.drop--
+			f.mu.Unlock()
+			<-r.Context().Done()
+			return
+		}
 		f.prompts = append(f.prompts, p)
+		if f.hang > 0 {
+			f.hang--
+			f.mu.Unlock()
+			<-r.Context().Done()
+			return
+		}
 		f.mu.Unlock()
 		f.started <- p
 		go f.script(f, p)
 		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /config", func(w http.ResponseWriter, r *http.Request) {
+		f.auth(r)
+		_, pass, _ := r.BasicAuth()
+		f.mu.Lock()
+		project, _ := json.Marshal(f.project)
+		f.mu.Unlock()
+		var conf map[string]any
+		_ = json.Unmarshal(project, &conf)
+		if conf == nil {
+			conf = map[string]any{}
+		}
+		mergeDeep(conf, f.inline(pass))
+		json.NewEncoder(w).Encode(conf)
 	})
 	mux.HandleFunc("GET /event", func(w http.ResponseWriter, r *http.Request) {
 		f.auth(r)
@@ -161,6 +198,46 @@ func newFakeOC(t *testing.T, script func(f *fakeOC, p fakePrompt)) *fakeOC {
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.close)
 	return f
+}
+
+// inline returns the inline configuration of the server with the password
+// pass, from the environment that its command wrote. It waits for the
+// command, for ten seconds at most.
+func (f *fakeOC) inline(pass string) map[string]any {
+	f.mu.Lock()
+	envFile := f.envFile
+	f.mu.Unlock()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(envFile)
+		env := string(b)
+		if strings.Contains(env, "OPENCODE_SERVER_PASSWORD="+pass+"\n") {
+			for _, line := range strings.Split(env, "\n") {
+				if v, ok := strings.CutPrefix(line, "OPENCODE_CONFIG_CONTENT="); ok {
+					var conf map[string]any
+					_ = json.Unmarshal([]byte(v), &conf)
+					return conf
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return map[string]any{}
+}
+
+// mergeDeep merges src into dst key by key, as opencode merges its
+// configuration files: a nested object merges, and any other value of src
+// replaces the value of dst.
+func mergeDeep(dst, src map[string]any) {
+	for k, v := range src {
+		if sv, ok := v.(map[string]any); ok {
+			if dv, ok := dst[k].(map[string]any); ok {
+				mergeDeep(dv, sv)
+				continue
+			}
+		}
+		dst[k] = v
+	}
 }
 
 func (f *fakeOC) auth(r *http.Request) {

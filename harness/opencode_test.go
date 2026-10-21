@@ -16,6 +16,9 @@ import (
 // that records its arguments and its environment and then sleeps, and the
 // port of the fake server.
 func ocBlock(d testDirs, f *fakeOC) string {
+	f.mu.Lock()
+	f.envFile = filepath.Join(d.root, "oc-env")
+	f.mu.Unlock()
 	script := fmt.Sprintf(`printf '%%s\n' "$@" > %[1]s/oc-args; env > %[1]s/oc-env.tmp; mv %[1]s/oc-env.tmp %[1]s/oc-env; exec sleep 600`, d.root)
 	cmd, _ := json.Marshal([]string{"sh", "-c", script, "fake-opencode"})
 	return fmt.Sprintf("kind: opencode\nport: %d\ncommand: %s\n", f.port(), cmd)
@@ -568,8 +571,8 @@ func TestOpencodeEnvironmentChange(t *testing.T) {
 }
 
 // TestOpencodeDecisionSurvivesALostNote decides after a cold boot, and the
-// prompt with the note of the decision fails, as when the process stops
-// before it. The decision stays unanswered in the ledger, so the next cold
+// process stops before the prompt with the note of the decision reaches
+// opencode. The decision stays unanswered in the ledger, so the next cold
 // boot gives the session the note with the decision, and the session gets
 // no second approval.
 func TestOpencodeDecisionSurvivesALostNote(t *testing.T) {
@@ -590,7 +593,7 @@ func TestOpencodeDecisionSurvivesALostNote(t *testing.T) {
 	f.restart()
 
 	f.mu.Lock()
-	f.failNext = 1
+	f.drop = 1
 	f.mu.Unlock()
 	cfg = testConfig(t, d, block)
 	cfg.Policy.Rules = rules
@@ -601,7 +604,7 @@ func TestOpencodeDecisionSurvivesALostNote(t *testing.T) {
 	waitFor(t, func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		return f.failNext == 0
+		return f.drop == 0
 	})
 	closeAgent(b)
 	f.restart()

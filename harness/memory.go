@@ -17,17 +17,21 @@ package harness
 // redactor knows it too. The route answers only a caller on the loopback
 // address, and a secret that no process holds gets 404.
 //
-// The server makes only the calls that the policy of a run allowed. When
-// the host allows a call of a memory tool, in the hook of Claude Code or in
-// the answer to a permission of opencode, it arms the call for its run. The
-// server takes the armed call that matches the tool and the input of the
-// call that arrives, and makes it in the memory scope of that run, which
-// the kernel builds from the run info, never from the caller. opencode
-// serves the sessions of many runs from one process, so the armed call is
-// what tells the runs apart: two runs never arm the same call at once, so a
-// call always finds the run that asked for it. A call that no run armed
-// gets an error. Each write records fw.memory.changed in the ledger of its
-// run, with the call id and the tool, and never with the text of a note.
+// The server makes only the calls that the policy of a run allowed. The
+// host turns the input of each call of a memory tool into its canonical
+// input (memCanon) before it asks the policy. When the policy allows the
+// call, in the hook of Claude Code or in the answer to a permission of
+// opencode, the host arms the call with that canonical input for its run.
+// The server turns the arguments of each call that arrives into their
+// canonical input too, takes the armed call with the same tool and the
+// same canonical input, and makes it in the memory scope of that run,
+// which the kernel builds from the run info, never from the caller.
+// opencode serves the sessions of many runs from one process, so the armed
+// call is what tells the runs apart: two runs never hold the same armed
+// call, so a call always finds the run that asked for it. A call that no
+// run armed gets an error. Each write records fw.memory.changed in the
+// ledger of its run, with the call id and the tool, and never with the
+// text of a note.
 
 import (
 	"bytes"
@@ -35,9 +39,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net"
 	"net/http"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -56,7 +63,7 @@ const memPath = "/v1/harness/memory/"
 
 // memServer is the name of the memory server in the configuration of a
 // harness. Claude Code names its tools mcp__fw-memory__<tool>, and opencode
-// names them fw-memory_<tool>.
+// names them fw-memory_<tool>. The policy sees fw-memory.<tool>.
 const memServer = "fw-memory"
 
 // The tools of the memory server.
@@ -81,6 +88,15 @@ const memToolsNote = "The MCP server fw-memory holds the memory tools of this se
 // harness did not make.
 const memArmTTL = 2 * time.Minute
 
+// memMountWait bounds the wait of opencode serve for the native API to
+// mount the memory route, as nativeURL waits for Claude Code. A process
+// that runs no service, such as fw run, never mounts it; the host waits
+// memServiceWait for the services to start before it decides that.
+const (
+	memMountWait   = 30 * time.Second
+	memServiceWait = time.Second
+)
+
 // memMaxOutput bounds the text of one result of the memory server.
 const memMaxOutput = 100 << 10
 
@@ -88,7 +104,7 @@ const memMaxOutput = 100 << 10
 const memRecallMax = 20
 
 // memPrefix returns the prefix of the names of the tools of the memory
-// server as a harness of the kind names them, in lower case.
+// server as a harness of the kind names them.
 func memPrefix(kind string) string {
 	if kind == KindClaudeCode {
 		return "mcp__" + memServer + "__"
@@ -97,13 +113,53 @@ func memPrefix(kind string) string {
 }
 
 // memToolOf returns the tool of the memory server that the tool name of a
-// harness of the kind names, or "".
+// harness of the kind names, or "". The match is exact, case included: a
+// server of the repository whose name differs from fw-memory only by case
+// is not the memory server of fw (memPoses).
 func memToolOf(kind, name string) string {
-	t, ok := strings.CutPrefix(strings.ToLower(name), memPrefix(kind))
+	t, ok := strings.CutPrefix(name, memPrefix(kind))
 	if ok && slices.Contains(memTools, t) {
 		return t
 	}
 	return ""
+}
+
+// memPoses reports whether a tool name of a harness of the kind looks like
+// a tool of the memory server, in any case, but is not one: a tool that
+// the memory server does not have, or a server whose name differs from
+// fw-memory only by case. Such a tool belongs to another server, and that
+// server gets the text of a note or of a query, so the host denies it.
+func memPoses(kind, name string) bool {
+	return strings.HasPrefix(strings.ToLower(name), memPrefix(kind)) && memToolOf(kind, name) == ""
+}
+
+// memPolicyName returns the name of a tool of the memory server for the
+// policy, the same for each harness: fw-memory.<tool>.
+func memPolicyName(tool string) string { return memServer + "." + tool }
+
+// memLoopTool returns the tool of the turn loop that does the work of a
+// tool of the memory server, and the input for a rule of that tool: recall
+// for recall, and memory, with the command of the memory tool, for
+// remember (create), forget (delete), and list (view of /memories).
+func memLoopTool(tool string, canon json.RawMessage) (string, json.RawMessage) {
+	if tool == memRecall {
+		return "recall", canon
+	}
+	var in map[string]any
+	_ = json.Unmarshal(canon, &in)
+	if in == nil {
+		in = map[string]any{}
+	}
+	switch tool {
+	case memRemember:
+		in["command"] = "create"
+	case memForget:
+		in["command"] = "delete"
+	case memList:
+		in["command"], in["path"] = "view", memory.Prefix
+	}
+	b, _ := json.Marshal(in)
+	return "memory", b
 }
 
 // memReadOnly reports whether a tool name of either kind names a tool of
@@ -183,8 +239,19 @@ func (r *run) memDenied(tool string) string {
 		return "fw keeps no memory for this agent: tools.builtin names neither memory nor recall"
 	}
 	notes, recall := r.h.memoryTools(r.hr.Queued())
+	return memRights(tool, notes, recall)
+}
+
+// memRights returns why a run with the memory tool (notes) and the recall
+// tool (recall) cannot use a tool of the memory server, or "": recall
+// needs one of the two, and remember, forget, and list need the memory
+// tool.
+func memRights(tool string, notes, recall bool) string {
 	if notes || (tool == memRecall && recall) {
 		return ""
+	}
+	if tool == memRecall {
+		return "the profile of this run allows neither the memory tool nor the recall tool"
 	}
 	return "the profile of this run does not allow the memory tool"
 }
@@ -208,21 +275,55 @@ func (r *run) systemText(server bool) string {
 
 // memoryBlock returns the index of the notes of the run as a context
 // block for the start of the first prompt of the session, or "" when the
-// run has no memory tool or no note.
-func (r *run) memoryBlock(ctx context.Context) string {
+// run has no memory tool or no note. When the index leaves notes out, its
+// last line says how many, and with the memory server, server true, which
+// tools find them.
+func (r *run) memoryBlock(ctx context.Context, server bool) string {
 	if notes, _ := r.h.memoryTools(r.hr.Queued()); !notes {
 		return ""
 	}
 	info := r.info(r.dir)
-	text, err := r.h.mem.ContextText(fw.WithRunInfo(fw.WithAgent(ctx, r.h.a), info), r.h.mem.Scope(info))
+	lines, more, err := r.h.mem.Index(fw.WithRunInfo(fw.WithAgent(ctx, r.h.a), info), r.h.mem.Scope(info))
 	if err != nil {
 		r.h.log.Warn("harness: read the index of the notes", "run", r.hr.ID(), "error", err)
 		return ""
 	}
-	if text = strings.TrimSpace(text); text == "" {
+	if len(lines) == 0 {
 		return ""
 	}
+	text := memory.ContextList + "\n" + strings.Join(lines, "\n")
+	if more > 0 {
+		text += fmt.Sprintf("\n%d more notes are not listed.", more)
+		if server {
+			text += " The tool list of fw-memory shows every note, and its tool recall searches them."
+		}
+	}
 	return fw.ContextBlock("memory", text)
+}
+
+// brief puts the index of the notes before the text of the first prompt
+// with text of the session, as data, and records fw.brief before the
+// prompt goes out, so a stop, a resume, or a cold boot never sends the
+// index again, while the text of a prompt that did not go out goes out
+// again. It returns the text and whether it starts with the index. A later
+// prompt, and a run without the memory tool, gets the text as it is.
+// server tells that the harness has the memory server.
+func (r *run) brief(ctx context.Context, st *state, text string, server bool) (string, bool, error) {
+	if st.briefed {
+		return text, false, nil
+	}
+	if notes, _ := r.h.memoryTools(r.hr.Queued()); !notes {
+		return text, false, nil
+	}
+	block := r.memoryBlock(ctx, server)
+	if err := r.mark(ctx, EventData{Kind: KindBrief, Context: block != ""}); err != nil {
+		return "", false, err
+	}
+	st.briefed = true
+	if block == "" {
+		return text, false, nil
+	}
+	return joinText(block, text), true, nil
 }
 
 // memRun is what the memory server needs of a run: its scope, its run
@@ -236,6 +337,10 @@ type memRun struct {
 	files  bool // recall can read the workspace: the run works in its root
 	emit   func(context.Context, fw.MemoryChangedData)
 }
+
+// denied returns why the run cannot use a tool of the memory server, or
+// "". The server checks it again for each call, whatever the host armed.
+func (m *memRun) denied(tool string) string { return memRights(tool, m.notes, m.recall) }
 
 // memRun returns what the memory server needs of the run. The workspace of
 // the agent is the workspace of the run only when the run works in the
@@ -261,7 +366,7 @@ func (r *run) memRun() *memRun {
 // run allowed and that the harness did not make yet.
 type memArm struct {
 	tool    string          // recall, remember, forget, or list
-	input   json.RawMessage // the input that the policy saw, or nil when the host did not see it
+	input   json.RawMessage // the canonical input that the policy saw (memCanon); never empty
 	callID  string
 	run     *memRun
 	expires time.Time
@@ -269,99 +374,54 @@ type memArm struct {
 
 // memBinding is what one secret of the memory route serves: the MCP server
 // of one process of a harness and the calls that the policy allowed for
-// its runs. single is true for a process that serves one run, such as a
-// process of Claude Code.
+// its runs.
 type memBinding struct {
-	srv    *mcp.Server
-	single bool
+	srv *mcp.Server
 
-	mu    sync.Mutex
-	arms  []*memArm
-	freed chan struct{} // closed and replaced when an armed call leaves
-}
-
-// clash reports whether two armed calls of two runs can match the same
-// call: the same tool with the same input, or an input that the host did
-// not see.
-func clash(a, b *memArm) bool {
-	return a.tool == b.tool && a.run.id != b.run.id && (a.input == nil || b.input == nil || sameJSON(a.input, b.input))
+	mu   sync.Mutex
+	arms []*memArm
 }
 
 // arm records a call that the policy allowed for its run, so the server
-// makes it. While another run holds an armed call that clashes with it,
-// arm waits until the server takes that call or it expires. It returns a
-// function that removes the call, for a harness that cannot make it.
-func (b *memBinding) arm(ctx context.Context, a *memArm) (func(), error) {
-	if len(bytes.TrimSpace(a.input)) == 0 && a.input != nil {
-		a.input = json.RawMessage(`{}`)
+// makes it. The input must be the canonical input of the call: the host
+// never arms a call whose input it did not see. When another run holds an
+// armed call with the same tool and the same input, the server cannot tell
+// the two calls apart, so arm fails at once and the harness makes the call
+// again later. It returns a function that removes the call, for a
+// harness that cannot make it.
+func (b *memBinding) arm(a *memArm) (func(), error) {
+	if len(a.input) == 0 {
+		return nil, errors.New("harness: the host saw no input of this memory call, so the memory server cannot make it")
 	}
-	for {
-		now := time.Now()
-		b.mu.Lock()
-		b.pruneLocked(now)
-		var wait <-chan struct{}
-		var until time.Time
-		for _, x := range b.arms {
-			if clash(x, a) {
-				wait, until = b.freed, x.expires
-				break
-			}
+	now := time.Now()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pruneLocked(now)
+	for _, x := range b.arms {
+		if x.tool == a.tool && x.run.id != a.run.id && bytes.Equal(x.input, a.input) {
+			return nil, errors.New("harness: another run waits for the same call of the memory server; make the call again in a moment")
 		}
-		if wait == nil {
-			a.expires = now.Add(memArmTTL)
-			b.arms = append(b.arms, a)
-			b.mu.Unlock()
-			return func() { b.drop(a) }, nil
-		}
-		b.mu.Unlock()
-		timer := time.NewTimer(time.Until(until))
-		select {
-		case <-wait:
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		}
-		timer.Stop()
 	}
+	a.expires = now.Add(memArmTTL)
+	b.arms = append(b.arms, a)
+	return func() { b.drop(a) }, nil
 }
 
-// take removes and returns the armed call that a call of tool with args
-// answers: the oldest one with the same input. Else it takes the oldest
-// one whose input the host did not see, as long as those belong to one run.
-// It returns nil when no armed call fits, or when the call can belong to two
-// runs. It never takes a call whose input differs from the input that the
-// policy saw, so a process that read the secret cannot make an allowed call
-// with other arguments.
-func (b *memBinding) take(tool string, args json.RawMessage) *memArm {
-	if len(bytes.TrimSpace(args)) == 0 {
-		args = json.RawMessage(`{}`)
-	}
+// take removes and returns the oldest armed call of tool whose canonical
+// input is canon, or nil. It never takes a call whose input differs from
+// the input that the policy saw, so a process that read the secret cannot
+// make an allowed call with other arguments.
+func (b *memBinding) take(tool string, canon json.RawMessage) *memArm {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pruneLocked(time.Now())
-	var pick *memArm
-	one := true
 	for _, a := range b.arms {
-		switch {
-		case a.tool != tool:
-			continue
-		case a.input != nil && sameJSON(a.input, args):
+		if a.tool == tool && bytes.Equal(a.input, canon) {
 			b.removeLocked(a)
 			return a
-		case a.input != nil:
-			continue
-		case pick == nil:
-			pick = a
-		case pick.run.id != a.run.id:
-			one = false
 		}
 	}
-	if pick == nil || !one {
-		return nil
-	}
-	b.removeLocked(pick)
-	return pick
+	return nil
 }
 
 // drop removes an armed call.
@@ -371,30 +431,28 @@ func (b *memBinding) drop(a *memArm) {
 	b.removeLocked(a)
 }
 
+// dropRun removes the armed calls of a run, such as a run that finished or
+// was canceled.
+func (b *memBinding) dropRun(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.arms = slices.DeleteFunc(b.arms, func(a *memArm) bool { return a.run.id == id })
+}
+
 func (b *memBinding) removeLocked(a *memArm) {
 	if i := slices.Index(b.arms, a); i >= 0 {
 		b.arms = slices.Delete(b.arms, i, i+1)
-		b.signalLocked()
 	}
 }
 
 func (b *memBinding) pruneLocked(now time.Time) {
-	n := len(b.arms)
 	b.arms = slices.DeleteFunc(b.arms, func(a *memArm) bool { return now.After(a.expires) })
-	if len(b.arms) != n {
-		b.signalLocked()
-	}
-}
-
-func (b *memBinding) signalLocked() {
-	close(b.freed)
-	b.freed = make(chan struct{})
 }
 
 // bindMemory serves the memory route for a new secret and returns what the
-// secret serves. single tells that the process serves one run.
-func (h *host) bindMemory(key string, single bool) *memBinding {
-	b := &memBinding{single: single, freed: make(chan struct{})}
+// secret serves.
+func (h *host) bindMemory(key string) *memBinding {
+	b := &memBinding{}
 	b.srv = h.newMemServer(b)
 	h.mu.Lock()
 	h.memBinds[key] = b
@@ -422,6 +480,20 @@ func (h *host) binding(key string) *memBinding {
 	return h.memBinds[key]
 }
 
+// dropArms removes the armed calls of a run from every memory server: an
+// armed call does not outlive its run.
+func (h *host) dropArms(id string) {
+	h.mu.Lock()
+	binds := make([]*memBinding, 0, len(h.memBinds))
+	for _, b := range h.memBinds {
+		binds = append(binds, b)
+	}
+	h.mu.Unlock()
+	for _, b := range binds {
+		b.dropRun(id)
+	}
+}
+
 // listenBase returns the loopback base URL of the native API, such as
 // http://127.0.0.1:8080, from the listen address of fw.
 func (h *host) listenBase() (string, error) {
@@ -436,25 +508,57 @@ func (h *host) listenBase() (string, error) {
 	return "http://" + net.JoinHostPort(host, port), nil
 }
 
-// memBase returns the base URL of the memory route for a harness that
-// does not wait for the native API, such as opencode serve, which serves
-// the runs of the whole process: the memory route needs the memory, the
-// surface native, and a listener of plain HTTP. It returns "" without
-// them. opencode connects to the server when it first works in a
-// directory. fw serve mounts the route when it starts to serve, which is
-// normally before opencode serve is ready. A process that serves nothing,
-// such as fw run, has no route, and opencode then lists the server as
-// failed and goes on without its tools.
-func (h *host) memBase() string {
+// memBase returns the base URL of the memory route for opencode serve,
+// which serves the runs of the whole process, or "" and the reason when
+// the process cannot serve the route: the route needs the memory, the
+// surface native, and a listener of plain HTTP. An agent without memory
+// gets no reason. opencode connects to the server when it first works in a
+// directory, so memBase waits until the native API mounted the route, as
+// a run that a cold boot resumes can start before fw serve serves. A
+// process that runs no service, such as fw run, serves nothing, and
+// memBase does not wait for it.
+func (h *host) memBase(ctx context.Context) (string, string) {
 	cfg := h.a.Config()
-	if h.mem == nil || cfg.TLS.Provider != "" || !slices.Contains(cfg.Surfaces, "native") {
-		return ""
+	switch {
+	case h.mem == nil:
+		return "", ""
+	case cfg.TLS.Provider != "":
+		return "", "the listener of fw uses TLS, and the memory route of a harness needs plain HTTP on the loopback address"
+	case !slices.Contains(cfg.Surfaces, "native"):
+		return "", "the surface native is off, and it serves the memory route"
 	}
 	base, err := h.listenBase()
 	if err != nil {
-		return ""
+		return "", err.Error()
 	}
-	return base
+	start := time.Now()
+	for {
+		h.mu.Lock()
+		mounted, serving := h.mounts > 0, h.serving
+		h.mu.Unlock()
+		switch waited := time.Since(start); {
+		case mounted:
+			return base, ""
+		case !serving && waited > memServiceWait:
+			return "", "this process of fw serves nothing, such as fw run"
+		case waited > memMountWait:
+			return "", "the native API did not serve within " + memMountWait.String()
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err().Error()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// noServer logs once for each process that a run with memory gets no
+// memory server, and why. The run still gets the memory section and the
+// index, without the names of the tools of the server.
+func (h *host) noServer(why string) {
+	h.noServerOnce.Do(func() {
+		h.log.Warn("harness: the harness gets the notes but no memory tools, because fw cannot serve the memory server fw-memory", "reason", why)
+	})
 }
 
 // fromLoopback reports whether a request came from the loopback address.
@@ -495,7 +599,9 @@ func newMemHandler() http.Handler {
 	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 }
 
-// The input schemas of the tools of the memory server.
+// The input schemas of the tools of the memory server. memFields names the
+// same fields, and memCanon checks each call against them, because the MCP
+// SDK does not check an input against its schema.
 const (
 	memRecallSchema = `{
   "type": "object",
@@ -528,6 +634,237 @@ const (
 	memListSchema = `{"type": "object", "properties": {}, "additionalProperties": false}`
 )
 
+// memSchemas are the input schemas of the tools, by tool.
+var memSchemas = map[string]string{memRecall: memRecallSchema, memRemember: memRememberSchema, memForget: memForgetSchema, memList: memListSchema}
+
+// The types of the fields of the input of a memory tool (memField).
+const (
+	memString = iota // a string
+	memLimit         // an integer from 1 to memRecallMax
+	memKinds         // a list of the kinds of a record
+)
+
+// memField is one field of the input of a tool of the memory server.
+type memField struct {
+	name     string
+	typ      int
+	required bool
+}
+
+// memFields are the fields of the input of each tool of the memory
+// server, as its input schema names them.
+var memFields = map[string][]memField{
+	memRecall:   {{"query", memString, false}, {"ref", memString, false}, {"kinds", memKinds, false}, {"limit", memLimit, false}},
+	memRemember: {{"path", memString, true}, {"text", memString, true}, {"ifHash", memString, false}},
+	memForget:   {{"path", memString, true}},
+	memList:     nil,
+}
+
+// memKindNames are the kinds that the field kinds of recall can name.
+var memKindNames = []string{"note", "run", "file", "skill"}
+
+// memCanon returns the canonical input of a call of a tool of the memory
+// server: a JSON object with the fields of the input schema of the tool
+// alone, by their exact names, in the order of their names, each value of
+// its type, and the path of a note in its full form, /memories/<name>. The
+// policy decides on the canonical input, the host arms it, and the server
+// makes a call only when its arguments have the same canonical input.
+// Without it, a field rule of the policy, which reads a key by its exact
+// name, and the decoder of the server, which matches a key in any case,
+// can read two different fields.
+//
+// An input that is absent or not an object is an error, and so is a key
+// that the schema does not name, also one that differs from a field only
+// by case, a key that appears twice, a value of the wrong type, and a
+// required field that is missing. Each error names the key. A null value
+// of an optional field counts as absent.
+func memCanon(tool string, raw json.RawMessage) (json.RawMessage, error) {
+	fields, ok := memFields[tool]
+	if !ok {
+		return nil, fmt.Errorf("the memory server has no tool %q", tool)
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("the call of %s has no input; its input must be a JSON object", tool)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil, fmt.Errorf("the input of %s is not a JSON object", tool)
+	}
+	vals := map[string]json.RawMessage{}
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("the input of %s is not valid JSON: %w", tool, err)
+		}
+		key, _ := tok.(string)
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, fmt.Errorf("the value of the key %q of %s is not valid JSON: %w", key, tool, err)
+		}
+		i := slices.IndexFunc(fields, func(f memField) bool { return f.name == key })
+		switch _, twice := vals[key]; {
+		case twice:
+			return nil, fmt.Errorf("the key %q appears twice in the input of %s", key, tool)
+		case i < 0:
+			if j := slices.IndexFunc(fields, func(f memField) bool { return strings.EqualFold(f.name, key) }); j >= 0 {
+				return nil, fmt.Errorf("the key %q of %s differs from the field %q only by case; the names of the fields are exact", key, tool, fields[j].name)
+			}
+			return nil, fmt.Errorf("the key %q is not a field of %s; %s", key, tool, memFieldNames(tool, fields))
+		}
+		vals[key] = v
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, fmt.Errorf("the input of %s is not valid JSON: %w", tool, err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, fmt.Errorf("the input of %s holds more than one JSON value", tool)
+	}
+	out := map[string]any{}
+	for _, f := range fields {
+		v, ok := vals[f.name]
+		if !ok || string(v) == "null" {
+			if f.required {
+				return nil, fmt.Errorf("the input of %s needs the field %q", tool, f.name)
+			}
+			continue
+		}
+		switch f.typ {
+		case memString:
+			var s string
+			if json.Unmarshal(v, &s) != nil {
+				return nil, fmt.Errorf("the field %q of %s must be a string", f.name, tool)
+			}
+			switch {
+			case f.name == "path":
+				name, err := memNoteName(s)
+				if err != nil {
+					return nil, err
+				}
+				s = memory.Prefix + "/" + name
+			case f.name == "ref":
+				if s = strings.TrimSpace(s); strings.HasPrefix(s, memory.Prefix) {
+					name, err := memNoteName(s)
+					if err != nil {
+						return nil, err
+					}
+					s = memory.Prefix + "/" + name
+				}
+			}
+			out[f.name] = s
+		case memLimit:
+			var n float64
+			if json.Unmarshal(v, &n) != nil || n != math.Trunc(n) || n < 1 || n > memRecallMax {
+				return nil, fmt.Errorf("the field %q of %s must be an integer from 1 to %d", f.name, tool, memRecallMax)
+			}
+			out[f.name] = int(n)
+		case memKinds:
+			var kinds []string
+			if json.Unmarshal(v, &kinds) != nil {
+				return nil, fmt.Errorf("the field %q of %s must be a list of strings", f.name, tool)
+			}
+			for _, k := range kinds {
+				if !slices.Contains(memKindNames, k) {
+					return nil, fmt.Errorf("the field %q of %s holds %q; a kind is one of %s", f.name, tool, k, strings.Join(memKindNames, ", "))
+				}
+			}
+			out[f.name] = kinds
+		}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(out); err != nil {
+		return nil, fmt.Errorf("harness: encode the input of %s: %w", tool, err)
+	}
+	return json.RawMessage(bytes.TrimSpace(buf.Bytes())), nil
+}
+
+// memFieldNames names the fields of a tool for an error.
+func memFieldNames(tool string, fields []memField) string {
+	if len(fields) == 0 {
+		return tool + " takes no field"
+	}
+	names := make([]string, len(fields))
+	for i, f := range fields {
+		names[i] = f.name
+	}
+	return "the fields of " + tool + " are " + strings.Join(names, ", ")
+}
+
+// memDecide decides a call of a tool of the memory server, before the
+// policy and with the policy: the profile of the run must allow the tool,
+// the input must have a canonical input (memCanon), a file ref of recall
+// must not name a private or a hidden path, and then the policy decides on
+// the canonical input (memPolicy).
+func (r *run) memDecide(ctx context.Context, callID, tool string, raw json.RawMessage) fw.Decision {
+	if why := r.memDenied(tool); why != "" {
+		return fw.Decision{Verdict: fw.VerdictDeny, Reason: why}
+	}
+	canon, err := memCanon(tool, raw)
+	if err != nil {
+		return fw.Decision{Verdict: fw.VerdictDeny, Reason: "harness: " + err.Error()}
+	}
+	if tool == memRecall {
+		var in struct {
+			Ref string `json:"ref"`
+		}
+		_ = json.Unmarshal(canon, &in)
+		if why := r.h.fileRefDenied(in.Ref); why != "" {
+			return fw.Decision{Verdict: fw.VerdictDeny, Reason: why}
+		}
+	}
+	return r.memPolicy(ctx, callID, tool, canon)
+}
+
+// memPolicy asks the policy of the run about a call of a tool of the
+// memory server with its canonical input. The policy sees the call under
+// the name fw-memory.<tool>, the same in each harness, and also under the
+// name of the tool of the turn loop that does the same work (memLoopTool),
+// so a rule for the turn loop, such as ask: [memory], holds for a hosted
+// call. The verdict under the name of the turn loop counts when a rule
+// gave it, not the default: an ask or a deny that is stricter than the
+// verdict under fw-memory.<tool> wins, and an allow wins over a verdict
+// that only the default gave.
+func (r *run) memPolicy(ctx context.Context, callID, tool string, canon json.RawMessage) fw.Decision {
+	ro := tool == memRecall || tool == memList
+	own := r.hr.Decide(ctx, fw.ToolCall{CallID: callID, Spec: fw.ToolSpec{Name: memPolicyName(tool), ReadOnly: ro}, Input: canon})
+	name, input := memLoopTool(tool, canon)
+	loop := r.hr.Decide(ctx, fw.ToolCall{CallID: callID, Spec: fw.ToolSpec{Name: name, ReadOnly: ro}, Input: input})
+	if loop.Reason == "default" {
+		return own
+	}
+	switch {
+	case strictness(loop.Verdict) > strictness(own.Verdict):
+		return loop
+	case loop.Verdict == fw.VerdictAllow && own.Reason == "default":
+		return loop
+	}
+	return own
+}
+
+// strictness orders the verdicts: allow, then ask, then deny.
+func strictness(v fw.Verdict) int {
+	switch v {
+	case fw.VerdictAsk:
+		return 1
+	case fw.VerdictDeny:
+		return 2
+	}
+	return 0
+}
+
+// memSame reports whether two inputs of a tool of the memory server have
+// the same canonical input.
+func memSame(tool string, a, b json.RawMessage) bool {
+	ca, err := memCanon(tool, a)
+	if err != nil {
+		return false
+	}
+	cb, err := memCanon(tool, b)
+	return err == nil && bytes.Equal(ca, cb)
+}
+
 // newMemServer returns the MCP server of one secret.
 func (h *host) newMemServer(b *memBinding) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: memServer, Version: "1"}, nil)
@@ -552,19 +889,35 @@ func (h *host) newMemServer(b *memBinding) *mcp.Server {
 	return srv
 }
 
-// memHandler answers the calls of one tool of the memory server.
+// memHandler answers the calls of one tool of the memory server. The
+// arguments of a call must have a canonical input, and an armed call must
+// have the same canonical input. MCP makes the arguments optional, so a
+// call without arguments has the input {}. The server checks the rights of
+// the run again before it makes the call.
 func (h *host) memHandler(b *memBinding, tool string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args json.RawMessage
 		if req.Params != nil {
 			args = req.Params.Arguments
 		}
-		a := b.take(tool, args)
+		if a := bytes.TrimSpace(args); len(a) == 0 || string(a) == "null" {
+			args = json.RawMessage(`{}`)
+		}
+		canon, err := memCanon(tool, args)
+		if err != nil {
+			h.log.Warn("harness: a memory call with arguments that are not valid", "tool", tool, "error", h.a.Redact(err.Error()))
+			return memResult("Error: "+err.Error(), true), nil
+		}
+		a := b.take(tool, canon)
 		if a == nil {
 			h.log.Warn("harness: a memory call that no run allowed", "tool", tool)
-			return memResult("Error: no tool call of a run of fw allowed this call. The policy of the run decides each call before it runs.", true), nil
+			return memResult("Error: no tool call of a run of fw allowed this call with these arguments. The policy of the run decides each call before it runs.", true), nil
 		}
-		text, isErr := h.memCall(ctx, a, args)
+		if why := a.run.denied(tool); why != "" {
+			h.log.Warn("harness: a memory call that the profile of its run does not allow", "run", a.run.id, "tool", tool)
+			return memResult("Error: "+why+".", true), nil
+		}
+		text, isErr := h.memCall(ctx, a, canon)
 		h.log.Debug("harness memory call", "run", a.run.id, "tool", tool, "call", a.callID, "error", isErr)
 		return memResult(text, isErr), nil
 	}
@@ -574,9 +927,9 @@ func memResult(text string, isErr bool) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: clip(text, memMaxOutput)}}, IsError: isErr}
 }
 
-// memCall makes an armed call in the scope of its run. Every write records
-// fw.memory.changed in the ledger of the run.
-func (h *host) memCall(ctx context.Context, a *memArm, args json.RawMessage) (string, bool) {
+// memCall makes an armed call in the scope of its run, with its canonical
+// input. Every write records fw.memory.changed in the ledger of the run.
+func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (string, bool) {
 	run := a.run
 	info := run.info
 	info.CallID = a.callID
@@ -597,20 +950,20 @@ func (h *host) memCall(ctx context.Context, a *memArm, args json.RawMessage) (st
 			Kinds []string `json:"kinds"`
 			Limit int      `json:"limit"`
 		}
-		if err := decodeArgs(args, &in); err != nil {
+		if err := decodeArgs(canon, &in); err != nil {
 			return "Error: " + err.Error(), true
 		}
 		if ref := strings.TrimSpace(in.Ref); ref != "" {
-			return memGet(ctx, store, run, ref)
+			return h.memGet(ctx, run, ref)
 		}
-		return memSearch(ctx, store, run, in.Query, in.Kinds, in.Limit)
+		return h.memSearch(ctx, run, in.Query, in.Kinds, in.Limit)
 	case memRemember:
 		var in struct {
 			Path   string `json:"path"`
 			Text   string `json:"text"`
 			IfHash string `json:"ifHash"`
 		}
-		if err := decodeArgs(args, &in); err != nil {
+		if err := decodeArgs(canon, &in); err != nil {
 			return "Error: " + err.Error(), true
 		}
 		name, err := memNoteName(in.Path)
@@ -633,7 +986,7 @@ func (h *host) memCall(ctx context.Context, a *memArm, args json.RawMessage) (st
 		var in struct {
 			Path string `json:"path"`
 		}
-		if err := decodeArgs(args, &in); err != nil {
+		if err := decodeArgs(canon, &in); err != nil {
 			return "Error: " + err.Error(), true
 		}
 		name, err := memNoteName(in.Path)
@@ -649,7 +1002,7 @@ func (h *host) memCall(ctx context.Context, a *memArm, args json.RawMessage) (st
 		}
 		return "Deleted " + show + ".", false
 	case memList:
-		if err := decodeArgs(args, &struct{}{}); err != nil {
+		if err := decodeArgs(canon, &struct{}{}); err != nil {
 			return "Error: " + err.Error(), true
 		}
 		recs, err := store.List(ctx, scope)
@@ -674,8 +1027,9 @@ func (h *host) memCall(ctx context.Context, a *memArm, args json.RawMessage) (st
 }
 
 // memGet reads one record. A run without the recall tool reads notes only,
-// and a run with a directory of its own reads no file of the workspace.
-func memGet(ctx context.Context, store *memory.Store, run *memRun, ref string) (string, bool) {
+// a run with a directory of its own reads no file of the workspace, and no
+// run reads a file under a private path or a hidden path (fileRefDenied).
+func (h *host) memGet(ctx context.Context, run *memRun, ref string) (string, bool) {
 	if strings.HasPrefix(ref, memory.Prefix) {
 		name, err := memNoteName(ref)
 		if err != nil {
@@ -690,7 +1044,10 @@ func memGet(ctx context.Context, store *memory.Store, run *memRun, ref string) (
 	case strings.HasPrefix(ref, "file://") && !run.files:
 		return "Error: the files of this run are not readable through fw-memory. Read them with the tools of the harness.", true
 	}
-	rec, err := store.Get(ctx, run.scope, ref)
+	if why := h.fileRefDenied(ref); why != "" {
+		return "Error: " + why + ".", true
+	}
+	rec, err := h.mem.Get(ctx, run.scope, ref)
 	switch {
 	case errors.Is(err, fw.ErrMemoryNotFound):
 		return "Error: no memory record at " + ref + ".", true
@@ -725,8 +1082,9 @@ func memGet(ctx context.Context, store *memory.Store, run *memRun, ref string) (
 	return b.String(), false
 }
 
-// memSearch searches the kinds that the run can read.
-func memSearch(ctx context.Context, store *memory.Store, run *memRun, query string, names []string, limit int) (string, bool) {
+// memSearch searches the kinds that the run can read. A file under a
+// private path is not a hit.
+func (h *host) memSearch(ctx context.Context, run *memRun, query string, names []string, limit int) (string, bool) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return "Error: recall needs a query or a ref.", true
@@ -751,10 +1109,11 @@ func memSearch(ctx context.Context, store *memory.Store, run *memRun, query stri
 	if limit <= 0 {
 		limit = memory.DefaultLimit
 	}
-	hits, err := store.Search(ctx, run.scope, fw.MemoryQuery{Text: query, Kinds: keep, Limit: min(limit, memRecallMax)})
+	hits, err := h.mem.Search(ctx, run.scope, fw.MemoryQuery{Text: query, Kinds: keep, Limit: min(limit, memRecallMax)})
 	if err != nil {
 		return "Error: " + err.Error(), true
 	}
+	hits = slices.DeleteFunc(hits, func(hit fw.MemoryHit) bool { return h.fileRefDenied(hit.Record.Ref) != "" })
 	if len(hits) == 0 {
 		return fmt.Sprintf("No memory records match %q.", query), false
 	}
@@ -770,6 +1129,49 @@ func memSearch(ctx context.Context, store *memory.Store, run *memRun, query stri
 		}
 	}
 	return b.String(), false
+}
+
+// fileRefDenied returns why recall cannot read a file ref, or "" for a
+// ref that is no file ref. A file ref names a path under the root of the
+// workspace. recall never reads a path with a hidden part, one that starts
+// with a dot, as its search skips them, nor a path that resolves inside the
+// home of the harness, the home of fw, the ledger, or the configuration
+// file, links followed. When the run works in the root of the workspace,
+// the home of the harness can be below it, and it holds the transcripts of
+// every run.
+func (h *host) fileRefDenied(ref string) string {
+	name, ok := strings.CutPrefix(ref, "file://")
+	if !ok {
+		return ""
+	}
+	for _, part := range strings.Split(name, "/") {
+		if strings.HasPrefix(part, ".") {
+			return "the ref " + ref + " names a hidden path, which recall does not read"
+		}
+	}
+	if h.refPrivate(ref) {
+		return "the ref " + ref + " is inside the home of the harness, the home of fw, or a path that fw keeps for itself"
+	}
+	return ""
+}
+
+// refPrivate reports whether a file ref resolves inside a private path of
+// the host: the home of the harness, the home of fw, or a reserved path,
+// such as the ledger and the configuration file. A file ref names a path
+// under the root of the workspace, and the links of the part of the path
+// that exists are resolved. A root that cannot be resolved counts as
+// private.
+func (h *host) refPrivate(ref string) bool {
+	name, ok := strings.CutPrefix(ref, "file://")
+	if !ok {
+		return false
+	}
+	root, err := absRoot(h)
+	if err != nil {
+		return true
+	}
+	abs := realPath(filepath.Join(root, filepath.FromSlash(name)))
+	return slices.ContainsFunc(h.private, func(priv string) bool { return within(abs, priv) })
 }
 
 // memNoteName returns the name of a note from the path that a model gives:
@@ -805,8 +1207,8 @@ func memShow(scope fw.MemoryScope, ref string) string {
 	return ref
 }
 
-// decodeArgs decodes the arguments of a call. An unknown field is an
-// error, as the input schema says.
+// decodeArgs decodes a canonical input. An unknown field is an error, as
+// the input schema says.
 func decodeArgs(args json.RawMessage, v any) error {
 	if len(bytes.TrimSpace(args)) == 0 {
 		return nil
@@ -841,4 +1243,42 @@ func claudeMCPConfig(url string) map[string]any {
 // turns OAuth off, because the secret of its URL is its credential.
 func ocMCPConfig(url string) map[string]any {
 	return map[string]any{memServer: map[string]any{"type": "remote", "url": url, "enabled": true, "oauth": false}}
+}
+
+// ocMemEntry checks the entry of the memory server in the configuration
+// that opencode resolved for a directory (GET /config). opencode merges the
+// configuration of the project and its .opencode directories with the
+// inline configuration of the kernel key by key. A key of a project entry
+// named fw-memory that the inline entry does not set therefore stays, and
+// a version of opencode that merges the project last lets the project win.
+// The entry must be the inline entry of the kernel and nothing else: the
+// type remote, the URL of the server, enabled, and no OAuth. It returns
+// what differs, or "".
+func ocMemEntry(conf json.RawMessage, url string) string {
+	var c struct {
+		MCP map[string]map[string]json.RawMessage `json:"mcp"`
+	}
+	if err := json.Unmarshal(conf, &c); err != nil {
+		return "the configuration of opencode is not JSON: " + err.Error()
+	}
+	entry, ok := c.MCP[memServer]
+	if !ok {
+		return "the configuration of opencode has no server " + memServer
+	}
+	want := ocMCPConfig(url)[memServer].(map[string]any)
+	for k, v := range entry {
+		w, ok := want[k]
+		if !ok {
+			return "the configuration of the project adds the key " + k + " to the server " + memServer
+		}
+		if b, _ := json.Marshal(w); !bytes.Equal(bytes.TrimSpace(v), b) {
+			return "the configuration of the project changes the key " + k + " of the server " + memServer
+		}
+	}
+	for k := range want {
+		if _, ok := entry[k]; !ok {
+			return "the configuration of opencode lacks the key " + k + " of the server " + memServer
+		}
+	}
+	return ""
 }
