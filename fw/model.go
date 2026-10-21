@@ -225,6 +225,19 @@ func (m ModelFunc) Stream(ctx context.Context, req *Request, on func(Delta)) (*R
 	return resp, nil
 }
 
+// StreamInterruptedError marks a response that the network cut: the body
+// ended before the answer was whole, or the connection was reset. An
+// adapter returns it only when it has no complete response. The turn loop
+// calls the model once more in the same turn, and never records the cut
+// response or runs its tool calls. Unwrap returns the error of the
+// transport.
+type StreamInterruptedError struct {
+	Err error
+}
+
+func (e *StreamInterruptedError) Error() string { return e.Err.Error() }
+func (e *StreamInterruptedError) Unwrap() error { return e.Err }
+
 // ErrContextOverflow marks a model error that says the request is larger
 // than the context window of the model. An adapter or a custom model wraps
 // it with %w. The kernel compacts the history and calls the model once more.

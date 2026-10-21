@@ -171,6 +171,8 @@ A run is one conversation with one agent profile, one budget, and one ledger. Th
 
 Other stop reasons end the turn as follows. `max_tokens` appends `fw.error` and retries once with a continuation message. `refusal` appends `fw.run.finished` with outcome `failed` and the refusal category. `pause_turn` goes to step 1 at once.
 
+A stream that the network cuts in step 2 has no answer. An adapter marks such a cut with `fw.StreamInterruptedError`: the body ended before a finish reason, in the middle of an event, or with a reset. The kernel then appends `fw.error` with `retryable` set, waits half a second, and calls the model once more with the same request, in the same turn and the same run. It records nothing of the cut response and runs none of its tool calls, even a tool call that arrived whole. A second cut fails the run. The deadline of the budget and a cancel bound both calls and the wait. A suspend of an ax Task cuts the network of the process before it freezes it, so the call meets the cut first and the retry carries the run over the suspend. Any other model error fails the run as before.
+
 ### 5.2 Budget
 
 A budget has seven limits. Four bound the size of a run, and three bound its shape.
@@ -373,7 +375,7 @@ The `Secrets` interface resolves a name to a value. The default chain reads `<NA
 
 ### 6.6 OpenAI adapter settings
 
-The adapter speaks the chat completions API over `net/http` with no SDK, so one adapter serves OpenAI, Azure OpenAI, OpenRouter, LiteLLM, vLLM, Ollama, and tabbyAPI. Every call streams. The adapter retries a 429, a 5xx, and a network error that happens before the first response byte. A connection that is refused or reset before any byte of the answer arrived is retried five times, about fifteen seconds, because under ax a Task boots before its egress policy takes effect. It waits as `Retry-After` names, or with an exponential backoff. It never retries once a stream started. A stream with no byte for `idleTimeout` fails, and a response larger than 16 MB fails. A 401 or a 403 names the secret that the key comes from. A 404 that says the model is unknown lists the models that the server offers. The method `Models` lists them for `fw doctor`.
+The adapter speaks the chat completions API over `net/http` with no SDK, so one adapter serves OpenAI, Azure OpenAI, OpenRouter, LiteLLM, vLLM, Ollama, and tabbyAPI. Every call streams. The adapter retries a 429, a 5xx, and a network error that happens before the first response byte. A connection that is refused or reset before any byte of the answer arrived is retried five times, about fifteen seconds, because under ax a Task boots before its egress policy takes effect. It waits as `Retry-After` names, or with an exponential backoff. It never retries once a stream started. A stream that ends before a finish reason, ends in the middle of an event, or meets a reset fails with `fw.StreamInterruptedError`, so the kernel can call again (section 5.1). Malformed data in an event that the server finished, an error from the server, and a stall do not count as a cut. A stream with no byte for `idleTimeout` fails, and a response larger than 16 MB fails. A 401 or a 403 names the secret that the key comes from. A 404 that says the model is unknown lists the models that the server offers. The method `Models` lists them for `fw doctor`.
 
 `providers.openai.options` holds these keys:
 
