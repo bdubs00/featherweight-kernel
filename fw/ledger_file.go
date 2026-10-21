@@ -4,7 +4,7 @@ package fw
 // Each run has a directory <root>/<run>/ with ledger.jsonl, one JSON event
 // per line. The driver only appends. It calls fsync after every approval
 // event, every terminal event, every record of a child in another process,
-// every fw.run.queued of a run from the bus intake, and every request to
+// every queued run, external message, budget change, annotation, and request to
 // run a tool that is not idempotent. An event whose tool intent has no
 // readable classification counts as not idempotent.
 // Such a success also stands on the entries behind the file: the first
@@ -56,6 +56,15 @@ const (
 type FileLedger struct {
 	dir string
 
+	// lifetime fences every mutating operation against Close. The directory
+	// descriptor holds the OS writer lock until Close, never merely Flush.
+	lifetime  sync.RWMutex
+	owner     *os.File
+	readOnly  bool
+	closed    bool
+	watchCtx  context.Context
+	stopWatch context.CancelFunc
+
 	// egressMu serializes the egress cursors. egressDirs holds the cursor
 	// directories whose entries this ledger made durable, so each costs its
 	// fsyncs once.
@@ -105,6 +114,7 @@ type fileRun struct {
 	markSeq      uint64
 	markOff      int64
 	f            *os.File
+	dirty        bool // writes still need a file sync, even if f was closed
 	watchers     []*ledgerWatcher
 }
 
@@ -117,7 +127,7 @@ func keepsDone(done bool, typ string) bool {
 }
 
 // needsIntentSync reports whether an event must reach the disk before
-// Append reports success. Approvals and terminal events need it, and so
+// Append reports success. Accepted control events need it, and so
 // does the intent to run a tool that is not idempotent: the kernel runs
 // the body of a tool only after Append returned, and a restart that
 // reads the ledger must not lose the record that the tool was asked
@@ -126,18 +136,30 @@ func keepsDone(done bool, typ string) bool {
 // idempotent, so no event can bypass the durable write. A record of a
 // child in another process needs it too: the kernel records a child
 // before the spawner creates its process, and a restart must know every
-// process that the spawner created. So does fw.run.queued of a run from
-// the bus intake: the intake acknowledges the message when Append returns,
-// and from then on only the ledger holds the job.
+// process that the spawner created. Queues, budget changes, annotations,
+// and external follow-ups are acknowledged to their caller, so they need
+// the same boundary regardless of the surface that accepted them. Internal
+// kernel notes have no external acknowledgment and stay batched. An absent
+// or unreadable message origin counts as external, never as a kernel note.
 func needsIntentSync(typ string, data json.RawMessage) bool {
-	if typ == EvApprovalRequested || typ == EvApprovalDecided || typ == EvRunChild || IsTerminal(typ) {
+	if typ == EvApprovalRequested || typ == EvApprovalDecided || typ == EvRunChild ||
+		typ == EvRunQueued || typ == EvBudgetChanged || typ == EvRunAnnotated || IsTerminal(typ) {
 		return true
 	}
-	if typ == EvRunQueued {
-		var q struct {
+	if typ == EvMessageReceived {
+		var m struct {
 			Origin string `json:"origin"`
+			Note   string `json:"note"`
 		}
-		return json.Unmarshal(data, &q) == nil && q.Origin == OriginBus
+		if json.Unmarshal(data, &m) != nil || m.Origin != OriginKernel {
+			return true
+		}
+		switch m.Note {
+		case NoteTime, NoteLoop, NoteBudget, NoteReport, NoteOutcome:
+			return false
+		default:
+			return true
+		}
 	}
 	if typ != EvToolRequested {
 		return false
@@ -154,7 +176,11 @@ type indexEntry struct {
 	Time time.Time `json:"time"`
 }
 
-// OpenFileLedger opens or creates a file ledger rooted at dir. It fsyncs
+// OpenFileLedger opens or creates a file ledger rooted at dir and takes
+// exclusive, nonblocking process-safe writer ownership until Close. Path
+// aliases of the same directory share ownership. This is a local filesystem
+// fence, not a distributed ledger protocol. Unsupported platforms fail closed.
+// It fsyncs
 // the directory chain even when it exists: a previous setup may have
 // created it and failed before making its entries durable.
 func OpenFileLedger(dir string) (*FileLedger, error) {
@@ -166,6 +192,25 @@ func openFileLedger(dir string, beforeDirSync func(string) error) (*FileLedger, 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("fw: file ledger: create %s: %w", dir, err)
 	}
+	canonical, err := filepath.Abs(dir)
+	if err == nil {
+		canonical, err = filepath.EvalSymlinks(canonical)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fw: file ledger: resolve root: %w", err)
+	}
+	l.dir = canonical
+	dir = canonical
+	l.owner, err = lockLedgerDirectory(canonical)
+	if err != nil {
+		return nil, err
+	}
+	ready := false
+	defer func() {
+		if !ready {
+			_ = l.owner.Close()
+		}
+	}()
 	if err := l.syncDirectoryChain(dir); err != nil {
 		return nil, fmt.Errorf("fw: file ledger: fsync the directory chain for %s: %w", dir, err)
 	}
@@ -192,7 +237,43 @@ func openFileLedger(dir string, beforeDirSync func(string) error) (*FileLedger, 
 	for _, id := range ids {
 		l.indexed[id] = true
 	}
+	l.watchCtx, l.stopWatch = context.WithCancel(context.Background())
+	ready = true
 	return l, nil
+}
+
+// OpenFileLedgerReadOnly opens an existing root without taking writer
+// ownership, repairing tails, creating paths, or syncing files. Read and Runs
+// see complete records, not an atomic cross-run snapshot. Repeated reads see
+// later appends from the writer. Watch and egress cursors need a writer handle;
+// readers that follow another process must poll Read. Close is final.
+func OpenFileLedgerReadOnly(dir string) (*FileLedger, error) {
+	path, err := filepath.Abs(dir)
+	if err == nil {
+		path, err = filepath.EvalSymlinks(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("fw: file ledger: open read-only root: %w", err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("fw: file ledger: open read-only root: %w", err)
+	}
+	if !st.IsDir() {
+		return nil, fmt.Errorf("fw: file ledger: read-only root is not a directory: %s", path)
+	}
+	return &FileLedger{dir: path, readOnly: true, runs: map[string]*fileRun{}}, nil
+}
+
+// writable is called with lifetime held.
+func (l *FileLedger) writable() error {
+	if l.closed {
+		return ErrLedgerClosed
+	}
+	if l.readOnly {
+		return ErrLedgerReadOnly
+	}
+	return nil
 }
 
 // syncFile fsyncs f. The failFileSyncs field makes that many fsync calls
@@ -274,6 +355,11 @@ func (l *FileLedger) ledgerPath(id string) string {
 
 // Append implements Ledger.
 func (l *FileLedger) Append(_ context.Context, e Event) (uint64, error) {
+	l.lifetime.RLock()
+	defer l.lifetime.RUnlock()
+	if err := l.writable(); err != nil {
+		return 0, err
+	}
 	if err := checkRunID(e.Subject); err != nil {
 		return 0, err
 	}
@@ -322,6 +408,7 @@ func (l *FileLedger) Append(_ context.Context, e Event) (uint64, error) {
 		return 0, fmt.Errorf("fw: file ledger: append to %s: %w", e.Subject, err)
 	}
 	r.seq = e.Seq
+	r.dirty = true
 	// A failed fsync leaves the line in the file with its sequence
 	// number spent, but Append reports the failure and notifies no
 	// watcher: success comes only after an event that needs durability
@@ -331,23 +418,8 @@ func (l *FileLedger) Append(_ context.Context, e Event) (uint64, error) {
 	// A failed fsync there keeps the debt, and the next append that
 	// reports success pays it, however many appends later that is.
 	if needsIntentSync(e.Type, e.Data) {
-		if err := l.syncFile(r.f); err != nil {
-			return 0, fmt.Errorf("fw: file ledger: fsync %s: %w", e.Subject, err)
-		}
-		l.syncs.Add(1)
-		if r.dirSync {
-			if err := l.syncDir(filepath.Join(l.dir, e.Subject)); err != nil {
-				return 0, fmt.Errorf("fw: file ledger: fsync the directory of %s: %w", e.Subject, err)
-			}
-			r.dirSync = false
-			l.dsyncs.Add(1)
-		}
-		if r.rootSync {
-			if err := l.syncDir(l.dir); err != nil {
-				return 0, fmt.Errorf("fw: file ledger: fsync the ledger root for %s: %w", e.Subject, err)
-			}
-			r.rootSync = false
-			l.rsyncs.Add(1)
+		if err := l.syncRunLocked(e.Subject, r); err != nil {
+			return 0, err
 		}
 	}
 	for _, w := range r.watchers {
@@ -516,6 +588,13 @@ func (l *FileLedger) readIndex() ([]string, error) {
 // progress or a crash, and Read skips it.
 func (l *FileLedger) Read(ctx context.Context, runID string, from uint64) iter.Seq2[Event, error] {
 	return func(yield func(Event, error) bool) {
+		l.lifetime.RLock()
+		closed := l.closed
+		l.lifetime.RUnlock()
+		if closed {
+			yield(Event{}, ErrLedgerClosed)
+			return
+		}
 		if err := checkRunID(runID); err != nil {
 			yield(Event{}, err)
 			return
@@ -527,19 +606,16 @@ func (l *FileLedger) Read(ctx context.Context, runID string, from uint64) iter.S
 		// append is in the next Read.
 		var start int64
 		var startSeq uint64
-		if from > 0 {
+		if from > 0 && !l.readOnly {
 			r := l.run(runID)
 			r.mu.Lock()
-			err := l.loadLocked(runID, r)
-			caughtUp := from > r.seq
+			// Reads never repair a tail. Only a writer operation loads and
+			// repairs it; an uncached read simply scans the complete lines.
+			caughtUp := r.loaded && from > r.seq
 			if r.markSeq > 0 && r.markSeq < from {
 				start, startSeq = r.markOff, r.markSeq
 			}
 			r.mu.Unlock()
-			if err != nil {
-				yield(Event{}, err)
-				return
-			}
 			if caughtUp {
 				return
 			}
@@ -607,6 +683,11 @@ func (l *FileLedger) Read(ctx context.Context, runID string, from uint64) iter.S
 // Watch implements Ledger. It replays the file from a sequence number and
 // then follows the appends of this process until ctx ends.
 func (l *FileLedger) Watch(ctx context.Context, runID string, from uint64) (<-chan Event, error) {
+	l.lifetime.RLock()
+	defer l.lifetime.RUnlock()
+	if err := l.writable(); err != nil {
+		return nil, err
+	}
 	if err := checkRunID(runID); err != nil {
 		return nil, err
 	}
@@ -622,7 +703,11 @@ func (l *FileLedger) Watch(ctx context.Context, runID string, from uint64) (<-ch
 	r.watchers = append(r.watchers, w)
 	r.mu.Unlock()
 
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(l.watchCtx, cancel)
 	go func() {
+		defer cancel()
+		defer stop()
 		defer close(w.ch)
 		defer func() {
 			r.mu.Lock()
@@ -654,6 +739,13 @@ func (l *FileLedger) Watch(ctx context.Context, runID string, from uint64) (<-ch
 // Runs implements Ledger. It lists the ids of index.jsonl in order.
 func (l *FileLedger) Runs(_ context.Context) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
+		l.lifetime.RLock()
+		closed := l.closed
+		l.lifetime.RUnlock()
+		if closed {
+			yield("", ErrLedgerClosed)
+			return
+		}
 		ids, err := l.readIndex()
 		if err != nil {
 			yield("", err)
@@ -667,22 +759,34 @@ func (l *FileLedger) Runs(_ context.Context) iter.Seq2[string, error] {
 	}
 }
 
-// Flush calls fsync on every open run file and closes it. The next append
-// opens the file again. The kernel calls Flush at shutdown.
+// Flush syncs outstanding run writes and directory entries and closes run
+// files. It retains writer ownership and stays reusable. A read-only Flush
+// does nothing. Close, not Flush, ends ownership.
 func (l *FileLedger) Flush() error {
+	l.lifetime.Lock()
+	defer l.lifetime.Unlock()
+	if l.closed {
+		return ErrLedgerClosed
+	}
+	return l.flushLocked()
+}
+
+func (l *FileLedger) flushLocked() error {
 	l.mu.Lock()
-	runs := make([]*fileRun, 0, len(l.runs))
-	for _, r := range l.runs {
-		runs = append(runs, r)
+	runs := make(map[string]*fileRun, len(l.runs))
+	for id, r := range l.runs {
+		runs[id] = r
 	}
 	l.mu.Unlock()
 	var errs []error
-	for _, r := range runs {
+	for id, r := range runs {
 		r.mu.Lock()
-		if r.f != nil {
-			if err := l.syncFile(r.f); err != nil {
+		if r.dirty || r.dirSync || r.rootSync {
+			if err := l.syncRunLocked(id, r); err != nil {
 				errs = append(errs, err)
 			}
+		}
+		if r.f != nil {
 			if err := r.f.Close(); err != nil {
 				errs = append(errs, err)
 			}
@@ -696,8 +800,60 @@ func (l *FileLedger) Flush() error {
 	return nil
 }
 
-// Close flushes the ledger. The ledger stays usable after Close.
-func (l *FileLedger) Close() error { return l.Flush() }
+// Close flushes and permanently closes the ledger, ends watches, and releases
+// writer ownership even if flushing fails. Repeated Close calls do nothing.
+// An in-flight Read can finish; no new operation starts after Close.
+func (l *FileLedger) Close() error {
+	l.lifetime.Lock()
+	defer l.lifetime.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	if l.stopWatch != nil {
+		l.stopWatch()
+	}
+	err := l.flushLocked()
+	if l.owner != nil {
+		err = errors.Join(err, l.owner.Close())
+		l.owner = nil
+	}
+	return err
+}
+
+// syncRunLocked pays both the file and entry debts. The caller holds r.mu
+// and lifetime. A failed Flush can close f, so retry through a fresh descriptor.
+func (l *FileLedger) syncRunLocked(id string, r *fileRun) error {
+	f := r.f
+	if f == nil {
+		var err error
+		f, err = os.Open(l.ledgerPath(id))
+		if err != nil {
+			return fmt.Errorf("fw: file ledger: open %s for sync: %w", id, err)
+		}
+		defer f.Close()
+	}
+	if err := l.syncFile(f); err != nil {
+		return fmt.Errorf("fw: file ledger: fsync %s: %w", id, err)
+	}
+	l.syncs.Add(1)
+	if r.dirSync {
+		if err := l.syncDir(filepath.Join(l.dir, id)); err != nil {
+			return fmt.Errorf("fw: file ledger: fsync the directory of %s: %w", id, err)
+		}
+		r.dirSync = false
+		l.dsyncs.Add(1)
+	}
+	if r.rootSync {
+		if err := l.syncDir(l.dir); err != nil {
+			return fmt.Errorf("fw: file ledger: fsync the ledger root for %s: %w", id, err)
+		}
+		r.rootSync = false
+		l.rsyncs.Add(1)
+	}
+	r.dirty = false
+	return nil
+}
 
 // ledgerWatcher hands events from Append to one Watch channel without
 // blocking Append.

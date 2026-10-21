@@ -50,6 +50,8 @@ A long run does not outgrow the context window. Before each model call, the kern
 
 The `memory` tool keeps notes between runs, in one directory per agent profile under `memory/agents/`. At the start of a run, the system prompt lists each note with its first line. The model therefore knows what it learned without a tool call. `tools.memory.scope: shared` gives every profile the same notes.
 
+An interrupted memory call needs approval before it runs again, because an insert can already have changed the file. Approval authorizes a rerun, which can repeat the edit.
+
 ## Time
 
 The system prompt names the date and the time zone of the run. The `clock` tool gives the model the exact time, the working time of the run, and the time left before its deadline. If more than 10 minutes pass between two model calls, the kernel tells the model the new time and the gap. `time.zone`, or `FW_TIME_ZONE`, sets the zone, for example `America/Chicago`, and a profile sets its own with `timeZone`. A sandbox under ax has no zone of its own, so it uses UTC until you set one. The deadline counts working time, so the time that a run waits for an approval or a follow-up does not count.
@@ -87,9 +89,15 @@ curl -s -H "Authorization: Bearer secret" -H "Content-Type: application/json" \
 
 Follow the ledger of a run as server-sent events with `GET /v1/runs/{id}/events`, or on the command line with `fw events <id> --follow`. Each run has a title, such as "Fix checkout retries". It comes from the request, or else from the first sentence of the input. The workbench lets a model write one and records it on the run.
 
+Each file ledger has one writer process. Another writer gets an ownership error; `fw events` can read while the server runs. Use separate homes and ledgers for workers. The file driver syncs accepted runs, external follow-ups, budget changes, approvals, and unsafe tool intents before acknowledging them. See [the durability contract](docs/ARCHITECTURE.md#43-storage) for the complete boundaries and recovery rules.
+
+`maxQueuedRuns` bounds the backlog behind `maxRuns`; zero selects 64 extra admitted root drivers. A full queue returns HTTP 429 with `Retry-After`. A storage failure makes `/readyz` return 503 and blocks execution until storage is repaired and the process restarts. Open runs expose `blocked` alongside their last recorded state.
+
 ## Observability
 
 `/metrics` serves Prometheus metrics for runs, models, tools, approvals, and budgets. No label holds a person, a run id, a prompt, or a path. [examples/observability](examples/observability/README.md) holds a scrape configuration, alert rules, and a Grafana dashboard. The ledger stays the exact record of usage.
+
+The same registry exports over OTLP. Task-quality metrics distinguish execution completion, model grading, and trusted verification, and track operator actions, recovery latency, confirmed duplicate effects, and priced cost per successful completion episode. Integrations report verification and confirmed effects through `Agent.ObserveQuality`; retries alone are not evidence of duplicate effects.
 
 ## Other commands
 

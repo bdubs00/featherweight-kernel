@@ -6,6 +6,7 @@ package fw
 // continues after a decision or a follow-up, and resumes after a restart.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,8 +91,8 @@ type cursor struct {
 	keptTurns  int       // the turns that a branch kept from its source (RunQueuedData.Kept)
 	keptOpen   bool      // a kept turn is open, and the branch did not make its model call yet
 	keptCalls  int       // the tool calls that a branch kept from its source
-	prints     []uint64  // fingerprint of each tool_use block of every response, in order
-	priorN     int       // prints before the latest response
+	prints     []uint64  // full-history reference only; the cached cursor uses loop
+	priorN     int       // reference prints before the latest response
 	warned     bool      // the kernel warned about a loop after the latest response
 	respAt     time.Time // the time of the latest response
 	noteAt     time.Time // the time of the latest time note
@@ -105,9 +106,13 @@ type cursor struct {
 	rep        *reportState    // the final report that is open, or nil
 	reportSeq  uint64          // the latest final report that answered or failed
 	report     string          // the text of that report
+
+	loop       loopSuffix // exact repeat counts with a bounded fingerprint suffix
+	priorCount int        // repeat count before the latest response
 }
 
-// analyze builds the cursor. It decodes only the events that it needs.
+// analyze is the cold full-history reference. The turn loop uses the
+// incremental executionCursor; equivalence tests compare every cursor field.
 func analyze(events []Event) *cursor {
 	c := &cursor{}
 	lastResp, prevResp := -1, -1
@@ -339,6 +344,10 @@ func analyze(events []Event) *cursor {
 		d := approvals[open[len(open)-1]]
 		c.pending = &d
 	}
+	for _, print := range c.prints {
+		c.loop.add(print)
+	}
+	_, c.priorCount = repeats(c.prints[:c.priorN])
 	return c
 }
 
@@ -398,8 +407,7 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 		if ctx.Err() != nil {
 			return exitCanceled
 		}
-		evs := rs.eventLog()
-		c := analyze(evs)
+		c, n := rs.executionCursor()
 		var err error
 		switch {
 		case c.terminal || c.pending != nil:
@@ -411,16 +419,16 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 			err = a.stepStart(ctx, rs, c)
 		case c.rep != nil:
 			// The run reached a limit and makes its final report.
-			err = a.stepReport(ctx, rs, c, len(evs))
+			err = a.stepReport(ctx, rs, c, n)
 		case c.turnOpen && c.respSeq < c.turnSeq:
 			// The turn has no response yet: call the model, or call it
 			// again after a restart.
 			err = a.stepModel(ctx, rs, c)
 		case c.turnOpen:
-			err = a.stepResponse(ctx, rs, c, len(evs))
+			err = a.stepResponse(ctx, rs, c, n)
 		case c.resp != nil && !c.unseen && settles(c):
 			// The turn closed, but the run did not record its end.
-			err = a.stepResponse(ctx, rs, c, len(evs))
+			err = a.stepResponse(ctx, rs, c, n)
 		default:
 			err = a.stepModel(ctx, rs, c)
 		}
@@ -1049,8 +1057,13 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
 	b := a.budgetOf(rs)
 	uses := toolUses(c.resp.Content)
+	// Policy and tool implementations receive mutable JSON inputs. Keep
+	// their writes out of the immutable decoded response in the cursor cache.
+	for i := range uses {
+		uses[i].Input = bytes.Clone(uses[i].Input)
+	}
 
-	period, count := repeats(c.prints)
+	period, count := c.loop.repeats()
 	if b.MaxRepeats > 0 && count >= b.MaxRepeats {
 		tool := uses[len(uses)-1].Name
 		if _, err := a.emit(ctx, rs, EvLoopDetected, LoopDetectedData{Tool: tool, Count: count, Period: period, Action: "failed"}); err != nil {
@@ -1183,7 +1196,7 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 	}
 	// Warn once, on the response that brings the loop one repeat short of
 	// the limit.
-	if _, before := repeats(c.prints[:c.priorN]); count >= 2 && count == b.MaxRepeats-1 && before < count && !c.warned {
+	if count >= 2 && count == b.MaxRepeats-1 && c.priorCount < count && !c.warned {
 		if err := a.warnLoop(ctx, rs, uses[len(uses)-1].Name, period, count); err != nil {
 			return err
 		}
@@ -1237,7 +1250,10 @@ func continueAsk(t Tool, rec *callRecord) ([]AnsweredQuestion, bool) {
 		if q.decided == nil {
 			return nil, false
 		}
-		out = append(out, AnsweredQuestion{Request: q.req, Decision: *q.decided})
+		req, decision := q.req, *q.decided
+		req.Input, req.Schema = bytes.Clone(req.Input), bytes.Clone(req.Schema)
+		decision.Content = bytes.Clone(decision.Content)
+		out = append(out, AnsweredQuestion{Request: req, Decision: decision})
 	}
 	if _, ok := continuerOf(t); !ok {
 		return nil, false

@@ -410,6 +410,9 @@ func validate(c *fw.Config, servers bool) error {
 	if c.MaxRuns < 0 {
 		p = append(p, fmt.Sprintf("maxRuns %d is negative", c.MaxRuns))
 	}
+	if c.MaxQueuedRuns < 0 {
+		p = append(p, fmt.Sprintf("maxQueuedRuns %d is negative", c.MaxQueuedRuns))
+	}
 	if c.Bus.IntakeRetries < 0 {
 		p = append(p, fmt.Sprintf("bus.intakeRetries %d is negative", c.Bus.IntakeRetries))
 	}

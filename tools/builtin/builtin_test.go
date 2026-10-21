@@ -66,7 +66,7 @@ func TestRegisteredSpecs(t *testing.T) {
 		"bash":       {native: fw.NativeBash, destructive: true},
 		"files":      {native: fw.NativeTextEditor},
 		"http":       {readOnly: true, idempotent: true, parallelOK: true},
-		"memory":     {native: fw.NativeMemory, idempotent: true},
+		"memory":     {native: fw.NativeMemory},
 		"ask_user":   {readOnly: true},
 		"send":       {},
 		"spawn_task": {parallelOK: true},

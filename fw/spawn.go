@@ -375,6 +375,9 @@ func (a *Agent) Spawner() Spawner { return a.spawner }
 // start by its tool call, so a rerun of the call after a restart reaches
 // the child of the first attempt instead of starting another.
 func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (*Run, error) {
+	if err := a.k.writeError(); err != nil {
+		return nil, err
+	}
 	if a.cfg.Spawn.Disabled {
 		return nil, fmt.Errorf("%w: spawning is disabled", ErrSpawnLimit)
 	}
@@ -477,6 +480,8 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	// under the same key waits for this one, and Cancel ends the start.
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stopCancel := context.AfterFunc(k.ctx, cancel)
+	defer stopCancel()
 	start := &branchStart{done: make(chan struct{}), cancel: cancel, run: placeholder}
 	ref := childRef{parent: parent, member: member, depth: depth, start: start, key: key, known: true}
 	a.decorateChild(placeholder, ref)
@@ -497,6 +502,15 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 		k.mu.Unlock()
 		return nil, err
 	}
+	k.lifeMu.Lock()
+	if err := k.writeErrorLocked(); err != nil {
+		k.lifeMu.Unlock()
+		k.mu.Unlock()
+		return nil, err
+	}
+	k.wg.Add(1)
+	k.lifeMu.Unlock()
+	defer k.wg.Done()
 	// The child holds its share of the tree from now on, and its process
 	// holds the tree of the child to it.
 	ref.reserved = a.reserveLocked(p, left, depth)
@@ -546,13 +560,14 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 	}
 	ref.member = got
 	if err := a.recordStart(p, RunChildData{Child: req.ID, Member: got, Started: true}); err != nil {
-		// A parent that cannot record the start of its child cannot answer
-		// for the child later. The child ends here, so it does not run for
-		// nobody; the record of the child stays on disk, so a restart finds
-		// whatever the end leaves.
-		aerr := a.dropChild(planner, got, req.ID)
-		intent.Member = got
-		a.endStart(p, intent, start, "failed", "the parent did not record the start of the child in "+got+": "+err.Error(), aerr)
+		// The append can have reached storage. Keep the child and its key,
+		// and do not invent a local terminal record or destroy its process.
+		// Restart reads either the accepted start or the original durable
+		// intent, whose Planner finds this exact child before any rerun.
+		k.mu.Lock()
+		k.setRemoteLocked(req.ID, ref)
+		close(start.done)
+		k.mu.Unlock()
 		return nil, fmt.Errorf("fw: record the start of the child %s in %s: %w", req.ID, got, err)
 	}
 	if sctx.Err() != nil {
@@ -585,6 +600,14 @@ func (a *Agent) SpawnChild(ctx context.Context, parent string, req RunRequest) (
 // that takes.
 func (a *Agent) endStart(p *runState, d RunChildData, start *branchStart, outcome, reason string, aerr error) {
 	k := a.k
+	if k.storageError() != nil {
+		// The intent stays authoritative while storage is blocked. The
+		// next process reconciles it instead of trusting an unwritten end.
+		k.mu.Lock()
+		close(start.done)
+		k.mu.Unlock()
+		return
+	}
 	if aerr != nil && d.Member != "" {
 		a.log.Warn("the process of a child that did not start stays for a look", "run", p.id, "child", d.Child, "member", d.Member, "error", aerr)
 		d.Ended, d.Reason = outcome, reason
@@ -600,24 +623,11 @@ func (a *Agent) endStart(p *runState, d RunChildData, start *branchStart, outcom
 	k.mu.Unlock()
 }
 
-// startRecordAttempts is how many times the kernel appends the record of a
-// start that the ledger refused. A failed fsync of the file ledger keeps
-// its debt, and a later append can pay it.
-const startRecordAttempts = 3
-
 // recordStart appends the fw.run.child event that marks the start of a
-// child of rs, and tries again when the ledger refuses it.
+// child of rs. A refusal fail-stops this process because its durability is
+// ambiguous; restart reconciles the child from the durable intent.
 func (a *Agent) recordStart(rs *runState, d RunChildData) error {
-	var err error
-	for attempt := 1; attempt <= startRecordAttempts; attempt++ {
-		if _, err = a.emit(nil, rs, EvRunChild, d); err == nil {
-			return nil
-		}
-		a.log.Warn("record the start of a child in another process", "run", rs.id, "child", d.Child, "member", d.Member, "attempt", attempt, "error", err)
-		if attempt < startRecordAttempts {
-			time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
-		}
-	}
+	_, err := a.emit(nil, rs, EvRunChild, d)
 	return err
 }
 
@@ -702,6 +712,9 @@ func (a *Agent) keyedChildLocked(parent, key string) (string, childRef, bool) {
 // start under the key begins a new child.
 func (a *Agent) spawnedBefore(ctx context.Context, parent, key string) (*Run, bool, error) {
 	for {
+		if err := a.k.storageError(); err != nil {
+			return nil, true, err
+		}
 		a.k.mu.Lock()
 		id, ref, ok := a.keyedChildLocked(parent, key)
 		a.k.mu.Unlock()
@@ -940,6 +953,7 @@ func (a *Agent) adoptChild(ctx context.Context, ref childRef, id string) {
 	}
 	if err := a.recordStart(rs, RunChildData{Child: id, Member: ref.member, Started: true}); err != nil {
 		a.log.Error("record a child found after a restart", "run", ref.parent, "child", id, "member", ref.member, "error", err)
+		return
 	}
 	a.log.Info("child found after a restart", "run", ref.parent, "child", id, "member", ref.member)
 	if rs.snapshot().State.Terminal() {
@@ -1070,6 +1084,9 @@ func (a *Agent) decorateChild(r *Run, ref childRef) {
 		return
 	}
 	r.Parent, r.Depth, r.Member = ref.parent, ref.depth, ref.member
+	if err := a.k.storageError(); err != nil && !r.State.Terminal() {
+		r.Blocked = err.Error()
+	}
 }
 
 // getRemote returns a remote child through the spawner, authorized as Get
@@ -1077,6 +1094,9 @@ func (a *Agent) decorateChild(r *Run, ref childRef) {
 // answered from this process.
 func (a *Agent) getRemote(ctx context.Context, id string, ref childRef) (*Run, error) {
 	r, ok := ref.starting()
+	if a.k.storageError() != nil && ref.start != nil {
+		r, ok = cloneRun(ref.start.run), true
+	}
 	if !ok {
 		if a.spawner == nil {
 			return nil, a.unreachable(id, ref)

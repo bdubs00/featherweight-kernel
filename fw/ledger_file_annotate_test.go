@@ -47,6 +47,9 @@ func TestFileLedgerClosesAfterLateAnnotation(t *testing.T) {
 	}
 
 	// A new ledger over the same files knows that the run is done.
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
 	l2, err := OpenFileLedger(dir)
 	if err != nil {
 		t.Fatal(err)

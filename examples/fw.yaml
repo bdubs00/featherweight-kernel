@@ -111,7 +111,7 @@ secrets:
   options: {}                   # driver options; FW_SECRETS_OPTIONS_<NAME>
 
 ledger:
-  driver: file                  # file | nats | redis | sqlite
+  driver: file                  # file | mem; one writer process per file root
   path: ""                      # file: the directory; default <home>/runs
   url: ""                       # nats and redis: the server
   options: {}                   # driver options; FW_LEDGER_OPTIONS_<NAME>
@@ -316,7 +316,8 @@ telemetry:
   log: info                     # debug | info | warn | error
   # OTLP traces use OTEL_EXPORTER_OTLP_ENDPOINT and the other standard OTEL_* variables.
 
-maxRuns: 16                     # runs in flight at once; more wait in the queue. 0 is the default: 16, or 1 under ax, where a Task is one working copy
+maxRuns: 16                     # root runs in flight at once. 0 is the default: 16, or 1 under ax
+maxQueuedRuns: 0                # extra admitted root drivers; 0 selects the finite default of 64; children use spawn limits
 
 # A package that a program links in can own one top-level block, which it
 # claims with fw.RegisterExtension (docs/ARCHITECTURE.md section 12.1). The

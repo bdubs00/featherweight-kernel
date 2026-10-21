@@ -108,15 +108,15 @@ func TestBusEgressReplaysUnpublishedFinalAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Close(testCtx(t))
-	var want []Event
-	for _, ev := range ledgerEvents(t, l, r.ID) {
-		if typeSelected(cfg.Bus.EgressTypes, ev.Type) {
-			want = append(want, ev)
-		}
-	}
 	l2, err := OpenFileLedger(dir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var want []Event
+	for _, ev := range ledgerEvents(t, l2, r.ID) {
+		if typeSelected(cfg.Bus.EgressTypes, ev.Type) {
+			want = append(want, ev)
+		}
 	}
 	bus.mu.Lock()
 	bus.fail = false
@@ -167,10 +167,14 @@ func TestBusEgressUncertainACKReplaysStableIDAfterRestart(t *testing.T) {
 	if seq, err := l.LoadEgressCursor(context.Background(), e.route, "run"); err != nil || seq != first.Seq {
 		t.Fatalf("cursor = %d, %v; must stop before uncertain seq %d", seq, err, uncertain.Seq)
 	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
 	l2, err := OpenFileLedger(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l2.Close()
 	e2 := testReplay(t, l2, bus)
 	if _, err := e2.replayRun(context.Background(), "run"); err != nil {
 		t.Fatal(err)

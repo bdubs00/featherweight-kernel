@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	collogs "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetrics "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	metricspb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -99,9 +100,10 @@ func TestSpanContextOf(t *testing.T) {
 // collector is an OTLP HTTP endpoint that counts what arrives.
 type collector struct {
 	*httptest.Server
-	mu      sync.Mutex
-	metrics []string // metric names
-	logs    int
+	mu         sync.Mutex
+	metrics    []string // metric names
+	metricData []*metricspb.Metric
+	logs       int
 }
 
 func newCollector(t *testing.T) *collector {
@@ -120,6 +122,7 @@ func newCollector(t *testing.T) *collector {
 			for _, sm := range rm.ScopeMetrics {
 				for _, m := range sm.Metrics {
 					c.metrics = append(c.metrics, m.Name)
+					c.metricData = append(c.metricData, m)
 				}
 			}
 		}

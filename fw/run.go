@@ -330,8 +330,11 @@ func (u RunUsage) tokens() int { return u.InputTokens + u.OutputTokens }
 
 // Run is the status object of a run. It is a projection of the ledger.
 type Run struct {
-	ID    string `json:"id"`
-	Agent string `json:"agent"`
+	// Blocked is a runtime-only storage failure requiring process restart.
+	// State remains the last durable state; Blocked is not a ledger event.
+	Blocked string `json:"blocked,omitempty"`
+	ID      string `json:"id"`
+	Agent   string `json:"agent"`
 	// Title names the work in a few words, such as "Fix checkout retries".
 	// It is the metadata value MetaTitle when the request sets it, and
 	// else TitleFrom of the input.

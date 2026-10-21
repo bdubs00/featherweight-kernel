@@ -82,7 +82,8 @@ var (
 // model labels hold names from the configuration, and the other labels
 // hold values from fixed sets.
 type Metrics struct {
-	prices fw.Prices
+	prices  fw.Prices
+	quality *qualityMetrics
 
 	runsTotal        *prometheus.CounterVec
 	runsQueued       *prometheus.CounterVec
@@ -151,7 +152,8 @@ type modelCall struct {
 // panics when reg already holds a metric with the same name.
 func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 	m := &Metrics{
-		prices: prices,
+		prices:  prices,
+		quality: newQualityMetrics(),
 		runsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fw_runs_total",
 			Help: "Runs that finished, by agent, outcome, and batch, the job of the run from the metadata fw.batch, or empty.",
@@ -256,14 +258,14 @@ func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 }
 
 func (m *Metrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{
+	return append([]prometheus.Collector{
 		m.runsTotal, m.runsQueued, m.runsActive, m.runDuration, m.runTurns,
 		m.budgetExceeded,
 		m.modelRequests, m.modelDuration, m.modelTokens, m.modelCost, m.modelUnpriced,
 		m.toolCalls, m.toolDuration, mcpCollector{m},
 		m.approvalsPending, approvalAge{m}, m.approvalsTotal, m.loopsTotal, m.busMessages,
 		m.ledgerEvents, m.ledgerAppend, m.buildInfo,
-	}
+	}, m.quality.collectors()...)
 }
 
 // KnowModels names the model selectors of the configuration, such as
@@ -446,11 +448,15 @@ func (m *Metrics) Attach(a *fw.Agent) {
 	// after it, and the per-run state makes both cases count once.
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.quality.ledger = a.Ledger()
 	runs, err := a.List(context.Background())
 	if err != nil {
 		return
 	}
 	for _, r := range runs {
+		if !r.State.Terminal() {
+			m.quality.runs[r.ID] = m.quality.seed(r.ID, r.Seq)
+		}
 		if r.State.Terminal() || m.runs[r.ID] != nil {
 			continue
 		}
@@ -487,6 +493,7 @@ func (m *Metrics) Observe(e fw.Event) {
 	m.ledgerEvents.WithLabelValues(e.Type).Inc()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.quality.observe(e)
 	st := m.runs[e.Subject]
 	if st != nil && e.Seq != 0 && e.Seq <= st.kept && e.Type != fw.EvRunQueued {
 		m.copied(e, st)

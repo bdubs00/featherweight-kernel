@@ -419,8 +419,9 @@ func closeAgent(a *fw.Agent) {
 }
 
 // newRunsLedger hides the runs that a ledger already holds from the kernel,
-// so a verb that runs one piece of work does not resume the runs of a
-// server that shares the ledger. Reads, watches, and appends go through.
+// so a verb that runs one piece of work does not resume earlier runs.
+// The file ledger still requires exclusive writer ownership. Reads,
+// watches, and appends go through.
 type newRunsLedger struct{ fw.Ledger }
 
 // Runs implements fw.Ledger with an empty list.

@@ -53,7 +53,9 @@ type Tracer struct {
 }
 
 type runTrace struct {
-	id, agent string // the run, the conversation of the GenAI conventions, and its profile
+	id, agent  string // the run, the conversation of the GenAI conventions, and its profile
+	recovering time.Time
+	last       time.Time
 
 	ctx     context.Context // holds the run span
 	span    trace.Span
@@ -121,6 +123,17 @@ func (t *Tracer) Observe(e fw.Event) {
 		}
 		return
 	}
+	attrs := qualityAttributes(e)
+	if len(attrs) > 0 {
+		if rt != nil {
+			rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(attrs...))
+		} else if e.Type == fw.EvRunAnnotated {
+			t.receiptSpan(e, ts, attrs)
+		}
+	}
+	if rt != nil {
+		traceRecovery(rt, e, ts)
+	}
 	switch e.Type {
 	case fw.EvRunQueued:
 		// The run span starts at fw.run.started. The fw.run.queued of a
@@ -147,7 +160,13 @@ func (t *Tracer) Observe(e fw.Event) {
 		// change of the budget can arrive after the run finished, so they
 		// never open a run span.
 		if rt != nil {
-			rt.current().AddEvent(e.Type, trace.WithTimestamp(ts))
+			if e.Type == fw.EvBudgetChanged {
+				var d fw.BudgetChangedData
+				_ = e.Decode(&d)
+				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(attribute.String("fw.budget.by", d.By), attribute.String("fw.budget.origin", d.Origin)))
+			} else if len(attrs) == 0 {
+				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts))
+			}
 		}
 		return
 	case fw.EvRunSuspended:
@@ -164,6 +183,7 @@ func (t *Tracer) Observe(e fw.Event) {
 		// fw.run.started opens the run span. A resume or a follow-up after
 		// fw.run.finished opens a new run span in the same trace.
 		rt = t.open(e, ts)
+		traceRecovery(rt, e, ts)
 	}
 	switch e.Type {
 	case fw.EvRunStarted:
@@ -260,7 +280,7 @@ func (t *Tracer) Observe(e fw.Event) {
 		var d fw.ApprovalDecidedData
 		_ = e.Decode(&d)
 		rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(
-			attribute.String("fw.approval.id", d.ApprovalID), attribute.String("fw.approval.decision", d.Decision)))
+			attribute.String("fw.approval.id", d.ApprovalID), attribute.String("fw.approval.decision", d.Decision), attribute.String("fw.approval.decider", d.Decider)))
 	case fw.EvError:
 		var d fw.ErrorData
 		_ = e.Decode(&d)
@@ -271,7 +291,11 @@ func (t *Tracer) Observe(e fw.Event) {
 		_ = e.Decode(&d)
 		rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(
 			attribute.String("fw.budget.limit", d.Limit), attribute.Float64("fw.budget.value", d.Value)))
-	case fw.EvRunResumed, fw.EvContextCompacted, fw.EvMessageReceived:
+	case fw.EvMessageReceived:
+		var d fw.MessageReceivedData
+		_ = e.Decode(&d)
+		rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(attribute.String("fw.message.origin", d.Origin), attribute.String("fw.message.role", string(d.Role)), attribute.String("fw.message.note", d.Note)))
+	case fw.EvRunResumed, fw.EvContextCompacted:
 		rt.current().AddEvent(e.Type, trace.WithTimestamp(ts))
 	}
 }

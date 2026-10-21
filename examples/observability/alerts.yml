@@ -3,6 +3,61 @@
 # The thresholds are starting points. Change them to fit your agents.
 
 groups:
+  - name: fw-task-quality
+    rules:
+      - alert: FwVerifiedCompletionRateLow
+        expr: |
+          ((sum(increase(fw_task_verifications_total{result="satisfied"}[6h])) or vector(0))
+            / sum(increase(fw_task_completions_total[6h]))) < 0.8
+          and sum(increase(fw_task_completions_total[6h])) >= 20
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "External verification throughput is below 80% of completions"
+          description: "Enable this policy only for integrations expected to report verification. Missing receipts are unverified, not failures; delayed receipts cross windows. Model grader judgments do not count. Use the ledger for a cohort SLO."
+      - alert: FwOperatorInterventionsHigh
+        expr: |
+          sum(rate(fw_operator_interventions_per_run_sum{coverage="complete"}[1h]))
+            / sum(rate(fw_operator_interventions_per_run_count{coverage="complete"}[1h])) > 3
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than three operator actions per completion episode"
+          description: "Concrete ledger decisions, interactive followups and attributed budget changes increased. Zero-action episodes are in the denominator."
+      - alert: FwRecoverySlow
+        expr: histogram_quantile(0.95, sum by (le, result) (rate(fw_recovery_duration_seconds_bucket[1h]))) > 120
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Recovery p95 is above two minutes ({{ $labels.result }})"
+          description: "Measured from resume, not suspend. Failed, canceled and interrupted attempts are distinct from first progress."
+      - alert: FwConfirmedDuplicateEffects
+        expr: sum(increase(fw_confirmed_duplicate_effects_total[1h])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "An integration confirmed duplicate external effects"
+          description: "Inspect fw.quality.observation spans and fw.run.annotated quality receipts. Tool retries alone never trigger this count."
+      - alert: FwSuccessfulTaskCostUnknown
+        expr: sum by (reason) (increase(fw_successful_task_cost_excluded_total[1h])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Successful task cost excluded ({{ $labels.reason }})"
+          description: "Some accepted or externally satisfied episodes cannot enter the cost histogram. Configure missing prices or repair missing usage. Unknown cost is not zero."
+      - alert: FwSuccessfulTaskCostHigh
+        expr: |
+          sum(rate(fw_successful_task_cost_usd_sum[6h])) / sum(rate(fw_successful_task_cost_usd_count[6h])) > 5
+          and sum(increase(fw_successful_task_cost_usd_count[6h])) >= 10
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mean own cost per price-complete successful episode exceeds $5"
+          description: "This is per-run episode model cost, not tree cost. Children and grader runs are not charged again to their parent. Compare the excluded-cost panel before interpreting the mean."
   - name: fw
     rules:
       - alert: FwTargetDown

@@ -137,6 +137,7 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	req.ID = NewID()
 	placeholder, err := a.placeholder(req.ID, q, a.now())
 	if err != nil {
+		a.discardPlacedBranch(src, forker, req.ID, member, nil)
 		return nil, err
 	}
 	// The start outlives the request of the caller, and Cancel ends it.
@@ -145,8 +146,22 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	ref := childRef{parent: src, member: member, depth: depth, start: start, branch: true}
 	a.decorateChild(placeholder, ref)
 	placed := RunChildData{Child: req.ID, Member: member, Principal: q.Principal, PrincipalKind: q.PrincipalKind, Metadata: q.Metadata, Kind: childBranch}
-	if _, err := a.emit(nil, rs, EvRunChild, placed); err != nil {
-		a.log.Warn("record a remote branch", "run", src, "branch", req.ID, "member", member, "error", err)
+	k.lifeMu.Lock()
+	if err := k.writeErrorLocked(); err != nil {
+		k.lifeMu.Unlock()
+		a.discardPlacedBranch(src, forker, req.ID, member, cancel)
+		return nil, err
+	}
+	k.wg.Add(1)
+	k.lifeMu.Unlock()
+	// The wait ends after the start is registered, so a shutdown that passes
+	// the in-flight record still reaches the open start through cancelStarts.
+	defer k.wg.Done()
+	_, aerr := a.emit(nil, rs, EvRunChild, placed)
+	if aerr != nil {
+		a.log.Error("record a remote branch", "run", src, "branch", req.ID, "member", member, "error", aerr)
+		a.discardPlacedBranch(src, forker, req.ID, member, cancel)
+		return nil, aerr
 	}
 	k.mu.Lock()
 	k.setRemoteLocked(req.ID, ref)
@@ -154,6 +169,27 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	a.log.Info("run branched in another process", "run", src, "branch", req.ID, "member", member, "seq", req.Seq)
 	go a.startBranch(bctx, forker, ref, q, kept, req)
 	return cloneRun(placeholder), nil
+}
+
+// discardPlacedBranch gives up a branch whose record did not reach the
+// ledger before its start began: the source stops counting it, its start
+// ends, and the process that Place made holds no run, so it is abandoned
+// in the background. The record can have reached storage anyway, so a
+// restart reconciles what it finds there; this process answers for none
+// of it.
+func (a *Agent) discardPlacedBranch(src string, ab abandoner, id, member string, cancel context.CancelFunc) {
+	if cancel != nil {
+		cancel()
+	}
+	k := a.k
+	k.mu.Lock()
+	k.kids[src]--
+	k.mu.Unlock()
+	go func() {
+		ctx, done := context.WithTimeout(context.Background(), time.Minute)
+		defer done()
+		a.abandon(ctx, ab, id, member)
+	}()
 }
 
 // Starting counts the branches and the children of this process whose
@@ -304,11 +340,12 @@ func (a *Agent) ForkEvents(ctx context.Context, events []Event, req ForkRequest)
 		}
 		if rs, err := a.k.lookup(req.ID); err == nil {
 			// The same branch sent again, for example after a lost answer,
-			// is the branch that this process has. Another run under the id
-			// is a conflict.
+			// is the branch that this process has. It waits for the copy of
+			// the first send, so a caller holds a branch whose events are
+			// in the ledger. Another run under the id is a conflict.
 			have := rs.queuedData().Metadata
 			if have[MetaForkOf] == q.Metadata[MetaForkOf] && have[MetaForkSeq] == q.Metadata[MetaForkSeq] {
-				return rs.snapshot(), nil
+				return rs.accepted(ctx)
 			}
 			return nil, fmt.Errorf("%w: a run with the id %s exists", ErrInvalidRequest, req.ID)
 		}
@@ -428,8 +465,10 @@ func (a *Agent) withModel(p *ResolvedProfile, model string) *ResolvedProfile {
 
 // appendBranch writes a branch into this process: a new run state, the kept
 // events under the new id, the message of the request, and then the resume
-// or the launch of the branch.
-func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*Run, error) {
+// or the launch of the branch. The copy is the acceptance of the branch: a
+// concurrent retry of the same branch waits for it (accepted), and a caller
+// that receives a run holds a branch whose events are in the ledger.
+func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (r *Run, err error) {
 	k := a.k
 	id := req.ID
 	if id == "" {
@@ -442,6 +481,7 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 	brs := k.newRunState(id, q.Agent, "")
 	brs.queued = q
 	brs.maxDesc = maxDescOf(q.Metadata)
+	brs.acceptDone = make(chan struct{})
 	k.mu.Lock()
 	if err := k.claimableLocked(id); err != nil {
 		k.mu.Unlock()
@@ -454,6 +494,23 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 		delete(k.runs, id)
 		k.mu.Unlock()
 	}
+	k.lifeMu.Lock()
+	if err := k.writeErrorLocked(); err != nil {
+		k.lifeMu.Unlock()
+		undo()
+		brs.acceptErr = err
+		close(brs.acceptDone)
+		return nil, err
+	}
+	k.wg.Add(1)
+	k.lifeMu.Unlock()
+	defer k.wg.Done()
+	defer func() {
+		if err != nil {
+			brs.acceptErr = err
+		}
+		close(brs.acceptDone)
+	}()
 	for i, e := range kept {
 		data := any(e.Data)
 		if i == 0 && e.Type == EvRunQueued {
@@ -467,17 +524,17 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 				data = d
 			}
 		}
-		ne, err := NewEvent(id, e.Type, data)
-		if err != nil {
+		ne, nerr := NewEvent(id, e.Type, data)
+		if nerr != nil {
 			undo()
-			return nil, err
+			return nil, nerr
 		}
 		brs.emitMu.Lock()
-		_, err = a.appendLocked(nil, brs, ne)
+		_, aerr := a.appendLocked(nil, brs, ne)
 		brs.emitMu.Unlock()
-		if err != nil {
+		if aerr != nil {
 			undo()
-			return nil, err
+			return nil, aerr
 		}
 	}
 	a.log.Info("run branched", "run", id, "from", q.Metadata[MetaForkOf], "seq", q.Metadata[MetaForkSeq], "withMessage", req.Input != "")
@@ -495,6 +552,10 @@ func (a *Agent) appendBranch(q RunQueuedData, kept []Event, req ForkRequest) (*R
 	brs.mu.Unlock()
 	if !terminal {
 		a.resume([]*runState{brs})
+		// A branch that waits for a decision starts no driver: resume
+		// leaves the run idle, so the place that its copied queue took
+		// goes back to the backlog until the decision starts a driver.
+		a.releaseAdmission(brs)
 	}
 	return brs.snapshot(), nil
 }

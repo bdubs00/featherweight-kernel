@@ -108,3 +108,178 @@ No label holds a run id, a principal, a prompt, a path, or a URL. These labels h
 - `batch`: the job of a run, from the metadata `fw.batch`, which `enqueue` of the workbench sets; empty for a run of no job.
 
 The other labels, such as `outcome`, `origin`, `limit`, `kind`, and `state`, hold values from fixed lists.
+
+## Five task-quality measures
+
+The quality panels cover all agents and do not use the dashboard Agent filter.
+Their labels come from fixed lists only: no agent, batch, run, tool input,
+receipt, effect key, principal, or verifier name enters these series. All use
+the existing Prometheus registry and its OTLP bridge, not a second meter.
+
+| Measure | Series and denominator |
+|---|---|
+| Verified completion | `fw_task_completions_total{execution,grader_judgment}` counts every **own terminal episode**, including failures and cancellations. `fw_task_verifications_total{result}` counts one final application receipt per completed episode. Only `result="satisfied"` is external verification. `accepted` means application-reported human acceptance; `rejected` and `unknown` are explicit final observations. No receipt means unverified. |
+| Operator interventions | `fw_operator_interventions_total{kind}` counts concrete actions. `fw_operator_interventions_per_run{coverage}` is a histogram at each own finish, including zero-action, failed and canceled episodes. A follow-up begins another completion episode of the same run. |
+| Recovery | `fw_recovery_duration_seconds{result}` measures a resume to first model response, tool response, or tool progress, or to a finish/suspend before progress. Results are `progress`, `completed`, `failed`, `canceled`, `interrupted`. Suspended downtime before resume is excluded. |
+| Duplicate effects | `fw_confirmed_duplicate_effects_total` counts **additional committed external effects** reported by trusted applications. `fw_ambiguous_tool_retries_total` separately counts another request for an outstanding call id. It never asserts another external effect. |
+| Cost per successful task | `fw_successful_task_cost_usd{basis}` is a histogram of own episode model cost for final `accepted` or externally `satisfied` receipts, only with complete prices and usage. Its `_count` is the price-complete successful-task denominator. `fw_successful_task_cost_excluded_total{reason}` records `unpriced_tokens` or `missing_usage` exclusions. |
+
+Execution `completed` does not assert satisfaction. `grader_judgment="satisfied"`
+is the outcome of an LLM grader, **not external verification**. The other grader
+states are `needs_revision`, `max_iterations`, `unparsed`, `skipped`, `unknown`,
+and `unverified` (no grader pass). A revision follow-up clears the previous
+judgment. Copied fork history contributes none of these own task completions,
+interventions, recovery attempts, costs, receipts, or duplicate effects.
+
+### Queries
+
+External verified completion throughput / all terminal episodes:
+
+```promql
+(sum(rate(fw_task_verifications_total{result="satisfied"}[6h])) or vector(0))
+  / sum(rate(fw_task_completions_total[6h]))
+```
+
+Use `result=~"accepted|satisfied"` instead for accepted-or-verified success.
+Display execution and receipt denominators beside the ratio:
+
+```promql
+sum by (execution, grader_judgment) (increase(fw_task_completions_total[6h]))
+sum by (result) (increase(fw_task_verifications_total[6h]))
+```
+
+Completed executions minus final receipts gives unverified episodes **only for
+a common complete history/cohort**, not for an arbitrary rate window. Explicit
+`result="unknown"` remains separate. Receipts can arrive after the window of
+their completion or after restart, so a short-window throughput ratio can
+exceed one. Do not clamp it and call it a cohort success rate. Use ledger
+completion sequences and receipts for an exact cohort SLO. Missing metric
+series are not evidence of verification or known zero failures.
+
+Mean and p95 interventions per episode (complete observer history):
+
+```promql
+sum(rate(fw_operator_interventions_per_run_sum{coverage="complete"}[1h]))
+  / sum(rate(fw_operator_interventions_per_run_count{coverage="complete"}[1h]))
+histogram_quantile(0.95, sum by (le) (rate(fw_operator_interventions_per_run_bucket{coverage="complete"}[1h])))
+sum by (kind) (increase(fw_operator_interventions_total[1h]))
+```
+
+`kind="decision"` requires a nonempty decider other than `kernel` or the
+parent run; decisions on kernel-origin grader runs are excluded.
+`kind="followup"` requires a user-role message, no kernel note, and origin
+`http`, `cli`, or `mcp`. `kind="budget_change"` requires a nonempty `by` and
+one of those interactive origins. Bus, tool, A2A, and kernel followups and
+unattributed budget changes do not count. These are ledger-backed operator
+actions, not proof of a human: an authorized client can automate a surface or
+set a decider. A followup with a budget change counts two concrete actions.
+An attributed budget change after finish counts immediately; it enters the
+next episode distribution if the run reopens. It never reopens execution.
+
+Recovery p95, with unsuccessful attempts kept separate:
+
+```promql
+histogram_quantile(0.95, sum by (le, result) (rate(fw_recovery_duration_seconds_bucket[1h])))
+sum by (result) (increase(fw_recovery_duration_seconds_count[1h]))
+```
+
+An annotation, followup, model request, or turn start alone is not progress.
+A new resume or suspend interrupts an unfinished recovery attempt. Once first
+progress ends an attempt, a later execution failure does not relabel it.
+When another resume follows a crash without a suspended event, the old
+`interrupted` duration ends at its last ledger activity, not the new resume.
+That incomplete sample is a lower bound; it excludes the unknown crash gap.
+`Metrics.Attach` reconstructs the open episode, interventions, outstanding
+requests, and pending resume clock from the ledger without replaying old
+counters. Histograms can include pre-attach episode facts. Direct observer
+registration without Attach or a full history gives `coverage="partial"`
+intervention samples. No completed-run cache is retained. A process lost
+before a recovery end exports no finished duration; absence is not success.
+
+Confirmed duplicate effects and ambiguous attempts:
+
+```promql
+sum(increase(fw_confirmed_duplicate_effects_total[1h]))
+sum(increase(fw_ambiguous_tool_retries_total[1h]))
+```
+
+Repeated intents, identical arguments, loop warnings, and tool error results
+do not establish external effects. The ambiguous count detects a repeated
+outstanding call id only; it does not detect all application retries. Zero
+confirmed duplicates without integration reporting means unobserved, not
+exactly-once delivery. Prevented duplicates do not count as committed effects.
+
+Mean own episode cost per price-complete accepted/verified task, and exclusions:
+
+```promql
+sum by (basis) (rate(fw_successful_task_cost_usd_sum[6h]))
+  / sum by (basis) (rate(fw_successful_task_cost_usd_count[6h]))
+sum by (reason) (increase(fw_successful_task_cost_excluded_total[6h]))
+```
+
+Scope is **one run's own completion episode**, not its root tree. Cost includes
+model responses, compactions, and model-written annotations after the previous
+own finish through this finish, plus annotations after this finish until the
+next work event or receipt. It excludes copied history, child reports, child
+and grader usage, and non-model costs. Child runs can report their own success
+but are never charged a second time to their parent. Cumulative finished totals
+are not added to episode cost. This is the conditional cost of successful
+episodes, not total fleet spend divided by successes or amortized failed-work
+cost. Unknown token prices exclude the entire sample. An explicit zero price
+is valid. A receipt freezes its price/usage snapshot; settle annotations first.
+Annotations after the receipt cannot revise a histogram. Prices are those of
+the reporting process at receipt time; fleet pricing changes can change the
+snapshot.
+
+### Trusted integration receipt API
+
+Run the complete local example (no external services or model provider):
+
+```sh
+go run ./examples/observability/quality
+```
+
+The example tool simulates a faulty delivery integration. The application
+checks authoritative committed delivery rows, verifies delivery, and reports
+one confirmed additional effect through the public API. Calling the same
+receipt twice does not duplicate any metric. In a real integration, query the
+authoritative external system using a stable operation key; do not use model
+text or the number of tool requests as evidence.
+
+```go
+err := agent.ObserveQuality(ctx, run.ID, fw.QualityObservation{
+    ID: "stable-reconciliation-receipt", // opaque; never a secret
+    Completion: finishedEvent.Seq,       // own completed finish, not a later annotation
+    Verification: "satisfied",          // external check; accepted/rejected/unknown also valid
+    DuplicateEffects: confirmedAdditionalCommittedEffects,
+})
+```
+
+`ObserveQuality` requires run operator authorization when ctx has a principal.
+It is a trusted application API, not a model tool or a new unauthenticated
+HTTP endpoint. The integration supplies truth and reporting coverage. For
+effects-only observations omit verification and completion and supply a
+positive duplicate count. Report each additional effect once under a stable
+receipt id. Different ids must not report overlapping effect sets.
+
+Receipts use the existing durable `fw.run.annotated` event with a `quality`
+object and kernel-computed `qualityCostUSD`, `qualityUnpricedTokens`, and
+`qualityCostComplete`. They change no metadata, usage, or execution state.
+IDs are bounded to 128 bytes. Retries with identical id and contents write
+nothing, including after restart; conflicting ids and a second final
+verification for a completion are rejected. `unknown` is final too. A new
+followup can have another receipt for its next own completed finish. A copied
+fork finish cannot be verified as own work.
+
+Logs keep run, sequence and trace ids plus quality facts. Traces label model
+judgments with `fw.outcome.basis="grader_judgment"` and application observations
+with `fw.quality.basis="trusted_application"`. A late receipt gets a short
+`fw.quality.observation` span in the run's trace, not a reopened execution span.
+Recovery ends add `fw.recovery` span events with result and duration. Trace/log
+ids can be sensitive operational data; they are never metric labels.
+
+The added alert group covers low verification throughput, intervention load,
+slow recovery, confirmed duplicates, unknown successful cost, and high own
+successful cost. Tune its thresholds. Enable the verification policy only
+where the integration contract promises receipts. Prometheus remains a trend
+store: restarts reset counters and exports can miss work before process loss.

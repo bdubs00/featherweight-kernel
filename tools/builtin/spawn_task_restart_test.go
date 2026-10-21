@@ -241,6 +241,10 @@ func TestSpawnTaskRerunAfterARestartTakesTheSameChild(t *testing.T) {
 	cut.cut.Store(true) // the parent process dies here
 	dead.cut.Store(true)
 	release()
+	// Process death releases the file owner as well as stopping writes.
+	if err := cut.Ledger.(*fw.FileLedger).Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	second := newScripted()
 	second.then("parent", parentGot(t))
@@ -300,6 +304,9 @@ func TestSpawnTaskRerunAfterARestartTakesTheSameLocalChild(t *testing.T) {
 	stop, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	a.Close(stop)
 	cancel()
+	if err := cut.Ledger.(*fw.FileLedger).Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	second := newScripted()
 	second.say("the subtask", endTurn("subtask done"))

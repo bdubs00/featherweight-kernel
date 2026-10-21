@@ -86,6 +86,11 @@ func (l *FileLedger) resetEgressCursor(path string) (uint64, error) {
 
 // LoadEgressCursor implements EgressCursors.
 func (l *FileLedger) LoadEgressCursor(ctx context.Context, route, runID string) (uint64, error) {
+	l.lifetime.RLock()
+	defer l.lifetime.RUnlock()
+	if err := l.writable(); err != nil {
+		return 0, err
+	}
 	if err := checkRunID(runID); err != nil {
 		return 0, err
 	}
@@ -203,6 +208,11 @@ func findEgressCursor(ctx context.Context, f *os.File, seq, hintSeq uint64, hint
 // sequence number whose events the bus confirmed or the filter skipped,
 // and one egress owns each route.
 func (l *FileLedger) SaveEgressCursor(ctx context.Context, route, runID string, seq uint64) error {
+	l.lifetime.RLock()
+	defer l.lifetime.RUnlock()
+	if err := l.writable(); err != nil {
+		return err
+	}
 	if err := checkRunID(runID); err != nil {
 		return err
 	}

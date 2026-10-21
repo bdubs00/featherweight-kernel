@@ -156,6 +156,7 @@ func (l *Logs) Observe(e fw.Event) {
 		attribute.Int64("fw.seq", int64(e.Seq)),
 		attribute.String("fw.agent", agentOf(e.Source)),
 	)
+	r.AddAttributes(qualityAttributes(e)...)
 	if e.Node != "" {
 		r.AddAttributes(attribute.String("fw.node", e.Node))
 	}

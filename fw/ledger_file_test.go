@@ -17,6 +17,7 @@ func TestFileLedgerAppendReadRunsIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l.Close()
 	for i, typ := range []string{EvRunQueued, EvRunStarted, EvApprovalRequested, EvApprovalDecided} {
 		seq, err := l.Append(ctx, MustEvent("A", typ, TurnData{Turn: i}))
 		if err != nil || seq != uint64(i+1) {
@@ -29,8 +30,8 @@ func TestFileLedgerAppendReadRunsIndex(t *testing.T) {
 	if _, err := l.Append(ctx, MustEvent("A", EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted})); err != nil {
 		t.Fatal(err)
 	}
-	if n := l.syncs.Load(); n != 3 {
-		t.Fatalf("fsync calls = %d, want 3 (two approvals and one terminal event)", n)
+	if n := l.syncs.Load(); n != 5 {
+		t.Fatalf("fsync calls = %d, want 5 (two queues, two approvals, one terminal event)", n)
 	}
 	if _, err := l.Append(ctx, MustEvent("../x", EvRunQueued, nil)); err == nil {
 		t.Fatal("a path in the run id was accepted")
@@ -94,6 +95,9 @@ func TestFileLedgerReopenAndTornLine(t *testing.T) {
 	if err := l.Flush(); err != nil {
 		t.Fatal(err)
 	}
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
 	// A crash in the middle of a write leaves a partial line.
 	f, err := os.OpenFile(filepath.Join(dir, "R", "ledger.jsonl"), os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
@@ -106,6 +110,7 @@ func TestFileLedgerReopenAndTornLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer l2.Close()
 	n := 0
 	for _, err := range l2.Read(ctx, "R", 0) {
 		if err != nil {
@@ -135,6 +140,7 @@ func TestFileLedgerReopenAndTornLine(t *testing.T) {
 func TestFileLedgerWatch(t *testing.T) {
 	ctx := testCtx(t)
 	l, _ := OpenFileLedger(t.TempDir())
+	defer l.Close()
 	for range 3 {
 		if _, err := l.Append(ctx, MustEvent("W", EvTurnStarted, nil)); err != nil {
 			t.Fatal(err)
@@ -183,9 +189,19 @@ func TestFileLedgerDriverWithAgent(t *testing.T) {
 	if fl, ok := l.(*FileLedger); !ok || fl.Dir() != filepath.Join(home, "runs") {
 		t.Fatalf("ledger = %T", l)
 	}
+	if err := l.(*FileLedger).Close(); err != nil {
+		t.Fatal(err)
+	}
 	cfg.Ledger.Path = filepath.Join(home, "elsewhere")
-	if l, _ := OpenLedger(ctx, cfg); l.(*FileLedger).Dir() != cfg.Ledger.Path {
+	l, err = OpenLedger(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.(*FileLedger).Dir() != cfg.Ledger.Path {
 		t.Fatal("Ledger.Path does not override the directory")
+	}
+	if err := l.(*FileLedger).Close(); err != nil {
+		t.Fatal(err)
 	}
 	cfg.Ledger.Path = ""
 

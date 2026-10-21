@@ -1040,6 +1040,11 @@ func (s *server) decodeLimit(w http.ResponseWriter, r *http.Request, v any, limi
 // fail maps a kernel error to a problem document.
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, fw.ErrSaturated):
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+		problem(w, r, http.StatusTooManyRequests, "run admission is full; retry after the indicated delay with the same idempotency key")
+	case errors.Is(err, fw.ErrStorageUnavailable):
+		problem(w, r, http.StatusServiceUnavailable, "storage failed; execution is blocked until the agent restarts; retry with the same idempotency key after recovery")
 	case errors.Is(err, fw.ErrAuthzUnavailable):
 		// The control plane of the authorization did not answer. A 503 tells
 		// the caller to try again, which a 403 would not.

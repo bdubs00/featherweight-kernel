@@ -158,6 +158,13 @@ func TestRegistryNames(t *testing.T) {
 	m.CountBusMessage("nats", DirectionIn)
 	m.ledgerEvents.WithLabelValues(fw.EvRunQueued)
 	m.ObserveLedgerAppend("file", time.Millisecond)
+	m.quality.completions.WithLabelValues("completed", "unverified")
+	m.quality.verifications.WithLabelValues("unknown")
+	m.quality.interventions.WithLabelValues("followup")
+	m.quality.perRun.WithLabelValues("complete")
+	m.quality.recovery.WithLabelValues("progress")
+	m.quality.cost.WithLabelValues("accepted")
+	m.quality.costExcluded.WithLabelValues("unpriced_tokens")
 	f := newFeed(m, "r1", "a")
 	f.emit(fw.EvApprovalRequested, fw.ApprovalRequestedData{ApprovalID: "ap1", Tool: "rm"})
 	mfs, err := reg.Gather()
@@ -168,28 +175,37 @@ func TestRegistryNames(t *testing.T) {
 		typ    dto.MetricType
 		labels []string
 	}{
-		"fw_runs_total":                         {dto.MetricType_COUNTER, []string{"agent", "batch", "outcome"}},
-		"fw_runs_queued_total":                  {dto.MetricType_COUNTER, []string{"agent", "batch", "origin"}},
-		"fw_budget_exceeded_total":              {dto.MetricType_COUNTER, []string{"agent", "limit"}},
-		"fw_model_unpriced_tokens_total":        {dto.MetricType_COUNTER, []string{"model", "provider"}},
-		"fw_approvals_oldest_timestamp_seconds": {dto.MetricType_GAUGE, []string{"agent"}},
-		"fw_loops_total":                        {dto.MetricType_COUNTER, []string{"action", "agent"}},
-		"fw_runs_active":                        {dto.MetricType_GAUGE, []string{"agent"}},
-		"fw_run_duration_seconds":               {dto.MetricType_HISTOGRAM, []string{"agent"}},
-		"fw_run_turns":                          {dto.MetricType_HISTOGRAM, []string{"agent"}},
-		"fw_model_requests_total":               {dto.MetricType_COUNTER, []string{"model", "outcome", "provider"}},
-		"fw_model_request_duration_seconds":     {dto.MetricType_HISTOGRAM, []string{"model", "provider"}},
-		"fw_model_tokens_total":                 {dto.MetricType_COUNTER, []string{"kind", "model", "provider"}},
-		"fw_model_cost_usd_total":               {dto.MetricType_COUNTER, []string{"model", "provider"}},
-		"fw_tool_calls_total":                   {dto.MetricType_COUNTER, []string{"outcome", "tool"}},
-		"fw_tool_call_duration_seconds":         {dto.MetricType_HISTOGRAM, []string{"tool"}},
-		"fw_mcp_server_up":                      {dto.MetricType_GAUGE, []string{"server"}},
-		"fw_approvals_pending":                  {dto.MetricType_GAUGE, []string{"agent"}},
-		"fw_approvals_total":                    {dto.MetricType_COUNTER, []string{"decision"}},
-		"fw_bus_messages_total":                 {dto.MetricType_COUNTER, []string{"direction", "driver"}},
-		"fw_ledger_events_total":                {dto.MetricType_COUNTER, []string{"type"}},
-		"fw_ledger_append_duration_seconds":     {dto.MetricType_HISTOGRAM, []string{"driver"}},
-		"fw_build_info":                         {dto.MetricType_GAUGE, []string{"commit", "go", "version"}},
+		"fw_task_completions_total":              {dto.MetricType_COUNTER, []string{"execution", "grader_judgment"}},
+		"fw_task_verifications_total":            {dto.MetricType_COUNTER, []string{"result"}},
+		"fw_operator_interventions_total":        {dto.MetricType_COUNTER, []string{"kind"}},
+		"fw_operator_interventions_per_run":      {dto.MetricType_HISTOGRAM, []string{"coverage"}},
+		"fw_recovery_duration_seconds":           {dto.MetricType_HISTOGRAM, []string{"result"}},
+		"fw_confirmed_duplicate_effects_total":   {dto.MetricType_COUNTER, nil},
+		"fw_ambiguous_tool_retries_total":        {dto.MetricType_COUNTER, nil},
+		"fw_successful_task_cost_usd":            {dto.MetricType_HISTOGRAM, []string{"basis"}},
+		"fw_successful_task_cost_excluded_total": {dto.MetricType_COUNTER, []string{"reason"}},
+		"fw_runs_total":                          {dto.MetricType_COUNTER, []string{"agent", "batch", "outcome"}},
+		"fw_runs_queued_total":                   {dto.MetricType_COUNTER, []string{"agent", "batch", "origin"}},
+		"fw_budget_exceeded_total":               {dto.MetricType_COUNTER, []string{"agent", "limit"}},
+		"fw_model_unpriced_tokens_total":         {dto.MetricType_COUNTER, []string{"model", "provider"}},
+		"fw_approvals_oldest_timestamp_seconds":  {dto.MetricType_GAUGE, []string{"agent"}},
+		"fw_loops_total":                         {dto.MetricType_COUNTER, []string{"action", "agent"}},
+		"fw_runs_active":                         {dto.MetricType_GAUGE, []string{"agent"}},
+		"fw_run_duration_seconds":                {dto.MetricType_HISTOGRAM, []string{"agent"}},
+		"fw_run_turns":                           {dto.MetricType_HISTOGRAM, []string{"agent"}},
+		"fw_model_requests_total":                {dto.MetricType_COUNTER, []string{"model", "outcome", "provider"}},
+		"fw_model_request_duration_seconds":      {dto.MetricType_HISTOGRAM, []string{"model", "provider"}},
+		"fw_model_tokens_total":                  {dto.MetricType_COUNTER, []string{"kind", "model", "provider"}},
+		"fw_model_cost_usd_total":                {dto.MetricType_COUNTER, []string{"model", "provider"}},
+		"fw_tool_calls_total":                    {dto.MetricType_COUNTER, []string{"outcome", "tool"}},
+		"fw_tool_call_duration_seconds":          {dto.MetricType_HISTOGRAM, []string{"tool"}},
+		"fw_mcp_server_up":                       {dto.MetricType_GAUGE, []string{"server"}},
+		"fw_approvals_pending":                   {dto.MetricType_GAUGE, []string{"agent"}},
+		"fw_approvals_total":                     {dto.MetricType_COUNTER, []string{"decision"}},
+		"fw_bus_messages_total":                  {dto.MetricType_COUNTER, []string{"direction", "driver"}},
+		"fw_ledger_events_total":                 {dto.MetricType_COUNTER, []string{"type"}},
+		"fw_ledger_append_duration_seconds":      {dto.MetricType_HISTOGRAM, []string{"driver"}},
+		"fw_build_info":                          {dto.MetricType_GAUGE, []string{"commit", "go", "version"}},
 	}
 	if len(mfs) != len(want) {
 		t.Fatalf("registry has %d families, want %d", len(mfs), len(want))

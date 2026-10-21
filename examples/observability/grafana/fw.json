@@ -1229,6 +1229,74 @@
         }
       ]
     }
+    ,{
+      "type": "row", "title": "Task quality (all agents; trusted receipts, not model claims)", "id": 30,
+      "collapsed": false, "panels": [], "gridPos": {"h": 1, "w": 24, "x": 0, "y": 64}
+    },
+    {
+      "type": "timeseries", "title": "Verified completion throughput ratio", "id": 31,
+      "description": "External satisfied receipts / all own terminal episodes (failed and canceled included). Late receipts cross windows; this is a throughput estimate, not a cohort SLO. Grader satisfied is not external verification.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 65},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "(sum(rate(fw_task_verifications_total{result=\"satisfied\"}[$__rate_interval])) or vector(0)) / sum(rate(fw_task_completions_total[$__rate_interval]))", "legendFormat": "externally verified / terminal episodes"}]
+    },
+    {
+      "type": "timeseries", "title": "Execution completions and final verification receipts", "id": 32,
+      "description": "Completions supply the denominator. Missing receipts are unverified; explicit unknown is final. Model grader judgment is a separate completion label. Receipt and completion times can differ.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 65},
+      "targets": [
+        {"refId": "A", "expr": "sum by (execution, grader_judgment) (rate(fw_task_completions_total[$__rate_interval]))", "legendFormat": "execution {{execution}}; grader {{grader_judgment}}"},
+        {"refId": "B", "expr": "sum by (result) (rate(fw_task_verifications_total[$__rate_interval]))", "legendFormat": "application {{result}}"}
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Operator interventions per completion episode", "id": 33,
+      "description": "Complete-history episodes, including zero; concrete decisions, interactive user followups and attributed interactive budget changes. Not proof that a human caused every action.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 73},
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(fw_operator_interventions_per_run_sum{coverage=\"complete\"}[$__rate_interval])) / sum(rate(fw_operator_interventions_per_run_count{coverage=\"complete\"}[$__rate_interval]))", "legendFormat": "mean actions / episode"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(fw_operator_interventions_per_run_bucket{coverage=\"complete\"}[$__rate_interval])))", "legendFormat": "p95 actions / episode"}
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Recovery p95 by result", "id": 34,
+      "description": "Resume to first model/tool response or tool progress, or terminal/suspend. Excludes sleep before resume. Failed, canceled and interrupted attempts are separate from recovered progress.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 73},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le, result) (rate(fw_recovery_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "{{result}}"}]
+    },
+    {
+      "type": "timeseries", "title": "Confirmed duplicate effects vs ambiguous tool retries", "id": 35,
+      "description": "Confirmed counts require trusted authoritative application receipts. Re-requesting an outstanding tool call id is only an ambiguous attempt. Zero confirmed effects without integration receipts means unobserved, not exactly-once.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 81},
+      "targets": [
+        {"refId": "A", "expr": "sum(increase(fw_confirmed_duplicate_effects_total[1h]))", "legendFormat": "confirmed extra effects / hour"},
+        {"refId": "B", "expr": "sum(increase(fw_ambiguous_tool_retries_total[1h]))", "legendFormat": "ambiguous retries / hour"}
+      ]
+    },
+    {
+      "type": "timeseries", "title": "Own cost per successful task (priced receipts only)", "id": 36,
+      "description": "Mean own completion-episode model cost, by accepted or external satisfied basis. Excludes children, graders, non-model costs and receipts with unpriced tokens or missing usage. Not root-tree cost or total spend / successes.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 81},
+      "fieldConfig": {"defaults": {"unit": "currencyUSD", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (basis) (rate(fw_successful_task_cost_usd_sum[$__rate_interval])) / sum by (basis) (rate(fw_successful_task_cost_usd_count[$__rate_interval]))", "legendFormat": "{{basis}}"}]
+    },
+    {
+      "type": "timeseries", "title": "Cost coverage: included and excluded successful receipts", "id": 37,
+      "description": "Unknown cost is excluded, never treated as zero. A zero price is explicit and valid. No verification receipt means no successful-cost sample.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 7, "w": 24, "x": 0, "y": 89},
+      "targets": [
+        {"refId": "A", "expr": "sum by (basis) (increase(fw_successful_task_cost_usd_count[1h]))", "legendFormat": "included {{basis}}"},
+        {"refId": "B", "expr": "sum by (reason) (increase(fw_successful_task_cost_excluded_total[1h]))", "legendFormat": "excluded {{reason}}"}
+      ]
+    }
   ],
   "refresh": "1m",
   "schemaVersion": 38,

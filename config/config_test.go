@@ -68,6 +68,7 @@ func TestEnvOverrides(t *testing.T) {
 		{"mcp path", map[string]string{"FW_MCP_PATH": "/m"}, func(c *fw.Config) any { return c.MCP.Path }, "/m"},
 		{"int", map[string]string{"FW_TOOLS_SEARCH_THRESHOLD": "40"}, func(c *fw.Config) any { return c.Tools.SearchThreshold }, 40},
 		{"max runs", map[string]string{"FW_MAX_RUNS": "4"}, func(c *fw.Config) any { return c.MaxRuns }, 4},
+		{"max queued runs", map[string]string{"FW_MAX_QUEUED_RUNS": "7"}, func(c *fw.Config) any { return c.MaxQueuedRuns }, 7},
 		{"duration", map[string]string{"FW_BUDGET_DEADLINE": "30m"}, func(c *fw.Config) any { return c.Budget.Deadline }, 30 * time.Minute},
 		{"acronym duration", map[string]string{"FW_MCP_TASK_TTL": "2h"}, func(c *fw.Config) any { return c.MCP.TaskTTL }, 2 * time.Hour},
 		{"bool", map[string]string{"FW_MCP_TASKS": "false"}, func(c *fw.Config) any { return c.MCP.Tasks }, false},
@@ -613,6 +614,7 @@ providers:
 surfaces: [native, ""]
 telemetry: {log: loud}
 maxRuns: -1
+maxQueuedRuns: -1
 bus: {intakeRetries: -1}
 budget: {maxTurns: -1, maxTokens: -2, maxCostUSD: -0.5, deadline: -1s, maxToolCalls: -1, maxCallsPerTurn: -1, maxRepeats: -1}
 spawn: {maxDepth: -1, maxChildren: -1}
@@ -644,7 +646,7 @@ agents:
 	wants := []string{
 		"auth.mode", "effort \"extreme\"", "listen is empty", "model \"claude\"", "models.fast",
 		"providers.OpenAI: a provider name", "providers.my-vllm: a provider name", "providers.my-vllm.timeout -1s is negative",
-		"surfaces[1]", "telemetry.log", "maxRuns -1 is negative", "bus.intakeRetries -1 is negative",
+		"surfaces[1]", "telemetry.log", "maxRuns -1 is negative", "maxQueuedRuns -1 is negative", "bus.intakeRetries -1 is negative",
 		"budget.maxTurns -1", "budget.maxTokens -2", "budget.maxCostUSD -0.5", "budget.deadline -1s", "budget.maxToolCalls -1", "budget.maxCallsPerTurn -1", "budget.maxRepeats -1",
 		"spawn.maxDepth -1", "spawn.maxChildren -1", "tools.bash.timeout -1s",
 		"compaction.at -1 is negative", "compaction.model \"nosuch\"", "tools.memory.scope \"team\"",

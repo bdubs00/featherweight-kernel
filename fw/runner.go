@@ -218,7 +218,8 @@ func (h *Hosted) Decide(ctx context.Context, call ToolCall) Decision {
 // and the error of fw.run.finished, such as "budget exceeded: maxTurns".
 // The runner records both; a hosted run makes no final report.
 func (h *Hosted) Over() (BudgetExceededData, string, bool) {
-	o, over := h.a.overBudget(h.rs, analyze(h.rs.eventLog()))
+	c, _ := h.rs.executionCursor()
+	o, over := h.a.overBudget(h.rs, c)
 	if !over {
 		return BudgetExceededData{}, "", false
 	}

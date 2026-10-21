@@ -47,6 +47,10 @@ var (
 	// this process knows already: a run of this process, a child of one in
 	// another process, or a run of the ledger. A surface answers 409.
 	ErrRunExists = errors.New("fw: a run with that id exists")
+	// ErrSaturated means the finite direct-run backlog is full. Retry later.
+	ErrSaturated = errors.New("fw: run admission is full; retry later")
+	// ErrStorageUnavailable means storage failed and this process requires restart.
+	ErrStorageUnavailable = errors.New("fw: storage unavailable; restart required")
 )
 
 // OriginKernel marks a message that the kernel adds itself, such as the
@@ -54,8 +58,9 @@ var (
 const OriginKernel = "kernel"
 
 const (
-	defaultMaxRuns   = 16 // when Config.MaxRuns is 0 outside ax; a Task runs one at a time
-	defaultMaxTokens = 64000
+	defaultMaxRuns       = 16 // when Config.MaxRuns is 0 outside ax; a Task runs one at a time
+	defaultMaxQueuedRuns = 64
+	defaultMaxTokens     = 64000
 )
 
 // kernel holds the runtime state of the agent: the run cache, the drivers of
@@ -91,11 +96,13 @@ type kernel struct {
 	admitted     int
 	slotsChanged chan struct{}
 
-	lifeMu   sync.Mutex
-	draining bool
-	drainCh  chan struct{} // closed when shutdown starts
-	closedCh chan struct{} // closed when shutdown ends
-	wg       sync.WaitGroup
+	lifeMu     sync.Mutex
+	draining   bool
+	drainCh    chan struct{} // closed when shutdown starts
+	closedCh   chan struct{} // closed when shutdown ends
+	storageErr error         // first storage failure; guarded by lifeMu
+	failedCh   chan struct{} // closed on the first storage failure
+	wg         sync.WaitGroup
 
 	ctx    context.Context // parent of every run context
 	cancel context.CancelFunc
@@ -139,13 +146,19 @@ type runState struct {
 	// standIn marks the record of a child or a branch that never got its
 	// run in another process (fork.go). Nothing drives it: it takes no
 	// message, no decision, and no branch, and a restart does not resume it.
-	standIn bool
+	standIn    bool
+	owner      *kernel
+	acceptDone chan struct{} // non-nil while a Start owns durable acceptance
+	acceptErr  error         // published by closing acceptDone
+	reserved   bool          // root admission held before driver launch; guarded by mu
 
 	emitMu    sync.Mutex
 	events    []Event // the full log while a driver holds a reference
 	eventsRef int
 	hist      *historyBuilder // incremental history over events
 	histN     int             // number of events that hist consumed
+	exec      *cursorBuilder  // incremental execution cursor, guarded by emitMu
+	execN     int             // number of events that exec consumed
 
 	mu        sync.Mutex
 	run       Run
@@ -169,6 +182,7 @@ func (k *kernel) newRunState(id, agent, trace string) *runState {
 	}
 	return &runState{
 		id:      id,
+		owner:   k,
 		agent:   agent,
 		source:  fmt.Sprintf("fw://%s/%s/%s", k.atespace, agent, id),
 		trace:   trace,
@@ -201,6 +215,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		drainCh:      make(chan struct{}),
 		slotsChanged: make(chan struct{}),
 		closedCh:     make(chan struct{}),
+		failedCh:     make(chan struct{}),
 		ctx:          kctx,
 		cancel:       cancel,
 	}
@@ -310,6 +325,7 @@ func (a *Agent) shutdownKernel(ctx context.Context) {
 		if f, ok := a.ledger.(interface{ Flush() error }); ok {
 			if err := f.Flush(); err != nil {
 				a.log.Error("flush ledger", "error", err)
+				a.failStorage(fmt.Errorf("fw: flush ledger: %w", err))
 			}
 		}
 		a.closeResources()
@@ -374,7 +390,7 @@ func (rs *runState) drivable() error {
 func (k *kernel) isDraining() bool {
 	k.lifeMu.Lock()
 	defer k.lifeMu.Unlock()
-	return k.draining
+	return k.draining || k.storageErr != nil
 }
 
 func (k *kernel) lookup(id string) (*runState, error) {
@@ -429,8 +445,8 @@ func (a *Agent) Start(ctx context.Context, input string, opts ...RunOption) (*Ru
 // start appends fw.run.queued for a request and launches its driver.
 func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	k := a.k
-	if k.isDraining() {
-		return nil, ErrClosed
+	if err := k.writeError(); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(req.Input) == "" && len(req.Files) == 0 {
 		return nil, fmt.Errorf("%w: run input is empty", ErrInvalidRequest)
@@ -512,11 +528,14 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		// left now. A new child starts only while the tree has some of
 		// every limit that the tree shares.
 		if prev := k.keyed(req.Principal, req.IdempotencyKey); prev != nil {
-			return prev.snapshot(), nil
+			return prev.accepted(ctx)
 		}
 		if o, spent := a.limitSpent(p); spent {
 			return nil, o.refusal()
 		}
+	}
+	if prev := k.keyed(req.Principal, req.IdempotencyKey); prev != nil {
+		return prev.accepted(ctx)
 	}
 	if namedID {
 		if err := a.checkNamedID(ctx, req); err != nil {
@@ -561,6 +580,7 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		return nil, err
 	}
 	rs := k.newRunState(req.ID, req.Agent, "")
+	rs.acceptDone = make(chan struct{})
 	rs.parent, rs.depth, rs.text = req.Parent, depth, text
 	_ = ev.Decode(&rs.queued)
 	rs.maxDesc = maxDescOf(rs.queued.Metadata)
@@ -576,13 +596,24 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		if id, ok := k.idem[idemKey(req.Principal, req.IdempotencyKey)]; ok {
 			prev := k.runs[id]
 			k.mu.Unlock()
-			return prev.snapshot(), nil
+			return prev.accepted(ctx)
 		}
 	}
 	if err := k.claimableLocked(req.ID); err != nil {
 		k.mu.Unlock()
 		return nil, err
 	}
+	// Register acceptance before publication so shutdown cannot finish its
+	// wait while an initial append is still in flight.
+	k.lifeMu.Lock()
+	if err := k.writeErrorLocked(); err != nil {
+		k.lifeMu.Unlock()
+		k.mu.Unlock()
+		return nil, err
+	}
+	k.wg.Add(1)
+	k.lifeMu.Unlock()
+	defer k.wg.Done()
 	if parent != nil {
 		if max := a.cfg.Spawn.MaxChildren; max > 0 && k.kids[req.Parent] >= max {
 			k.mu.Unlock()
@@ -600,11 +631,13 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 		k.idem[idemKey(req.Principal, req.IdempotencyKey)] = req.ID
 	}
 	k.mu.Unlock()
+	defer func() { close(rs.acceptDone) }()
 
 	rs.emitMu.Lock()
 	_, err = a.appendLocked(nil, rs, ev)
 	rs.emitMu.Unlock()
 	if err != nil {
+		rs.acceptErr = err
 		k.mu.Lock()
 		delete(k.runs, req.ID)
 		if parent != nil {
@@ -619,8 +652,15 @@ func (a *Agent) start(ctx context.Context, req RunRequest) (*Run, error) {
 	}
 	for _, d := range changes {
 		if _, err := a.emit(nil, rs, EvFileChanged, d); err != nil {
+			rs.acceptErr = err
+			a.releaseAdmission(rs)
 			return nil, err
 		}
+	}
+	if err := k.writeError(); err != nil {
+		rs.acceptErr = err
+		a.releaseAdmission(rs)
+		return nil, err
 	}
 	rs.mu.Lock()
 	a.launchLocked(rs)
@@ -661,6 +701,13 @@ func (a *Agent) waitFor(ctx context.Context, id string, done func(*Run) bool) (*
 	rs, err := a.k.lookup(id)
 	if err != nil {
 		if ref, ok := a.remoteChild(id); ok {
+			if failure := a.k.storageError(); failure != nil {
+				r, err := a.getRemote(ctx, id, ref)
+				if err != nil {
+					return r, err
+				}
+				return r, failure
+			}
 			if r, ok := ref.starting(); ok {
 				// The child is on its way to its process. Wait for the
 				// start to end, then ask again: the child is then in that
@@ -694,6 +741,9 @@ func (a *Agent) waitFor(ctx context.Context, id string, done func(*Run) bool) (*
 		rs.mu.Lock()
 		cur, ch := cloneRun(&rs.run), rs.changed
 		rs.mu.Unlock()
+		if err := a.k.storageError(); err != nil && !cur.State.Terminal() {
+			return a.report(rs), err
+		}
 		if done(cur) {
 			return a.withTree(rs, cur), nil
 		}
@@ -703,6 +753,8 @@ func (a *Agent) waitFor(ctx context.Context, id string, done func(*Run) bool) (*
 			return a.report(rs), ctx.Err()
 		case <-a.k.closedCh:
 			return a.report(rs), ErrClosed
+		case <-a.k.failedCh:
+			return a.report(rs), a.k.storageError()
 		}
 	}
 }
@@ -985,8 +1037,8 @@ func WithSendBudget(b Budget) SendOption { return func(o *sendOptions) { o.budge
 // run in the same step, before the message, so the turn that the message
 // starts has the new limits.
 func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string, opts ...SendOption) error {
-	if a.k.isDraining() {
-		return ErrClosed
+	if err := a.k.writeError(); err != nil {
+		return err
 	}
 	var o sendOptions
 	for _, opt := range opts {
@@ -1016,12 +1068,22 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 			return err
 		}
 	}
+	// The message can start a driver. Reserve its place before any write,
+	// even while a driver is active, because the driver can idle before the
+	// message lands: a full backlog then changes nothing of the run. The
+	// launch below moves the place to the driver, and the release gives it
+	// back when the active driver takes the message instead.
+	if err := a.reserveAdmissionFor(rs); err != nil {
+		return err
+	}
 	content, changes, err := a.keepFiles(a.dirOf(rs), msg.Content)
 	if err != nil {
+		a.releaseAdmission(rs)
 		return err
 	}
 	for _, d := range changes {
 		if _, err := a.emit(nil, rs, EvFileChanged, d); err != nil {
+			// appendLocked released the reservation on its failure.
 			return err
 		}
 	}
@@ -1047,6 +1109,9 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 		a.launchLocked(rs)
 	}
 	rs.mu.Unlock()
+	// The launch consumed the place, or the active driver holds the run and
+	// the place goes back to the backlog.
+	a.releaseAdmission(rs)
 	return nil
 }
 
@@ -1066,8 +1131,8 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 // budget of the run after the change (see RunBudget). A child in another
 // process changes its budget in its own process.
 func (a *Agent) ChangeBudget(ctx context.Context, id string, change Budget, origin string) (Budget, error) {
-	if a.k.isDraining() {
-		return Budget{}, ErrClosed
+	if err := a.k.writeError(); err != nil {
+		return Budget{}, err
 	}
 	rs, err := a.k.lookup(id)
 	if err != nil {
@@ -1123,8 +1188,8 @@ func subjectOf(ctx context.Context) string {
 // Decide answers a pending approval. The decider is d.Decider, or the
 // principal in ctx.
 func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error {
-	if a.k.isDraining() {
-		return ErrClosed
+	if err := a.k.writeError(); err != nil {
+		return err
 	}
 	rs, err := a.k.lookup(id)
 	if err != nil {
@@ -1231,6 +1296,9 @@ func (a *Agent) Cancel(ctx context.Context, id string) error {
 // cancelRun is Cancel with the error that fw.run.finished records for the
 // run and for each run under it in this process.
 func (a *Agent) cancelRun(ctx context.Context, id, reason string) error {
+	if err := a.k.storageError(); err != nil {
+		return err
+	}
 	rs, err := a.k.lookup(id)
 	if err != nil {
 		if ref, ok := a.remoteChild(id); ok {
@@ -1345,8 +1413,19 @@ func withTotals(rs *runState, data any) any {
 // updates the cached status and the in-memory log, and then notifies the
 // observers.
 func (a *Agent) appendLocked(guard context.Context, rs *runState, e Event) (Event, error) {
+	if err := a.k.storageError(); err != nil {
+		return Event{}, err
+	}
 	if guard != nil && guard.Err() != nil {
 		return Event{}, errStopped
+	}
+	// Reserve before writing an event that can start direct work. The
+	// reservation transfers to its driver, so concurrent starts cannot
+	// overbook the backlog while their ledger writes are in flight.
+	if e.Type == EvRunQueued || e.Type == EvMessageReceived || e.Type == EvApprovalDecided {
+		if err := a.reserveAdmission(rs); err != nil {
+			return Event{}, err
+		}
 	}
 	e.Time = a.now().UTC()
 	e.Source = rs.source
@@ -1356,12 +1435,18 @@ func (a *Agent) appendLocked(guard context.Context, rs *runState, e Event) (Even
 	began := time.Now()
 	seq, err := a.ledger.Append(context.Background(), e)
 	if err != nil {
-		return Event{}, fmt.Errorf("fw: append %s to run %s: %w", e.Type, rs.id, err)
+		err = a.failStorage(fmt.Errorf("fw: append %s to run %s: %w", e.Type, rs.id, err))
+		a.releaseAdmission(rs)
+		return Event{}, err
 	}
 	a.observeAppend(time.Since(began))
 	e.Seq = seq
 	rs.mu.Lock()
 	rs.run.Apply(e, a.prices)
+	if IsTerminal(e.Type) && rs.reserved {
+		rs.reserved = false
+		a.k.addRootDriver(-1)
+	}
 	close(rs.changed)
 	rs.changed = make(chan struct{})
 	rs.mu.Unlock()
@@ -1390,8 +1475,12 @@ func (a *Agent) releaseRun(id string) {
 func (a *Agent) launchLocked(rs *runState) {
 	k := a.k
 	k.lifeMu.Lock()
-	if k.draining {
+	if k.draining || k.storageErr != nil {
 		k.lifeMu.Unlock()
+		if rs.reserved {
+			rs.reserved = false
+			k.addRootDriver(-1)
+		}
 		return
 	}
 	k.wg.Add(1)
@@ -1400,7 +1489,11 @@ func (a *Agent) launchLocked(rs *runState) {
 	rs.active = true
 	rs.cancel, rs.drvCtx = cancel, ctx
 	if rs.depth == 0 {
-		k.addRootDriver(1)
+		if !rs.reserved {
+			// Recovery resumes work already accepted by the ledger.
+			k.addRootDriver(1)
+		}
+		rs.reserved = false
 	}
 	go a.runDriver(ctx, cancel, rs)
 }
@@ -1431,6 +1524,9 @@ func (a *Agent) runDriver(ctx context.Context, cancel context.CancelFunc, rs *ru
 	}
 	defer cancel()
 	reason := a.driverBody(ctx, rs)
+	if reason == exitError && a.k.storageError() == nil {
+		a.failStorage(fmt.Errorf("fw: driver of run %s stopped after a ledger failure", rs.id))
+	}
 	if reason == exitIdle {
 		return
 	}
@@ -1474,6 +1570,7 @@ func (a *Agent) driverBody(ctx context.Context, rs *runState) exitReason {
 	}
 	if err := a.holdEvents(rs); err != nil {
 		a.log.Error("load run", "run", rs.id, "error", err)
+		a.failStorage(fmt.Errorf("fw: load run %s: %w", rs.id, err))
 		return exitError
 	}
 	defer rs.releaseEvents()
@@ -1496,6 +1593,7 @@ func (a *Agent) holdEvents(rs *runState) error {
 		}
 		rs.events = evs
 		rs.hist, rs.histN = nil, 0
+		rs.exec, rs.execN = nil, 0
 	}
 	rs.eventsRef++
 	return nil
@@ -1507,6 +1605,7 @@ func (rs *runState) releaseEvents() {
 	rs.eventsRef--
 	if rs.eventsRef == 0 {
 		rs.events, rs.hist, rs.histN = nil, nil, 0
+		rs.exec, rs.execN = nil, 0
 	}
 }
 
@@ -1536,7 +1635,13 @@ func (rs *runState) historyLocked(extra int) (History, int) {
 func (rs *runState) snapshot() *Run {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	return cloneRun(&rs.run)
+	r := cloneRun(&rs.run)
+	if rs.owner != nil && !r.State.Terminal() {
+		if err := rs.owner.storageError(); err != nil {
+			r.Blocked = err.Error()
+		}
+	}
+	return r
 }
 
 // usage returns a copy of the usage of the run.

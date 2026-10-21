@@ -89,54 +89,79 @@ func TestSpawnChildRecordIsDurableBeforeTheSpawner(t *testing.T) {
 type refuseStarts struct {
 	Ledger
 	refused atomic.Int32
+	after   bool
 }
 
 func (l *refuseStarts) Append(ctx context.Context, e Event) (uint64, error) {
 	var d RunChildData
 	if e.Type == EvRunChild && json.Unmarshal(e.Data, &d) == nil && d.Started {
 		l.refused.Add(1)
+		if l.after {
+			if _, err := l.Ledger.Append(ctx, e); err != nil {
+				return 0, err
+			}
+		}
 		return 0, errors.New("disk full")
 	}
 	return l.Ledger.Append(ctx, e)
 }
 
-// A parent that cannot record the start of its child does not report a
-// child that it cannot follow: it tries the record again, then cancels the
-// child, abandons its process, and returns an error. The child is recorded
-// as failed with the reason.
+// A failed start append can be on disk already. The parent fail-stops and
+// retains the child and its key without retrying or inventing a terminal
+// record. Restart reconstructs the start or finds the child from its intent.
 func TestSpawnChildWhoseStartIsNotRecorded(t *testing.T) {
-	ctx := testCtx(t)
-	other := newTestAgent(t, blockingModel(nil))
-	sp := newCrashSpawner(other)
-	l := &refuseStarts{Ledger: NewMemLedger()}
-	a := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithLedger(l), WithSpawner(sp))
-	parent, err := a.Run(ctx, "parent work")
-	mustState(t, parent, err, StateCompleted)
-	_, err = a.SpawnChild(ctx, parent.ID, NewRunRequest("do x"))
-	if err == nil || !strings.Contains(err.Error(), "record the start") {
-		t.Fatalf("SpawnChild = %v", err)
-	}
-	if n := l.refused.Load(); n != startRecordAttempts {
-		t.Fatalf("the record of the start was tried %d times, want %d", n, startRecordAttempts)
-	}
-	list, _ := other.List(ctx)
-	if len(list) != 1 {
-		t.Fatalf("the child process holds %+v", list)
-	}
-	child := list[0]
-	got, err := other.WaitFor(ctx, child.ID, func(r *Run) bool { return r.State.Terminal() })
-	if err != nil || got.State != StateCanceled {
-		t.Fatalf("the child that was not recorded = %+v, %v", got, err)
-	}
-	if _, created, abandoned := sp.counts(); len(created) != 1 || len(abandoned) != 1 || abandoned[0] != created[0] {
-		t.Fatalf("created %v, abandoned %v", created, abandoned)
-	}
-	r, err := a.Get(ctx, child.ID)
-	if err != nil || r.State != StateFailed || !strings.Contains(r.Error, "did not record the start") {
-		t.Fatalf("the record of the child here = %+v, %v", r, err)
-	}
-	if _, ok := a.remoteChild(child.ID); ok {
-		t.Fatal("the parent still counts the child as a child in another process")
+	for _, after := range []bool{false, true} {
+		t.Run(map[bool]string{false: "not stored", true: "ambiguous fsync"}[after], func(t *testing.T) {
+			ctx := testCtx(t)
+			other := newTestAgent(t, blockingModel(nil))
+			sp := newCrashSpawner(other)
+			base := NewMemLedger()
+			l := &refuseStarts{Ledger: base, after: after}
+			a := newTestAgent(t, newScript(endTurn("parent done")).Model(), WithLedger(l), WithSpawner(sp))
+			parent, err := a.Run(ctx, "parent work")
+			mustState(t, parent, err, StateCompleted)
+			req := NewRunRequest("do x", WithIdempotencyKey("same"))
+			_, err = a.SpawnChild(ctx, parent.ID, req)
+			if !errors.Is(err, ErrStorageUnavailable) || !strings.Contains(err.Error(), "record the start") {
+				t.Fatalf("SpawnChild = %v", err)
+			}
+			if n := l.refused.Load(); n != 1 {
+				t.Fatalf("the failed append was retried %d times", n)
+			}
+			if a.Ready() {
+				t.Fatal("storage failure left the parent ready")
+			}
+			list, _ := other.List(ctx)
+			if len(list) != 1 {
+				t.Fatalf("the child process holds %+v", list)
+			}
+			child := list[0]
+			if _, created, abandoned := sp.counts(); len(created) != 1 || len(abandoned) != 0 {
+				t.Fatalf("created %v, abandoned %v", created, abandoned)
+			}
+			r, err := a.Get(ctx, child.ID)
+			if err != nil || r.ID != child.ID || r.Blocked == "" || r.State.Terminal() {
+				t.Fatalf("blocked child = %+v, %v", r, err)
+			}
+			if _, ok := a.remoteChild(child.ID); !ok {
+				t.Fatal("ambiguous child was forgotten")
+			}
+			if _, err := a.SpawnChild(ctx, parent.ID, req); !errors.Is(err, ErrStorageUnavailable) {
+				t.Fatalf("retry during storage failure = %v", err)
+			}
+			a.Close(ctx)
+			resumed := newTestAgent(t, newScript().Model(), WithLedger(base), WithSpawner(sp))
+			r, err = resumed.SpawnChild(ctx, parent.ID, req)
+			if err != nil || r.ID != child.ID {
+				t.Fatalf("retry after restart = %+v, %v", r, err)
+			}
+			if _, created, abandoned := sp.counts(); len(created) != 1 || len(abandoned) != 0 {
+				t.Fatalf("restart duplicated or abandoned the child: created %v, abandoned %v", created, abandoned)
+			}
+			if err := other.Cancel(ctx, child.ID); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

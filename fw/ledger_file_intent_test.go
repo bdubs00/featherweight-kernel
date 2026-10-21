@@ -132,24 +132,22 @@ func TestFileLedgerSyncsToolIntent(t *testing.T) {
 	}
 }
 
-// The queue of a run from the bus intake reaches the disk before Append
-// returns, because the intake acknowledges the message then. The queue of
-// a run from any other origin stays cheap.
-func TestFileLedgerSyncsTheQueueOfABusRun(t *testing.T) {
+// Every surface acknowledges the queue, so every origin needs the boundary.
+func TestFileLedgerSyncsTheQueueOfEveryOrigin(t *testing.T) {
 	ctx := testCtx(t)
 	l, err := OpenFileLedger(filepath.Join(t.TempDir(), "runs"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	for _, origin := range []string{OriginHTTP, OriginBus} {
+	for _, origin := range []string{OriginHTTP, OriginBus, OriginCLI, OriginA2A, OriginMCP, OriginKernel, ""} {
 		before := l.syncs.Load()
 		if _, err := l.Append(ctx, MustEvent("R-"+origin, EvRunQueued, RunQueuedData{Agent: "default", Input: "x", Origin: origin})); err != nil {
 			t.Fatal(err)
 		}
 		synced := l.syncs.Load() > before
-		if want := origin == OriginBus; synced != want {
-			t.Errorf("origin %s: fsync = %v, want %v", origin, synced, want)
+		if !synced {
+			t.Errorf("origin %s: queue was not synced", origin)
 		}
 	}
 }
@@ -164,7 +162,8 @@ func TestFileLedgerSyncFailureAndRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	queued := func() Event { return MustEvent("A", EvRunQueued, RunQueuedData{Agent: "x", Input: "go"}) }
+	// A batched event establishes the file without paying its entry debts.
+	staged := func() Event { return MustEvent("A", EvRunStarted, RunStartedData{Model: "test"}) }
 	setupSyncs := l.rsyncs.Load()
 	check := func(syncs, dsyncs, rsyncs int64) {
 		t.Helper()
@@ -183,7 +182,7 @@ func TestFileLedgerSyncFailureAndRetry(t *testing.T) {
 	// entry fails the append: the entry of index.jsonl in the root is not
 	// on disk, so the ledger cannot promise the run yet.
 	l.failDirSyncs.Store(1)
-	if _, err := l.Append(ctx, queued()); err == nil {
+	if _, err := l.Append(ctx, staged()); err == nil {
 		t.Fatal("a failed fsync reported success")
 	}
 	check(0, 0, 0)
@@ -200,7 +199,7 @@ func TestFileLedgerSyncFailureAndRetry(t *testing.T) {
 
 	// The retry pays the debt of the root entry of the index file, and
 	// only then reports success.
-	if _, err := l.Append(ctx, queued()); err != nil {
+	if _, err := l.Append(ctx, staged()); err != nil {
 		t.Fatal(err)
 	}
 	check(0, 0, 1)
@@ -243,7 +242,7 @@ func TestFileLedgerSyncFailureAndRetry(t *testing.T) {
 	// A second run walks its own debts. The fsync of its directory fails,
 	// and the append after it pays it, and the entry of the directory in
 	// the root, before it reports success.
-	if _, err := l.Append(ctx, MustEvent("B", EvRunQueued, nil)); err != nil {
+	if _, err := l.Append(ctx, MustEvent("B", EvRunStarted, nil)); err != nil {
 		t.Fatal(err)
 	}
 	l.failDirSyncs.Store(1)
@@ -433,7 +432,7 @@ func TestFileLedgerSkipsSyncForIdempotentIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	probe := &idemProbe{t: t, l: l, before: l.syncs.Load()}
+	probe := &idemProbe{t: t, l: l, before: l.syncs.Load() + 1} // accepted queue
 	a := newTestAgent(t, newScript(
 		callTools(use("call-1", "idem", `{}`)),
 		endTurn("done"),
@@ -441,9 +440,9 @@ func TestFileLedgerSkipsSyncForIdempotentIntent(t *testing.T) {
 	r, err := a.Run(ctx, "use the idem tool")
 	mustState(t, r, err, StateCompleted)
 
-	// The intent added no fsync. Only the terminal event of the run did.
+	// The intent added no fsync. The queue and terminal event did.
 	if n := l.syncs.Load(); n != probe.before+1 {
-		t.Fatalf("fsync calls after the run = %d, want %d (one for the terminal event only)", n, probe.before+1)
+		t.Fatalf("fsync calls after the run = %d, want %d (queue and terminal event only)", n, probe.before+1)
 	}
 	var intent ToolRequestedData
 	var have bool
@@ -530,7 +529,7 @@ func TestFileLedgerIntentDurableBeforeToolBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Close()
-	probe := &intentProbe{t: t, l: l, before: l.syncs.Load()}
+	probe := &intentProbe{t: t, l: l, before: l.syncs.Load() + 1} // accepted queue
 	a := newTestAgent(t, newScript(
 		callTools(use("call-1", "probe", `{}`)),
 		endTurn("done"),

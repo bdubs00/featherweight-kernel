@@ -161,6 +161,33 @@ func New(opts ...Option) (*Agent, error) {
 		slots:      modelSlots(cfg),
 		noResume:   o.noResume,
 	}
+	// Before the kernel starts, only resources opened by this constructor
+	// belong to it. In particular, a failed setup must release the file
+	// ledger's writer lock without closing a caller-supplied ledger.
+	var setupClosers []io.Closer
+	keepSetup := func(v any) {
+		if c, ok := v.(io.Closer); ok {
+			setupClosers = append(setupClosers, c)
+		}
+	}
+	complete, kernelStarted := false, false
+	defer func() {
+		if complete {
+			return
+		}
+		if kernelStarted {
+			stop, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			a.shutdownKernel(stop)
+			return
+		}
+		a.closeDecisionPoints()
+		for i := len(setupClosers) - 1; i >= 0; i-- {
+			if err := setupClosers[i].Close(); err != nil {
+				a.log.Warn("close resource after setup failure", "error", err)
+			}
+		}
+	}()
 	a.followEvery, a.recordEvery, a.giveUp = defaultFollowEvery, defaultRecordEvery, followGiveUp
 	if o.giveUp > 0 {
 		a.giveUp = o.giveUp
@@ -221,11 +248,13 @@ func New(opts ...Option) (*Agent, error) {
 		if a.ledger, err = OpenLedger(ctx, cfg); err != nil {
 			return nil, err
 		}
+		keepSetup(a.ledger)
 	}
 	if a.bus == nil {
 		if a.bus, err = OpenBus(ctx, cfg); err != nil {
 			return nil, err
 		}
+		keepSetup(a.bus)
 	}
 	if a.authn == nil {
 		if a.authn, err = NewAuthn(ctx, cfg, a.secrets); err != nil {
@@ -284,13 +313,18 @@ func New(opts ...Option) (*Agent, error) {
 				a.log.Warn("built-in tool not available", "tool", name, "error", err)
 				continue
 			}
-			a.tools = append(a.tools, a.wrapTool(t))
+			t = a.wrapTool(t)
+			a.tools = append(a.tools, t)
+			keepSetup(t)
 		}
 		srcs, err := NewToolSources(ctx, cfg, a.secrets)
 		if err != nil {
 			return nil, err
 		}
 		a.sources = append(a.sources, srcs...)
+		for _, source := range srcs {
+			keepSetup(source)
+		}
 		for _, name := range cfg.Surfaces {
 			s, err := NewSurface(name, cfg)
 			if err != nil {
@@ -334,10 +368,11 @@ func New(opts ...Option) (*Agent, error) {
 	if err := a.startKernel(ctx); err != nil {
 		return nil, err
 	}
+	kernelStarted = true
 	if err := a.startServices(ctx, &o); err != nil {
-		a.shutdownKernel(ctx)
 		return nil, err
 	}
+	complete = true
 	return a, nil
 }
 
@@ -552,7 +587,7 @@ func (a *Agent) Surfaces() []Surface { return a.surfaces }
 func (a *Agent) SetReady(ready bool) { a.ready.Store(ready) }
 
 // Ready reports readiness.
-func (a *Agent) Ready() bool { return a.ready.Load() }
+func (a *Agent) Ready() bool { return a.ready.Load() && a.RuntimeError() == nil }
 
 // Handler builds the shared mux with every surface mounted.
 func (a *Agent) Handler() (http.Handler, error) {
@@ -562,6 +597,10 @@ func (a *Agent) Handler() (http.Handler, error) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if a.RuntimeError() != nil {
+			http.Error(w, "storage failed; execution blocked until restart", http.StatusServiceUnavailable)
+			return
+		}
 		if !a.Ready() {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return

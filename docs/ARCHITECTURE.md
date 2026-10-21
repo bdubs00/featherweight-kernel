@@ -45,7 +45,7 @@ Eight rules shape every decision below. Each rule removes a class of features.
          messages   status    metrics     bus     traces      projections
 ```
 
-Work enters through a surface or the bus and lands in a mailbox. A mailbox is a queue with one consumer goroutine per run. With the `mem` bus, it is an in-process channel. When several replicas share a ledger, it is a bus subject. That goroutine is the single writer for the run. It calls the model, runs tools, and appends events to the ledger. Projections subscribe to the ledger and never write to it. Surfaces read projections and write to mailboxes. The workbench adds the MCP server as one more surface (the workbench architecture, section 3).
+Work enters through a surface or the bus. The kernel serializes appends for each run and gives each driven run one goroutine. That goroutine calls the model and runs tools. Projections observe the recorded events and never write to the ledger. Surfaces read projections and call the kernel. Each process owns its ledger; replicas do not share a file ledger. A fleet distributes work across processes with separate ledgers through the bus and the workbench. The workbench adds the MCP server as one more surface (the workbench architecture, section 3).
 
 ## 4. The ledger
 
@@ -71,7 +71,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 |---|---|
 | `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5), kept events of a branch (section 4.7) |
 | `fw.run.started` | model, tool names, brief (the sections that tools add to the system prompt), time zone |
-| `fw.run.annotated` | metadata, usage, provider, model (section 8.2) |
+| `fw.run.annotated` | metadata, usage, provider, model (section 8.2), or a trusted quality receipt with its own cost snapshot (section 10.1) |
 | `fw.message.received` | role, content, origin (`http`, `a2a`, `mcp`, `bus`, `cli`, `kernel`), note kind, and for a budget note what it is about: the limit, the threshold, the use, the limit value, and the run that holds the limit, or `changed` (section 5.2) |
 | `fw.turn.started` | turn number |
 | `fw.model.requested` | provider, model, effort (`default` when the provider chooses it, section 6.1), estimated input tokens, and `report` for the final report call at a limit (section 5.2) |
@@ -109,11 +109,22 @@ The model builds its history from the stored events, so the model does not see t
 
 ### 4.3 Storage
 
-The default ledger driver writes one file per run at `$FW_HOME/runs/<run>/ledger.jsonl`. JSONL is one JSON object per line. It calls `fsync` after every approval event, every terminal event, every `fw.run.child`, and every `fw.tool.requested` that does not explicitly record `idempotent: true`. The append must succeed before the tool body runs, and the record of a child before its spawner creates a process (section 11.9). An index file at `$FW_HOME/runs/index.jsonl` lists each run id once; the run state comes from its ledger.
+The default ledger driver writes one file per run at `$FW_HOME/runs/<run>/ledger.jsonl`. JSONL is one JSON object per line. It calls `fsync` before acknowledging each of these events:
+
+- `fw.run.queued`, for every origin, including HTTP and the command line
+- external `fw.message.received`, `fw.budget.changed`, and `fw.run.annotated`
+- every approval event, every terminal event, and every `fw.run.child`
+- every `fw.tool.requested` that does not explicitly record `idempotent: true`
+
+Known internal kernel notes, model events, and other batched events become durable at the next sync boundary or `Flush`. The tool intent append must succeed before the tool body runs, and the record of a child before its spawner creates a process (section 11.9). An index file at `$FW_HOME/runs/index.jsonl` lists each run id once; the run state comes from its ledger. An append error can leave a complete event on disk, so failure does not prove that the event is absent.
 
 Durability includes directory entries: opening the ledger syncs its directory chain, and a run's first durable event syncs the ledger file's entry and the run directory's entry. The index is also synced before its run can execute. A failed sync returns an error and retains outstanding entry-sync work for a retry; an existing path alone does not prove durability. Incomplete trailing records are removed before appending to a run file or the index. Completed records are never rewritten. These guarantees rely on filesystem `fsync`; they do not make external effects exactly-once or preserve writes excluded from a Substrate snapshot.
 
-When `/workspace` exists, `$FW_HOME` defaults to `/workspace/.fw`. Otherwise it defaults to `./.fw`. Under ax, `/workspace` is the durable volume that survives suspend and resume. Alternative drivers write the same events to a NATS JetStream stream, to a Redis stream, or to SQLite.
+When `/workspace` exists, `$FW_HOME` defaults to `/workspace/.fw`. Otherwise it defaults to `./.fw`. Under ax, `/workspace` is the durable volume that survives suspend and resume. The implemented ledger drivers are `file` and `mem`. NATS and Redis are bus drivers, not ledger drivers. A custom ledger implements `fw.Ledger`; a distributed ledger also needs an ownership and fencing protocol before several processes can drive its runs.
+
+`OpenFileLedger` takes exclusive writer ownership of the root directory until `Close`. A second writer, in this process or another process, gets `ErrLedgerLocked`; symlink aliases contend on the same directory inode. The OS releases the lock if the owner exits. Linux, macOS, and the supported BSD platforms use `flock`; other platforms refuse writable opens. This contract requires a filesystem that honors the lock and `fsync` and a stable root directory. It is not a distributed lease or fencing service.
+
+`Flush` syncs outstanding writes and keeps ownership. `Close` flushes, ends watches, permanently closes the handle, and releases ownership even when the flush fails. Callers that reused a handle after `Close` must use `Flush` instead. `OpenFileLedgerReadOnly` opens an existing root without a writer lock and never repairs or creates files. It reads complete lines, and polling `Read` sees later appends; it provides no cross-run snapshot or cross-process watch. `fw events` and an explicit replay source use this mode. A replay still needs exclusive ownership of its destination ledger, so replay a live server into a different home.
 
 ### 4.4 Projections
 
@@ -141,6 +152,8 @@ A call that waited for a connection is an exception to step 3. The service never
 
 A tool that implements `fw.Continuer` is another exception to step 3 when every recorded question of the interrupted call has an answer. Its `Continue` method constructs the result from those questions and decisions, without rerunning the call or asking again. The built-in `ask_user` uses this contract, including when the answer arrived before the process stopped. An unanswered question stays idle. Other non-idempotent tools still need approval to rerun; a read-only flag or a recorded question alone does not make a tool safe to continue. This contract does not restore MCP tasks or child-run waits.
 
+The built-in `memory` tool is non-idempotent because `insert` and some `str_replace` calls change the file again when repeated. An interrupted call without a recorded result needs recovery approval, including a read command because the tool contract classifies all commands together. Denial leaves the existing edit alone. Approval authorizes a real rerun and can repeat an edit that already took effect.
+
 The approved rerun of a `spawn_task` call takes the child of the first attempt instead of starting a second one, and a child in another process whose start was open is looked for at its member (section 11.9).
 
 ### 4.6 Replay
@@ -154,6 +167,8 @@ A recorded result matches the tool name and its JSON input. Object key order and
 A run is defined by its ledger and its workspace, so a run can branch. `Agent.Fork` and `POST /v1/runs/{id}/fork` make a new run whose ledger begins with a copy of the events of the source up to one sequence number, `seq`; without one, every event. The copied events get the id of the branch, new event ids, and the time of the copy; the `fw.run.queued` event of the branch names the person who branched as its principal and carries the metadata `fw.forkOf`, the id of the source, and `fw.forkSeq`, the sequence number kept. The metadata of the source, with the annotations that the branch keeps, and the metadata of the request must fit the bounds of `fw.CheckMetadata` together; otherwise the kernel refuses the branch, here and in a process that takes it through `POST /v1/runs/fork`. The branch starts from `fw.run.queued` as the ledger of the source stores it, with every secret replaced, so its model reads what the model of the source read, and a branch in another process holds no secret that only the source knows. The branch has no parent, and the children of the source stay with the source. The source does not change.
 
 A branch counts its own work only. Its `fw.run.queued` holds `kept`, the number of events at the start of its ledger that are copies, which leaves out the `fw.run.child` events of the source. The copies add nothing to the usage of the branch, and their totals set nothing (section 8.2), because the source holds that usage. A branch that its copies end, such as a branch of a finished run without a message, did no work: a copy after which the branch is finished, such as the copied `fw.run.finished`, gives it a known usage of zero, so a consumer of the lifecycle events reads it as final (`usageSeq`), even when the last copy is an event that the stream does not carry. The budget of the branch counts its own turns, tool calls, tokens, and cost in the same way, so a branch of a run near a limit gets the whole budget for its own work. A turn that is open at the end of the copies, as in a branch at a `fw.model.requested`, is a turn of the branch, because the branch makes its model call. The turn numbers in the ledger of the branch go on from the source. Only a fork sets `kept`: the process that writes the branch sets it to the number of the copies, also for a branch that `POST /v1/runs/fork` brings from another process, so a `kept` in that body counts for nothing, and the metadata `fw.forkOf` and `fw.forkSeq`, which a request can set and a replay copies, change no count. A branch that an older kernel made has no `kept` and counts the copies as its own.
+
+The copy of the kept events is the acceptance of a branch in this process: a caller that receives the branch holds one whose events are in the ledger, and a retry of `POST /v1/runs/fork` under the same id waits for the first copy and returns its branch or its failure. A branch in another process starts only after the source recorded it: if that record fails, the source returns the error, sends nothing, and abandons the process that it placed.
 
 A branch goes on as a resumed run does (section 4.5). A model request without an answer is sent again, a tool call without a result follows the resume rules, and a pending approval waits for its decision, under the approval id that the branch copied. A message in the request, `input`, follows the kept events as a follow-up from the person, so a branch of a finished run goes on in another direction; without a message, a branch that keeps the end of a finished run stays finished. The branch keeps the resolved profile of its source (section 12.5), because it copies the `fw.run.queued` event of the source, so a change of the profile after the start of the source does not reach the branch. A branch in this process also keeps the text of the profile of its source; a branch in another process takes the text of the profile there and records a change of it as a restart does (section 12.5). A `model` in the request changes the model of the branch: it replaces the model in the resolved profile and in the inline profile. Because the system prompt, the history, and the tool results of the kept events are the same bytes, the branch keeps the prompt cache prefix of the provider up to the point of the branch.
 
@@ -175,6 +190,8 @@ A run is one conversation with one agent profile, one budget, and one ledger. Th
 Other stop reasons end the turn as follows. `max_tokens` appends `fw.error` and retries once with a continuation message. `refusal` appends `fw.run.finished` with outcome `failed` and the refusal category. `pause_turn` goes to step 1 at once.
 
 A stream that the network cuts in step 2 has no answer. An adapter marks such a cut with `fw.StreamInterruptedError`: the body ended before a finish reason, in the middle of an event, or with a reset. The kernel then appends `fw.error` with `retryable` set, waits half a second, and calls the model once more with the same request, in the same turn and the same run. It records nothing of the cut response and runs none of its tool calls, even a tool call that arrived whole. A second cut fails the run. The deadline of the budget and a cancel bound both calls and the wait. A suspend of an ax Task cuts the network of the process before it freezes it, so the call meets the cut first and the retry carries the run over the suspend. Any other model error fails the run as before.
+
+The execution cursor consumes new ledger events incrementally. A cold load reconstructs it once; later steps decode only events after its last boundary. Driver snapshots detach mutable call and report records, so a concurrent budget check can advance the cursor safely. The repeat guard keeps exact counts for periods of one to three calls in constant space. The ledger remains authoritative and retains all events. Context compaction bounds the model history, not the ledger; startup still reads historical runs, and an open run still holds its event history.
 
 ### 5.2 Budget
 
@@ -272,7 +289,13 @@ A run accepts more messages after it finishes or while it waits for input. A fol
 
 ### 5.6 Process duties
 
-The kernel runs one goroutine per active run, up to `FW_MAX_RUNS` (default 16). A child run takes no slot of `FW_MAX_RUNS`; it takes a slot of `spawn.maxRunning` (section 11.9). On `SIGTERM`, it stops accepting work and waits up to 8 seconds for in-flight model calls. Then it appends `fw.run.suspended` to every active run, flushes the ledger, and exits. Under ax, `fw` is PID 1. A PID 1 process must reap child processes, so `fw` handles `SIGCHLD` and waits on orphaned children. A suspend under ax sends no `SIGTERM` (section 11.5). Only a stop of the worker pod itself starts this path.
+`maxRuns`, or `FW_MAX_RUNS`, bounds working root runs: 16 by default, or 1 under ax. `maxQueuedRuns`, or `FW_MAX_QUEUED_RUNS`, bounds additional admitted root drivers; zero selects the finite default of 64. Direct starts, branches, follow-ups, and approval continuations reserve admission before their work event is appended. A follow-up reserves before it stores attachments or records a budget change, so a refused follow-up changes nothing of the run; the place goes back when an active driver takes the message. A branch that waits for a decision holds no place until the decision starts its driver. At capacity, the kernel returns `ErrSaturated` with a `SaturationError`; the native API returns 429 and `Retry-After`. Retry with the same idempotency key. An already accepted idempotent start returns its run without another admission. Concurrent retries of an initial start wait for its acceptance result, and cancellation of a waiter does not cancel the owner.
+
+An admitted driver can wait for a working slot, so the number of admitted root drivers is at most `maxRuns + maxQueuedRuns` for new work. Recovery resumes work already accepted by the ledger even when a configuration change lowers that limit. Completed and idle run records remain queryable; this limit bounds admission, not lifetime history retention. A child takes no root slot; it uses `spawn.maxRunning` and the tree limits (section 11.9). This separation lets a parent wait for its children without exhausting their slots.
+
+The first ledger append or driver-read failure blocks writes and cancels local execution for the process. `Agent.RuntimeError` preserves the cause, `Ready` becomes false, `/readyz` returns 503, and waiting callers receive `ErrStorageUnavailable`. Reads expose a runtime-only `Run.Blocked` message for open runs while retaining the last recorded state. The runtime neither retries an ambiguous append nor invents a terminal ledger event. Repair storage and restart the owning process to rebuild from whatever reached the ledger; unsafe interrupted tools still follow the approval rules of section 4.5. An external effect already in flight can still finish, and the runtime does not roll it back.
+
+On `SIGTERM`, the kernel stops accepting work and waits up to 8 seconds for in-flight model calls. Then it appends `fw.run.suspended` to every active run, flushes the ledger, and exits. A process blocked by storage failure cannot append suspension records. Under ax, `fw` is PID 1. A PID 1 process must reap child processes, so `fw` handles `SIGCHLD` and waits on orphaned children. A suspend under ax sends no `SIGTERM` (section 11.5). Only a stop of the worker pod itself starts this path.
 
 ### 5.7 Loop guard
 
@@ -1019,13 +1042,13 @@ The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each mes
 
 #### One job for each free run slot
 
-The intake takes a message only when a slot of `maxRuns` is free. Under ax that is one slot, so a Task holds one job at a time, and the other Tasks of the queue take the other jobs. The drivers of top-level runs fill the slots, and a driver that waits for a slot counts too. A run that waits for the decision of a person on a held tool call has no driver, so its slot is free, and the Task takes its next job while the person decides. A tool that waits for an answer inside its call keeps its driver and its slot. The intake consumes through `GatedBus` (section 9.1), so a message that the Task cannot start stays on the queue. A run that another surface starts at the same moment can take the free slot first. The job then waits in this process for the next slot. A bus driver without `GatedBus` hands over messages as fast as its consumer takes them, and their runs wait in the process for a slot.
+The intake takes a message only when a slot of `maxRuns` is free. Under ax that is one slot, so a Task holds one job at a time, and the other Tasks of the queue take the other jobs. The drivers of top-level runs fill the slots, and a driver that waits for a slot counts too. A run that waits for the decision of a person on a held tool call has no driver, so its slot is free, and the Task takes its next job while the person decides. A tool that waits for an answer inside its call keeps its driver and its slot. The intake consumes through `GatedBus` (section 9.1), so a message that the Task cannot start stays on the queue. A run that another surface starts at the same moment can take the free slot first. The job then waits in this process for the next slot. A bus driver without `GatedBus` can deliver faster than work starts, but the same finite admission limit applies. Saturation, shutdown, and storage failure return an error for redelivery rather than dead-lettering a valid job.
 
 The option `concurrency` of the `nats` and `redis` drivers is the number of messages that one consumer handles at a time. Its default is `maxRuns`: 16 when the configuration leaves `maxRuns` at 0, and 1 under ax. `bus.options.concurrency` sets another value.
 
 #### The acknowledgement
 
-The handler acknowledges a message as soon as `fw.run.queued` of its run is in the ledger. The file ledger syncs that event of a run from the bus to the disk before the append returns. The handler does not wait for the end of the run. A run that waits for a person therefore holds no message, the front that suspends an idle Task leaves no message whose acknowledgement times out, and a shutdown waits for no handler.
+The handler acknowledges a message as soon as `fw.run.queued` of its run is in the ledger. The file ledger syncs that event for every origin before the append returns. The handler does not wait for the end of the run. A run that waits for a person therefore holds no message, the front that suspends an idle Task leaves no message whose acknowledgement times out, and a shutdown waits for no handler.
 
 From then on the ledger holds the job, and the bus does not deliver the message again. A run that a shutdown, a suspend, or a crash interrupts resumes from the ledger at the next start of the same process (sections 4.5 and 11.5), and no other process starts a second run of it. The message id is the idempotency key when the request names none, so a message that comes back to the same process returns the first run. Two cases still deliver a message again. A message that arrives while the kernel shuts down starts no run, and the handler returns an error, so another process can take it. A process that stops between the append and the acknowledgement leaves the message on the queue, and another process can then start a second run of the job, because the idempotency key holds in one process only.
 
@@ -1095,6 +1118,15 @@ The `metrics` projection maintains this registry. The route `/metrics` carries n
 | `fw_runs_active` | gauge | `agent` |
 | `fw_run_duration_seconds` | histogram | `agent` |
 | `fw_run_turns` | histogram | `agent` |
+| `fw_task_completions_total` | counter | `execution`, `grader_judgment` |
+| `fw_task_verifications_total` | counter | `result` |
+| `fw_operator_interventions_total` | counter | `kind` |
+| `fw_operator_interventions_per_run` | histogram | `coverage` |
+| `fw_recovery_duration_seconds` | histogram | `result` |
+| `fw_confirmed_duplicate_effects_total` | counter | none |
+| `fw_ambiguous_tool_retries_total` | counter | none |
+| `fw_successful_task_cost_usd` | histogram | `basis` |
+| `fw_successful_task_cost_excluded_total` | counter | `reason` |
 | `fw_budget_exceeded_total` | counter | `agent`, `limit` (`maxTurns`, `maxTokens`, `maxCostUSD`, `maxToolCalls`, `deadline`, `maxRepeats`, `other`) |
 | `fw_model_requests_total` | counter | `provider`, `model`, `outcome` (`ok`, `error`, `canceled`) |
 | `fw_model_request_duration_seconds` | histogram | `provider`, `model` |
@@ -1118,6 +1150,20 @@ The origin of a child run is `tool`. `fw_approvals_oldest_timestamp_seconds` is 
 `fw_model_tokens_total` and `fw_model_cost_usd_total` also count the summary calls of a compaction, from `fw.context.compacted`, and the model call of an annotation, from `fw.run.annotated`, such as the title call of the workbench. The kernel adds these tokens to the usage of the run, so the metrics match the ledger. These calls do not count in `fw_model_requests_total`. A branch (section 4.7) counts its own work only, as its usage does: the metrics and the traces count no model call, token, cost, turn, or tool call of the events that it kept from its source, and they open no span for them. A branch that its copies end counts as a run that ended at its last copy. `fw_model_cost_usd_total` counts priced tokens only. The tokens of a model without a price go to `fw_model_unpriced_tokens_total`, because their cost is unknown, not zero. A price of zero is a price. Without a price table, every token is unpriced.
 
 The model latency histogram has buckets up to 900 seconds, because one turn on a large model can run for minutes. The Go runtime and process collectors are on. The library is `github.com/prometheus/client_golang`.
+
+#### Task quality and recovery
+
+Execution completion is not verification. `fw_task_completions_total` counts each own completion episode, including failure and cancellation, and labels the model grader judgment separately. `unverified` means that no grader judgment was recorded. A follow-up starts another episode. Copied branch history contributes no completion or intervention.
+
+A trusted integration calls `Agent.ObserveQuality` with a stable receipt ID and the sequence of an own completed `fw.run.finished`. It records a final `accepted`, `satisfied`, `rejected`, or `unknown` verification as `fw.run.annotated`. Accepted means that a person accepted the result; satisfied means that an external verifier checked it. Model grading alone creates neither. Identical receipt retries append nothing, including after restart; a conflicting receipt or second final verification of the same completion is refused. The API needs operator access when a principal is present and is not a model tool.
+
+`fw_task_verifications_total` counts those receipts. Use all execution episodes as the denominator for an overall verified-success rate, or completed episodes for verification coverage. Completions without receipts remain unverified; an explicit unknown receipt is not success. A late receipt can refer to a completion outside the query window, so short-window ratios need that interpretation.
+
+Interventions count attributed approval decisions, interactive user follow-ups, and attributed interactive budget changes. These are concrete actions recorded by the runtime, not proof that a human sat at the keyboard. The per-run histogram counts actions per completion episode, including zero, and labels whether historical coverage is complete. Recovery latency starts at `fw.run.resumed` and ends at the first model response, tool response or progress event, or terminal or suspend event. Its result label distinguishes progress, terminal outcomes, and interruption; it does not measure total outage time.
+
+Confirmed duplicate effects require application evidence. `QualityObservation.DuplicateEffects` records the number of additional external effects that the integration confirmed; an effects-only receipt needs no completion. Repeated outstanding tool requests count separately as ambiguous retries. Neither a retry nor a prevented duplicate increments the confirmed-effects counter.
+
+Cost is the own model usage of a completion episode, excluding copied history and child usage. The success-cost histogram accepts only final accepted or externally satisfied receipts with complete, priced usage. Missing usage and unpriced tokens go to the exclusion counter. Submit the receipt after the cost annotations of that episode: the receipt freezes its cost snapshot, and later annotations cannot revise an exported histogram. This is not total fleet spend divided by successful root tasks, nor a tree-cost measure. The observability examples include queries, an application receipt example, and OTLP export of these same series.
 
 #### Labels
 
@@ -1160,7 +1206,7 @@ The ledger of each process records every model call with its tokens, and `fw eve
 
 #### Scrape configuration, alerts, and a dashboard
 
-The directory [examples/observability](../examples/observability/README.md) holds a supported setup. `prometheus.yml` has the scrape jobs, `alerts.yml` has ten alert rules, and `grafana/fw.json` is one dashboard for Grafana 10 or later. The job `fw-pods` keeps only the pods with the label `fw.dev/scrape: "true"`. The examples put that label on the always-on fronts only, never on an ax Task. The README tells how to load each file.
+The directory [examples/observability](../examples/observability/README.md) holds a supported setup. `prometheus.yml` has the scrape jobs, `alerts.yml` has operational and task-quality alert rules, and `grafana/fw.json` is one dashboard for Grafana 10 or later. The job `fw-pods` keeps only the pods with the label `fw.dev/scrape: "true"`. The examples put that label on the always-on fronts only, never on an ax Task. The README tells how to load each file.
 
 ### 10.2 Traces
 
@@ -1399,7 +1445,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 | `Model` | none; a run needs `model:`, `FW_MODEL`, or a profile model | `anthropic/*`, `gemini/*`, `openai/*`, your own | `model:` or `fw.WithModel` |
 | `Tool`, `ToolSource` | `bash`, `files`, `http`, `memory` | MCP servers, A2A peers, your own | `tools:` or `fw.Tools` |
 | `Policy` | allow read-only, ask on destructive | rules, an external MCP or bus decision point, your own | `policy:`, `policy.external:`, or `fw.WithPolicy` |
-| `Ledger` | JSONL files | NATS, Redis, SQLite, your own | `ledger.driver:` or `fw.Ledger` |
+| `Ledger` | JSONL files | memory, your own | `ledger.driver:` or `fw.Ledger` |
 | `Bus` | `mem` | NATS, Redis, Kafka, your own | `bus.driver:` or `fw.Bus` |
 | `Compactor` | a summary by the model of the run | your own | `compaction:` sets when, `fw.WithCompactor` replaces it |
 | `Secrets` | environment and files | Vault, Google Secret Manager | `secrets.driver:` or `fw.Secrets` |

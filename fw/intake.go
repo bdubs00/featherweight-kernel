@@ -203,7 +203,7 @@ func (a *Agent) handleIntake(queue string, e Event) error {
 	delete(req.Metadata, MetaIntakeOutcome)
 	req.Metadata[MetaIntakeQueue] = queue
 	if _, err := a.start(a.k.ctx, req); err != nil {
-		if errors.Is(err, ErrClosed) {
+		if errors.Is(err, ErrClosed) || errors.Is(err, ErrSaturated) || errors.Is(err, ErrStorageUnavailable) {
 			return err
 		}
 		return a.rejectJob(queue, e, &sent, err)
@@ -299,6 +299,9 @@ func (g intakeGate) Admit(ctx context.Context, max int) (int, error) {
 		max = 1
 	}
 	for {
+		if err := k.writeError(); err != nil {
+			return 0, err
+		}
 		k.slotMu.Lock()
 		if free := cap(k.sem) - k.rootDrivers - k.admitted; free > 0 {
 			n := min(free, max)
@@ -314,6 +317,8 @@ func (g intakeGate) Admit(ctx context.Context, max int) (int, error) {
 			return 0, ctx.Err()
 		case <-k.drainCh:
 			return 0, ErrClosed
+		case <-k.failedCh:
+			return 0, k.storageError()
 		}
 	}
 }

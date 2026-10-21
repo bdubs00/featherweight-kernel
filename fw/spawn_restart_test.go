@@ -402,6 +402,10 @@ func crashDuringSpawnOf(t *testing.T, sp *crashSpawner, at, input string, opts .
 	cut.cut.Store(true)
 	dead.cut.Store(true)
 	release()
+	// A dead process also releases its file descriptors and writer lock.
+	if err := cut.Ledger.(*FileLedger).Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	l := openFileLedgerAt(t, root)
 	b := newTestAgent(t, newScript(endTurn("parent done")).Model(), append([]Option{WithLedger(l), WithSpawner(sp), WithTools(spawnTool())}, opts...)...)
@@ -646,6 +650,9 @@ func TestSpawnWithASpawnerThatNamesNoProcess(t *testing.T) {
 	<-reached
 	cut.cut.Store(true)
 	release()
+	if err := cut.Ledger.(*FileLedger).Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	l := openFileLedgerAt(t, root)
 	b := newTestAgent(t, newScript().Model(), WithLedger(l), WithSpawner(plainSpawner{cs}), WithTools(spawnTool()))

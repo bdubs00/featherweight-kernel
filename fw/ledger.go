@@ -2,14 +2,19 @@ package fw
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"time"
 )
 
 // Ledger is the append-only event log. It is the only state.
 //
-// Append sets Seq and Source, stores the event durably, and returns the
-// sequence number. Read replays a run from a sequence number. Watch replays
+// Append sets Seq and Source, stores the event, and returns the sequence
+// number. Durability follows the driver contract. The file driver syncs
+// accepted control events and unsafe tool intents before returning success;
+// other events become durable at the next sync boundary or Flush. An append
+// error can leave a stored event, so an error does not prove absence.
+// Read replays a run from a sequence number. Watch replays
 // from a sequence number and then follows new events until ctx ends. Runs
 // lists the ids of every run the ledger holds, oldest first.
 type Ledger interface {
@@ -18,6 +23,13 @@ type Ledger interface {
 	Watch(ctx context.Context, runID string, from uint64) (<-chan Event, error)
 	Runs(ctx context.Context) iter.Seq2[string, error]
 }
+
+// File ledger ownership and lifetime errors support errors.Is.
+var (
+	ErrLedgerLocked   = errors.New("fw: file ledger: another writer owns this root")
+	ErrLedgerClosed   = errors.New("fw: file ledger: closed")
+	ErrLedgerReadOnly = errors.New("fw: file ledger: read-only handle")
+)
 
 // EgressCursors is an optional capability of a Ledger. It makes the bus
 // egress survive a restart (docs/ARCHITECTURE.md section 9.4). A cursor is

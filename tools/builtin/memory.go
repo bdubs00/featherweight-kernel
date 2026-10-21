@@ -150,7 +150,9 @@ func newMemory(cfg *fw.Config) (fw.Tool, error) {
 func (t *memoryTool) Spec() fw.ToolSpec {
 	s := newSpec("memory", memoryDescription, memorySchema)
 	s.Native = fw.NativeMemory
-	s.Idempotent = true
+	// ToolSpec classifies every command together. insert and str_replace
+	// can change a file again on retry, so even a view needs recovery approval
+	// when the result of an interrupted call is missing.
 	return s
 }
 

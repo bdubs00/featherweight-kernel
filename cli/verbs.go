@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -253,7 +254,7 @@ func cmdEvents(ctx context.Context, g *globals, args []string) int {
 	if err != nil {
 		return g.fail("events", err)
 	}
-	l, err := fw.OpenLedger(ctx, cfg)
+	l, err := openReadLedger(ctx, cfg)
 	if err != nil {
 		return g.fail("events", err)
 	}
@@ -269,6 +270,19 @@ func cmdEvents(ctx context.Context, g *globals, args []string) int {
 		return g.fail("events", fmt.Errorf("%w: %s", fw.ErrRunNotFound, id))
 	}
 	return exitOK
+}
+
+// openReadLedger lets inspection coexist with the owner of a file ledger.
+// Custom drivers keep their own read and ownership contract.
+func openReadLedger(ctx context.Context, cfg *fw.Config) (fw.Ledger, error) {
+	if cfg.Ledger.Driver == "file" || cfg.Ledger.Driver == "" {
+		dir := cfg.Ledger.Path
+		if dir == "" {
+			dir = filepath.Join(cfg.Home, "runs")
+		}
+		return fw.OpenFileLedgerReadOnly(dir)
+	}
+	return fw.OpenLedger(ctx, cfg)
 }
 
 // printEvents prints the events of a run from a sequence number. With
@@ -352,7 +366,7 @@ func cmdReplay(ctx context.Context, g *globals, args []string) int {
 	ctx = commandContext(ctx, cfg)
 	src := a.Ledger()
 	if *ledgerDir != "" {
-		fl, err := fw.OpenFileLedger(*ledgerDir)
+		fl, err := fw.OpenFileLedgerReadOnly(*ledgerDir)
 		if err != nil {
 			return g.fail("replay", err)
 		}

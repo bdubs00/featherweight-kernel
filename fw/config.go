@@ -46,7 +46,10 @@ type Config struct {
 	AX         AXConfig                  `yaml:"ax" json:"ax"`
 	Telemetry  TelemetryConfig           `yaml:"telemetry" json:"telemetry"`
 	MaxRuns    int                       `yaml:"maxRuns" json:"maxRuns"`
-	Version    string                    `yaml:"-" json:"version,omitempty"`
+	// MaxQueuedRuns bounds direct root work waiting behind MaxRuns. Zero
+	// takes the backward-compatible finite default of 64. Children use spawn limits.
+	MaxQueuedRuns int    `yaml:"maxQueuedRuns" json:"maxQueuedRuns"`
+	Version       string `yaml:"-" json:"version,omitempty"`
 	// Workspaces lists more directories of the workspace than the root of
 	// the files tool, such as the volume and the bindings of an ax Task,
 	// which the package ax sets. With tools.user, the tool user owns them
