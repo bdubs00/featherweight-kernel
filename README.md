@@ -19,7 +19,7 @@ make test     # runs every test with the race detector
 
 Container images: `make image` builds `fw:static` on distroless, and `make image-toolbox` builds `fw:toolbox` on Debian with git. Both contain the `ax-task-runner` symlink that ax expects.
 
-Without a build tag the binary carries every driver. `TAGS=lean` builds the core alone, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses, for example `make image-toolbox TAGS=lean,nats,openai,oidc`, at about half the size (docs/ARCHITECTURE.md section 15).
+Without a build tag the binary carries every driver. `TAGS=lean` builds the core alone, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses, for example `make image-toolbox TAGS=lean,nats,openai,oidc`, at about half the size (docs/ARCHITECTURE.md section 15). The tag `memory_sqlite` adds the FTS5 index of the memory to either build.
 
 ## Start here
 
@@ -48,7 +48,9 @@ A profile holds a system prompt, instruction texts, a tool allowlist, a skill al
 
 A long run does not outgrow the context window. Before each model call, the kernel estimates the size of the context from the usage that the provider reports. At 150,000 tokens, the model writes a summary of the run, and the summary replaces the history. If a model call fails because the context is full, the run gets a summary and one more try. A local model with a small window therefore needs no setting. `compaction.at` changes the size, and `compaction.model` sends the summary call to another model.
 
-The `memory` tool keeps notes between runs, in one directory per agent profile under `memory/agents/`. At the start of a run, the system prompt lists each note with its first line. The model therefore knows what it learned without a tool call. `tools.memory.scope: shared` gives every profile the same notes.
+The `memory` tool keeps notes between runs as Markdown files, by default in one directory per agent profile under `memory/agents/`. At the start of a run, the first user message lists each note with its first line, inside a `<context>` block that the system prompt marks as data and not as instructions. The model therefore knows what it learned without a tool call, and a planted note never gains the authority of the system prompt. `tools.memory.scope: principal` gives each person their own notes in each profile, which a profile that more than one person runs wants; `shared` gives every profile the same notes. A note holds at most 128 KB, a scope at most 2,000 notes, and each change that a run makes appears in its ledger as `fw.memory.changed`, without the text.
+
+The `recall` tool searches the notes, the earlier runs of the agent, the files of the workspace, and the skills, and reads one record by its ref, such as `mem://agent/default/build.md` or `run://<id>`. The routes `/v1/memory` of the native API search the memory and read and write notes, so a person, a script, or another harness can seed and curate the memory of an agent without a run. The build tag `memory_sqlite` adds a SQLite FTS5 index of the notes, for about 4 MB; without it, a search scans the notes. Section 7.8 of the architecture has the details.
 
 An interrupted memory call needs approval before it runs again, because an insert can already have changed the file. Approval authorizes a rerun, which can repeat the edit.
 

@@ -70,7 +70,8 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | Type | Data |
 |---|---|
 | `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5), kept events of a branch (section 4.7) |
-| `fw.run.started` | model, tool names, brief (the sections that tools add to the system prompt), time zone |
+| `fw.run.started` | model, tool names, brief (the sections that tools add to the system prompt), context (the data that tools add to the first user message, section 7.8.2), time zone |
+| `fw.memory.changed` | one change of a memory note by a tool call: call id, tool, operation, ref, old ref, scope, agent, size, SHA-256; never the text (section 7.8.1) |
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2), or a trusted quality receipt with its own cost snapshot (section 10.1) |
 | `fw.message.received` | role, content, origin (`http`, `a2a`, `mcp`, `bus`, `cli`, `kernel`), note kind, and for a budget note what it is about: the limit, the threshold, the use, the limit value, and the run that holds the limit, or `changed` (section 5.2) |
 | `fw.turn.started` | turn number |
@@ -158,7 +159,7 @@ The approved rerun of a `spawn_task` call takes the child of the first attempt i
 
 ### 4.6 Replay
 
-The command `fw replay <ledger> --model <selector>` runs a recorded run again against a different model. It answers every tool call from the recorded `fw.tool.responded` events instead of running the tool. It uses the brief of the recorded run (section 7.8), so the replay sees the memory index that the recorded run saw. The replay is a new run, so the kernel resolves its profile again (section 12.5): the named profile of the replaying process with the inline profile of the recorded run on top. A change of the prompt in the configuration therefore shows in the replay. The result is a second ledger. A diff of the two ledgers is a regression test for a model change or a prompt change. This covers the common evaluation case with no extra framework.
+The command `fw replay <ledger> --model <selector>` runs a recorded run again against a different model. It answers every tool call from the recorded `fw.tool.responded` events instead of running the tool. It uses the brief and the context of the recorded run (section 7.8), so the replay sees the memory index that the recorded run saw. The replay is a new run, so the kernel resolves its profile again (section 12.5): the named profile of the replaying process with the inline profile of the recorded run on top. A change of the prompt in the configuration therefore shows in the replay. The result is a second ledger. A diff of the two ledgers is a regression test for a model change or a prompt change. This covers the common evaluation case with no extra framework.
 
 A recorded result matches the tool name and its JSON input. Object key order and whitespace do not matter; number literals keep their precision and spelling, so `1` and `1.0` are distinct. Repeated identical calls consume recorded results in ledger order. Replay serves calls serially in model-response order, including tools that are normally parallel-safe. A different input, an exhausted result queue, or a result without a recorded input produces an explicit error result; it never falls back to the live tool. This is argument-aware fixture replay, not a guarantee of identical model output or a pinned execution environment. The replay overrides are process-local and do not survive a restart.
 
@@ -281,7 +282,7 @@ The summary replaces the whole history. The new epoch starts with one user messa
 
 When the summary call itself does not fit, the compactor summarizes the history up to the last assistant message. That part was the history of an earlier call that fit. The compactor appends the remaining messages after the summary as plain text, and cuts each block to 4,000 characters. `compaction.model` sends the summary call to another model, which does not read the prompt cache of the run. A message that arrives during the summary call follows the summary in the new epoch.
 
-Compaction appends `fw.context.compacted` with a new epoch number, the summary block, the messages that the compactor kept, and the token usage of the summary calls. The usage, the cost, and the budget of the run count that usage. The `messages` projection starts from the latest epoch. The system prompt is not part of the history, so the profile prompt, the skills list, and the memory index (section 7.8) survive every compaction. The ledger before the epoch is unchanged, so rule 5 holds.
+Compaction appends `fw.context.compacted` with a new epoch number, the summary block, the messages that the compactor kept, and the token usage of the summary calls. The usage, the cost, and the budget of the run count that usage. The `messages` projection starts from the latest epoch. The system prompt is not part of the history, so the profile prompt and the skills list survive every compaction. The data that tools add to the first user message, such as the memory index, comes back at the start of the first message after the summary (section 7.8.2). The ledger before the epoch is unchanged, so rule 5 holds.
 
 ### 5.5 Follow-up messages
 
@@ -459,7 +460,8 @@ type ToolSource interface {
 | `bash` | Run a shell command in the workspace | destructive |
 | `files` | View, create, and edit files under a root path | none |
 | `http` | Fetch a URL on an allowlist | read-only, parallel-safe |
-| `memory` | Read and write notes in files under `$FW_HOME/memory`, one directory per agent profile (section 7.8) | idempotent |
+| `memory` | Read and write notes in files under `$FW_HOME/memory`, in the scope of the run (section 7.8) | |
+| `recall` | Search and read notes, earlier runs, workspace files, and skills (section 7.8.3) | read-only, idempotent, parallel-safe |
 | `skill` | List the skills, or read one skill with its files | read-only, idempotent, parallel-safe |
 | `clock` | Give the time in the zone of the run and the working time left before the deadline (section 5.8) | read-only, idempotent, parallel-safe |
 | `ask_user` | Ask the caller a question and wait for the answer | read-only |
@@ -480,7 +482,7 @@ Four built-in tools set `Action`:
 | `spawn_task` | Hand off task |
 | `send` | Send message |
 
-The other built-in tools have no label. `files` and `memory` read, write, and delete, so no one label fits them. `ask_user` asks a question and does not act. `clock`, `skill`, and `await_task` change nothing, so a person seldom allows their calls.
+The other built-in tools have no label. `files` and `memory` read, write, and delete, so no one label fits them. `ask_user` asks a question and does not act. `clock`, `recall`, `skill`, and `await_task` change nothing, so a person seldom allows their calls.
 
 The `files` tool never opens a path under the paths that `Config.Reserved` lists: the home directory of `fw`, the directory of the file ledger, and the configuration file. The check uses the real path, after symbolic links. A change there changes what `fw` allows at its next start. For example, a profile file under `$FW_HOME/agents` can grant its agent access and read secrets from the environment through `${VAR}`. Every other path under the root needs no approval, except the paths that the rules of the workspace refuse (section 7.9).
 
@@ -597,22 +599,68 @@ In a run, the kernel also writes the full text of a cut result to `.fw-tool/<cal
 
 ### 7.8 Memory
 
-The `memory` tool keeps notes between runs in files. The model addresses them as `/memories/...`. With `tools.memory.scope: agent`, the default, each agent profile has its own directory, `$FW_HOME/memory/agents/<agent>`. With `tools.memory.scope: shared`, every profile uses `$FW_HOME/memory/shared`. A child run uses the directory of its own profile.
+The memory of an agent is the durable state that a later run can use: the notes that runs keep, the runs in the ledger, the files of the workspace, and the skills. The package `memory` holds the `Store` of the memory. The tools `memory` and `recall`, the routes `/v1/memory` of the native API (section 8.2), and the hosts of harnesses (section 19.10) each build one over the same directories, so every surface reads and writes the same notes with the same scope, limits, and audit. The kernel owns the contract in `fw/memory.go`: `fw.Memory` reads (`Search`, `Get`), `fw.MemoryWriter` writes (`Remember`, `Forget`), and `fw.MemoryScope` names what a call may reach.
 
-At the start of a run, the memory tool adds a section to the system prompt. The section lists each file with its path and its first line, newest first, up to 40 files and about 4 KB. A `description:` field in front matter takes the place of the first line. The section also tells the model what to save: a user preference, a decision and its reason, or a fact that took effort to find. It tells the model to start each file with one line that says what it holds, and never to store a secret. The section looks like this:
+#### 7.8.1 Notes and scopes
+
+The `memory` tool keeps notes between runs in Markdown files. The model addresses them as `/memories/...`, with the commands of the Anthropic memory tool. The files are canonical: a person reads, edits, backs up, and moves them as files. `tools.memory.scope` selects the directory:
+
+| Scope | Directory | Who shares the notes |
+|---|---|---|
+| `agent`, the default | `$FW_HOME/memory/agents/<agent>` | every person who runs the profile |
+| `principal` | `$FW_HOME/memory/principals/<agent>/<hash>` | one person in one profile; the hash names the subject of the principal, so no email address is part of a path. A run without a principal, such as a local run, uses the directory of `agent`. |
+| `shared` | `$FW_HOME/memory/shared` | every profile of the process |
+
+The kernel builds the scope from the run (`Store.Scope` of `fw.RunInfo`), never from the input of a call, so a tool or a caller cannot widen it. Under ax one Task serves many people one after another, so the scope `agent` lets a person read the notes of another; a profile that more than one person runs takes `principal`. A child run uses the scope of its own profile and principal. Real sharing across Tasks and teams, with access rules, retention, and curation, belongs to the workbench, not to this directory.
+
+The store keeps these rules for every write, from any surface:
+
+- A note holds at most 128 KB, and one scope holds at most 2,000 notes. A write past a limit fails with a message that the model reads (`memory.ErrLimit`).
+- A name with a part that starts with `.` is refused, so no note hides from the index and the listings.
+- A write goes to a hidden temporary file, which the store syncs and renames over the note, so a stop of the process leaves the old note or the new one, never a part.
+- A write takes the lock of its scope directory, a `flock` on the inode of the directory, so the writes of every `Store` and every process on the volume go one at a time. A compare-and-swap (`Remember` with a hash, `absent`, or `present`) and the count of notes hold the lock from the read to the write, so two writers with the same condition never both succeed.
+- `Forget` removes one note and refuses a directory, so each note that goes has its own record.
+- Each change that a tool call makes appends `fw.memory.changed` to the ledger of its run: the operation, the ref, the scope, the agent, the size, and the SHA-256, never the text (`fw.RecordMemoryChange`). A write through the native API goes to the log with the same fields.
+
+An interrupted call of the `memory` tool asks for an approval before it runs again (section 4.5), because `insert` and `str_replace` change a file again on a second run.
+
+#### 7.8.2 The index is data, not an instruction
+
+At the start of a run, the tool adds two texts through two seams:
+
+1. `fw.Briefer` adds the section `# Memory` to the system prompt. The section is the same for every run: it says how the memory works and what to save, a preference of the user, a decision and its reason, or a fact that took effort to find. It holds no note.
+2. `fw.ContextBriefer` adds the index of the notes as data. The index lists each note with its path and its first line, newest first, up to 40 notes and about 4 KB. A `description:` field in front matter takes the place of the first line. When notes are left out, the index says how many and points to the tool `recall`.
+
+The kernel records the data in `fw.run.started`, in the field `context`, and puts it at the start of the first user message of every model call, inside a block that names the tool. The system prompt gets one sentence of the kernel, `fw.ContextNote`, that tells the model that such a block holds data and not instructions. The kernel escapes a closing tag inside the text of a tool, so a note cannot end its block early. The first message of a run looks like this:
 
 ```
-# Memory
-
-The memory tool keeps notes between runs under /memories. Each line below names a file and its first line, newest first. View a file when its line matters for the task.
-
+<context source="memory">
+Notes under /memories, newest first:
 - /memories/build.md: How to build and test this repository
 - /memories/user/preferences.md: The user wants short answers
+</context>
 
-Save what a later run needs and cannot find in the workspace: a preference of the user, a decision and its reason, a fact that took effort to find. Start each file with one line that says what it holds, because that line appears here at the start of every run. Keep one topic in each file. Update a file instead of adding a second one, and delete a note that turns out to be wrong. Never store a secret, a key, or a password.
+Fix the flaky checkout test.
 ```
 
-A general mechanism carries the section. When the run starts, a tool that implements `fw.Briefer` adds a section to the system prompt. The context of the call carries the agent and the run. The `clock` tool uses the same mechanism for the date (section 5.8). The kernel records the text in `fw.run.started`, in the field `brief`. The prompt therefore stays the same for the life of the run, and its cached prefix stays valid. A resume and a replay see the same prompt. A note that the model writes during a run appears in the index of the next run.
+A note is text that an earlier run, a person, or a harness wrote. Text in the system prompt has the authority of the operator, so a note there turns a planted line into an instruction for every later run. That is the persistence path of the Claude Code memory compromise of April 2026, which Anthropic closed by taking memories out of the system prompt. The kernel keeps the same split.
+
+The data stays the same for the life of the run, so the cached prefix of the prompt stays valid. A compaction replaces the history, and the next call puts the data back at the start of the first message, so the index survives every compaction. A resume and a replay take the data of the recorded run. A note that the model writes during a run appears in the index of the next run. The `clock` tool uses `fw.Briefer` for the date (section 5.8), and the package `env` uses its own section (section 18).
+
+#### 7.8.3 Recall
+
+The tool `recall` reads the durable state of the run. A search takes words and finds records of four kinds:
+
+| Kind | Ref | What it searches |
+|---|---|---|
+| `note` | `mem://<scope>/<agent>/<path>`, or `mem://shared/<path>` | the notes of the scope of the run: path, first line, and text |
+| `run` | `run://<id>` | the earlier runs of the agent, and of the principal when the run has one: title, input, output, and metadata |
+| `file` | `file://<path>` | the workspace of the run: path, and the text of each file up to 64 KB |
+| `skill` | `skill://<name>` | the skills of the agent: name, description, and body |
+
+A hit gives the ref, the title, and a short snippet. A call with `ref` reads one record. A note ref resolves in the scope of the run, so a ref that names another agent or another scope fails. The tool is read-only, idempotent, and parallel-safe, and it treats every record as data. The run itself never matches its own search.
+
+The default build scans the notes for a search. The build tag `memory_sqlite` adds a SQLite FTS5 index of the notes, with BM25 ranking, from the pure-Go driver `modernc.org/sqlite`, so the binary stays static without cgo. The index is derived: one database for each scope under `$FW_HOME/memory/index`, updated from the modification time and the size of each note before each search, and built again from the notes when its file is of another version or not of the index. It uses a rollback journal, because a journal in WAL mode needs shared memory that a sandbox volume does not always give. Every `Store` of the process and every process can open the same file: each connection has a busy timeout, each write runs in an immediate transaction, and one transaction sets the marks and the schema of a new file. A file that is not a database, is corrupt, has the marks of another version, or holds tables that are not of the index goes, and the next search builds it from the notes; a busy lock is never a reason to remove a file. A note that changed is found by its modification time, its size, and its inode, which an atomic write always changes. The tag adds about 4 MB to the binary. A search that the index cannot answer falls back to the scan.
 
 ### 7.9 Workspace
 
@@ -633,7 +681,7 @@ func FilesFrom(ctx context.Context) Files // the workspace of a tool call
 func RunFiles(events []Event) []RunFile   // the files that a run changed
 ```
 
-A name follows `io/fs`: slash-separated, relative, and clean. `DirFiles` does each operation through `os.Root`, so no name leaves the directory, through a symbolic link either. The `memory` tool uses `DirFiles` on its own directory under `$FW_HOME`, outside the workspace.
+A name follows `io/fs`: slash-separated, relative, and clean. `DirFiles` does each operation through `os.Root`, so no name leaves the directory, through a symbolic link either. The `memory` tool uses `DirFiles` on its own directory under `$FW_HOME`, outside the workspace, through the store of package `memory` (section 7.8).
 
 The kernel checks the real name of each operation, after symbolic links, against these rules:
 
@@ -922,6 +970,13 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | `GET /v1/skills` | List skills. |
 | `GET /v1/skills/{name}` | The `SKILL.md` text, or JSON with the file list under `Accept: application/json`. |
 | `GET /v1/status` | The state of the agent at a glance: the usage of the runs that the caller can view, the oldest approval that waits, and the counts of runs by state (section 11.8). |
+| `GET /v1/memory` | Search the memory of an agent (section 7.8.3). Query: `agent`, `default` when absent; `q`, the words; `kinds`, a comma list of `note`, `run`, and `skill`; `limit`, 10 by default and 50 at most. The answer holds `scope` and `hits`. The kind `file` belongs to the tool of a run, so the route refuses it. |
+| `GET /v1/memory/notes` | List the notes of the scope of the caller in an agent, newest first, without their text. Query: `agent`. |
+| `GET /v1/memory/notes/{path}` | One note with its `hash`, which the header `ETag` repeats. Under `Accept: text/markdown`, the text alone. |
+| `PUT /v1/memory/notes/{path}` | Write the body as the text of a note. `If-Match` with the hash of the current note, quoted or weak, makes the write a compare-and-swap, `If-Match: *` writes only a note that exists, and `If-None-Match: *` writes only a new note; each answers 412 when the note differs. The store keeps its limits (section 7.8.1). |
+| `DELETE /v1/memory/notes/{path}` | Remove a note. A directory answers 400. |
+
+The routes of the memory take the scope from the agent of the query and the principal of the request, never from a field (section 7.8.1). Reading needs `agent.run` on the agent. Writing a note of the scope `agent` or `shared`, which every person of the agent reads, needs `agent.edit`; writing a note of the scope `principal` needs `agent.run`. These routes let a person, a script, or another harness seed and curate the memory of an agent without a run.
 
 `profile` is an inline profile (section 12.5). Its fields are `system`, `instructions`, `skills`, `tools`, `model`, `effort`, `policy`, and `budget`. `budget`, at the top level, inside the profile, in a follow-up, and in `PATCH /v1/runs/{id}/budget`, takes the seven limits and the three fields of the final report of section 5.2. `deadline` and `reportTimeout` are duration strings, such as `"90s"`, or numbers of nanoseconds. Examples of a request that the kernel refuses are an unknown model name and a child past the spawn limits. Such a request gets a 400 or a 409 problem document that names the field.
 
@@ -1443,7 +1498,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 | Interface | Default | Alternatives | Swap with |
 |---|---|---|---|
 | `Model` | none; a run needs `model:`, `FW_MODEL`, or a profile model | `anthropic/*`, `gemini/*`, `openai/*`, your own | `model:` or `fw.WithModel` |
-| `Tool`, `ToolSource` | `bash`, `files`, `http`, `memory` | MCP servers, A2A peers, your own | `tools:` or `fw.Tools` |
+| `Tool`, `ToolSource` | `bash`, `files`, `http`, `memory`, `recall` | MCP servers, A2A peers, your own | `tools:` or `fw.Tools` |
 | `Policy` | allow read-only, ask on destructive | rules, an external MCP or bus decision point, your own | `policy:`, `policy.external:`, or `fw.WithPolicy` |
 | `Ledger` | JSONL files | memory, your own | `ledger.driver:` or `fw.Ledger` |
 | `Bus` | `mem` | NATS, Redis, Kafka, your own | `bus.driver:` or `fw.Bus` |
@@ -1479,7 +1534,7 @@ Instructions reach the model in three layers, and every layer is a plain text:
 2. The instructions of the profile, under a heading, so one profile composes a base prompt with house rules.
 3. The instructions of the run, from the field `instructions` of the request, under their own heading.
 
-After the three layers, the system prompt lists the skills that the profile allows (see below). Last come the sections that tools add at the start of the run, such as the memory index (section 7.8).
+After the three layers, the system prompt lists the skills that the profile allows (see below). Last come the sections that tools add at the start of the run, such as the memory section (section 7.8), and the sentence `fw.ContextNote` when a tool added data to the first user message (section 7.8.2).
 
 A request can also carry an inline profile in the field `profile`. It overlays the named profile for that run. A set system prompt, model, effort, or time zone replaces the value. Its instructions follow the instructions of the named profile. A tool or skill list replaces the list. The policy becomes the stricter of the two, and the budget takes the set fields. The kernel stores the inline profile and the instructions in `fw.run.queued`, so a replay sees the same inline profile and the same instructions. A tool list in an inline profile can give a run tools that the tool list of its agent leaves out. The kernel names them in `extraTools` of `fw.run.queued` and of the run object, and leaves out a tool that an ancestor does not allow. Every surface tells the person. Under the first message, the conversation says "For this run only, reviewer can also run shell commands". The result of the MCP `run` tool ends with the same fact, and `fw run` prints it on standard error. The command line builds an inline profile from flags such as `--system`, `--tools`, and `--max-turns`.
 
@@ -1910,8 +1965,10 @@ config/                 fw.yaml and FW_* loading
 model/anthropic/        default adapter
 model/gemini/           Gemini adapter
 model/openai/           OpenAI-compatible adapter
-tools/builtin/          bash, files, http, memory, skill, clock, ask_user, send,
-                        spawn_task, await_task
+tools/builtin/          bash, files, http, memory, recall, skill, clock, ask_user,
+                        send, spawn_task, await_task
+memory/                 the memory store: notes, scopes, limits, audit, recall,
+                        and the optional FTS5 index (tag memory_sqlite)
 tools/mcp/              MCP client as a ToolSource, a decision point, and a Connector
 tools/a2a/              A2A peers as a ToolSource
 bus/nats/ bus/redis/
@@ -1932,7 +1989,7 @@ The workbench architecture, section 1.3, gives the layout of the workbench.
 
 ## 15. Dependencies
 
-The default binary carries these modules. The blank imports of `cmd/fw/drivers.go` and `cmd/fw/driver_*.go` link the drivers. Without a build tag the binary carries every driver. With the tag `lean` it carries the core alone, the configuration loader, the native API, the built-in tools, the MCP client, the token client of the fleet, and the telemetry, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses inside ax, for example `go build -tags lean,nats,openai,oidc ./cmd/fw`, or `docker build --build-arg TAGS=lean,nats,openai,oidc`, and the Makefile takes `TAGS`. The full binary is about 82 MB; the lean core is about 38 MB, and a worker with NATS, OpenAI, and `oidc` about 41 MB. A configuration that names a driver that the build left out stops at start with the name of the driver, except a surface or a built-in tool, which the kernel skips with a warning. The ax manifest types are defined in the `ax` package from the YAML schema, so the binary does not import the ax module. Unencrypted HTTP/2 on one port comes from the standard library `http.Server.Protocols` field.
+The default binary carries these modules. The blank imports of `cmd/fw/drivers.go` and `cmd/fw/driver_*.go` link the drivers. Without a build tag the binary carries every driver. With the tag `lean` it carries the core alone, the configuration loader, the native API, the built-in tools, the MCP client, the token client of the fleet, and the telemetry, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses inside ax, for example `go build -tags lean,nats,openai,oidc ./cmd/fw`, or `docker build --build-arg TAGS=lean,nats,openai,oidc`, and the Makefile takes `TAGS`. The full binary is about 82 MB; the lean core is about 38 MB, and a worker with NATS, OpenAI, and `oidc` about 41 MB. A configuration that names a driver that the build left out stops at start with the name of the driver, except a surface or a built-in tool, which the kernel skips with a warning. One tag adds a capability and no driver: `memory_sqlite` adds the SQLite FTS5 index of the memory (section 7.8.3) from the pure-Go `modernc.org/sqlite`, in the full and in the lean build alike, for about 4 MB; without it, the memory scans the notes. The ax manifest types are defined in the `ax` package from the YAML schema, so the binary does not import the ax module. Unencrypted HTTP/2 on one port comes from the standard library `http.Server.Protocols` field.
 
 | Module | Used for |
 |---|---|
@@ -2254,7 +2311,7 @@ The host records the steps of a session with the events of the turn loop, so the
 |---|---|
 | `fw.start` | The run is a session of a harness. |
 | `fw.session` | The session has the id `session`: the id of the session of opencode, or the session UUID of Claude Code. |
-| `fw.prompt` | The harness got the messages of the run up to the sequence number `seq`. |
+| `fw.prompt` | The harness got the messages of the run up to the sequence number `seq`. The field `context` is true when that prompt started with the memory index (19.10). |
 | `fw.answer` | The harness got the decision of the approval `approval`. |
 | `fw.idle` | The harness finished the exchange that the latest `fw.prompt` or `fw.answer` started. |
 
@@ -2271,6 +2328,8 @@ The kernel names the tools of a harness in lower case, such as `bash`, `read`, `
 opencode asks the kernel about every call. The kernel sets `OPENCODE_PERMISSION` to `ask` for every permission key, and the inline configuration `OPENCODE_CONFIG_CONTENT` sets `ask` for the agents `build`, `plan`, `general`, and `explore`, which win over the configuration of the project. The kernel prompts with the agent `build`. For each `permission.asked` event of the session or of a subagent, the kernel asks the policy of the run. It answers `allow` with `once` and `deny` with `reject` and the reason, on `POST /permission/{id}/reply`, or on `POST /session/{id}/permissions/{id}` of an older server.
 
 Claude Code asks the kernel through a `PreToolUse` hook of the type `http`. Each process gets the hook in `--settings`, with the URL `http://127.0.0.1:<port>/v1/harness/hook/<secret>` on the native API and `onFailure: block`, so a hook that fails blocks the call. The same settings set `disableAllHooks` to false, allow the URL of the hook in `allowedHttpHookUrls`, and set `permissions.defaultMode` to `default`. `--settings` wins over `.claude/settings.json` and `.claude/settings.local.json` of the repository, which the model can write, and the lists of `allowedHttpHookUrls` merge, so a file of the repository cannot turn the hook off or block it. The secret is new for each process and leaves with it. The route answers only a caller on the loopback address, and a secret that no process holds gets `deny`. The hook answers `allow` and `deny` from the policy, and `defer` where the policy asks. Claude Code ignores `defer` when one response makes several tool calls, and its own permission flow then runs a read inside the working directory without asking. The hook therefore answers `deny` with the reason `this call needs an approval; make it alone` for such a call. It counts the calls of a response from the lines that claude wrote before it called the hook, and waits up to two seconds for the driver to read them.
+
+The tools of the memory server (19.10) take the names that each harness reports: `mcp__fw-memory__recall`, `mcp__fw-memory__list`, `mcp__fw-memory__remember`, and `mcp__fw-memory__forget` for Claude Code, and `fw-memory_recall`, `fw-memory_list`, `fw-memory_remember`, and `fw-memory_forget` for opencode. The rule `*fw-memory*` matches both, and a field rule such as `fw-memory_remember: path=private/*` works as for any tool. `recall` and `list` are read-only; `remember` and `forget` have no flag. When the profile of the run does not allow the tool `memory`, or `recall` for a search beyond the notes, the host denies the call before it asks the policy.
 
 Before it asks the policy, the host denies a call whose path resolves inside the home of the harness, the home of `fw`, or a reserved path: the paths that the file tracker skips (19.7). The fields are `file_path`, `filePath`, `path`, `notebook_path`, and the pattern of `glob` when it is absolute. A relative path starts in the directory of the run, `~` is the home of the harness, and links are followed. A read of one file in which the harness keeps the full output of a tool call that it cut, `projects/<project>/<session>/tool-results/<file>` of Claude Code or `.local/share/opencode/tool-output/<file>` of opencode, still passes; a listing or a search of that directory does not.
 
@@ -2300,8 +2359,8 @@ The host starts each process as the tool user, with the environment of a tool pr
 
 | Kind | Command | Variables |
 |---|---|---|
-| `opencode` | `opencode serve --port <port> --hostname 127.0.0.1`, once for the process, in the root of the workspace. A session for each run, created with `POST /session?directory=<directory of the run>`; a prompt with `POST /session/{id}/prompt_async` and the model `fw-<provider>/<model>`; the events from `GET /event`. | `OPENCODE_SERVER_PASSWORD`, a random password for the basic authentication of the kernel; `OPENCODE_CONFIG_CONTENT`, one provider of opencode for each provider of the kernel that a model of the configuration uses, with `baseURL` and `apiKey: {env:<apiKeyEnv>}`; `OPENCODE_PERMISSION`; `OPENCODE_DISABLE_MODELS_FETCH=1`; `OPENCODE_DISABLE_AUTOUPDATE=1`; the key under its `apiKeyEnv` |
-| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose --model <model> --settings <hook> --session-id <uuid>` for the first exchange, `--resume <uuid>` for each later one, and `--max-turns`, `--max-budget-usd`, and `--append-system-prompt` from the run | `CLAUDE_CONFIG_DIR` (the home), `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` from `providers.anthropic.baseUrl`, `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` |
+| `opencode` | `opencode serve --port <port> --hostname 127.0.0.1`, once for the process, in the root of the workspace. A session for each run, created with `POST /session?directory=<directory of the run>`; a prompt with `POST /session/{id}/prompt_async` and the model `fw-<provider>/<model>`; the events from `GET /event`. | `OPENCODE_SERVER_PASSWORD`, a random password for the basic authentication of the kernel; `OPENCODE_CONFIG_CONTENT`, one provider of opencode for each provider of the kernel that a model of the configuration uses, with `baseURL` and `apiKey: {env:<apiKeyEnv>}`, and the server `fw-memory` in the block `mcp` when a run has memory (19.10); `OPENCODE_PERMISSION`; `OPENCODE_DISABLE_MODELS_FETCH=1`; `OPENCODE_DISABLE_AUTOUPDATE=1`; the key under its `apiKeyEnv` |
+| `claude-code` | `claude -p --input-format stream-json --output-format stream-json --verbose --model <model> --settings <hook> --session-id <uuid>` for the first exchange, `--resume <uuid>` for each later one, and `--max-turns`, `--max-budget-usd`, and `--append-system-prompt` from the run; `--mcp-config` with the server `fw-memory` of the type `http` when the run has memory (19.10) | `CLAUDE_CONFIG_DIR` (the home), `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` from `providers.anthropic.baseUrl`, `DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` |
 
 The instructions of the run go to the harness as its added system text: `system` of the prompt of opencode, and `--append-system-prompt` of Claude Code. The hooks, the skills, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, and `opencode.json` of the repository reach the harness unchanged. The output of a process goes to the log of `fw` at the level `debug`, with every secret replaced before the line is cut to 2000 bytes. The redactor knows the password of each `opencode serve` and the secret of the hook of each process of Claude Code (`Agent.AddSecret`), so a tool result that prints them reaches the ledger without them.
 
@@ -2315,6 +2374,19 @@ The instructions of the run go to the harness as its added system text: `system`
 - An agent that a repository defines for opencode under another name can loosen its own permissions; the kernel prompts with `build`. A policy that denies `task` keeps such an agent out.
 - The system prompt and the instructions of a profile do not reach the harness, only the instructions of the run. Attachments stay files in the directory `attachments` of the run: a message with attachments alone names them, and a message with text does not. The MCP servers of `tools.mcp` do not reach the harness yet. The terminal route of docs/REVIEW_2026-10-20.md, section 4.9, for `opencode attach` and `claude --resume` by a person, is not built yet.
 - The usage of a model call that a stop of the process cut is lost.
+- The memory server (19.10) is a route of the native API, so `fw run`, which serves nothing, gives a harness the memory section and the index but no working server: opencode shows `fw-memory` as failed. A run that resumes at a cold boot before the route mounts gets no memory tools from that opencode serve until it starts again.
+- A memory call of Claude Code runs only after its `PreToolUse` hook arms it. A version of Claude Code that does not send the hook for an MCP tool gets an error for each memory call, never an unchecked call. The precedence between `--mcp-config` and an entry named `fw-memory` in the `.mcp.json` of the repository is not verified.
+- A search of the memory server reaches the files of the workspace only when the run works in the root of the workspace, because the host has no workspace of a run directory to hand to the store yet.
+- `fw.tool.requested` records the input of a memory call, the text of a note included, as the turn loop does for the tool `memory`; `fw.memory.changed` holds no text.
+
+### 19.10 Memory
+
+A hosted run gets the memory of section 7.8 as a run of the turn loop does, when its profile allows the tool `memory` or `recall`. The host reads that from `tools.builtin` and the tool list of the resolved profile, with the globs of the turn loop, because the turn loop builds the tools of a run at each turn and a host cannot ask it.
+
+- **Ambient.** The added system text of the harness gets, after the instructions of the run, the memory section (`memory.SystemSection`), one sentence that names the tools of the memory server, and `fw.ContextNote`. It never holds a note. The index of the notes goes as data, in a `<context source="memory">` block, to the start of the first prompt of the session, never to the system text. The `fw.prompt` of that prompt records `context: true`, so a resumed session and a cold boot never send the block again.
+- **Active.** The native API serves an MCP server, `fw-memory`, on the route `/v1/harness/memory/<secret>`, stateless, with answers in JSON. It has four tools: `recall` searches and reads, `list` lists the notes, `remember` writes the whole text of a note, with an optional hash for a compare-and-swap, and `forget` removes one. Claude Code gets the server in `--mcp-config` and reuses the secret of its hook; each opencode serve gets the server in the block `mcp` of `OPENCODE_CONFIG_CONTENT` and a secret of its own, and the same configuration asks the kernel about each tool of the server by name, so a configuration of the project cannot turn that off. The redactor knows each secret. The route answers only a caller on the loopback address, and an unknown or ended secret gets 404.
+- **Arming.** The server makes only the calls that the policy of a run allowed. When the host allows a call of a memory tool, in the hook of Claude Code or in the answer to a permission of opencode, it arms the call for its run. The call that reaches the server must match an armed call by tool and exact input, in every harness, so a process that reads the secret cannot make an allowed call with other arguments. opencode can ask for a permission before the input of the call reaches the host; the host then denies a memory call with a reason that asks the harness to make it again, because the policy did not see its input. The server makes a matched call in the memory scope of that run, which the kernel builds from the run info, never from the caller. opencode serves the sessions of many runs from one process and an MCP call of opencode carries no session, so the armed call is what tells the runs apart: two runs never arm the same call at once, and the second waits. A call that no run armed gets an error, and an armed call expires after two minutes.
+- **Ledger.** Each write appends `fw.memory.changed` to the ledger of its run, with the tool, the call id of the harness, and no text.
 
 ## 20. Outcomes
 
