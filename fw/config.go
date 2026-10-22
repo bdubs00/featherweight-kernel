@@ -56,6 +56,10 @@ type Config struct {
 	// which the package ax sets. With tools.user, the tool user owns them
 	// as it owns the root (section 7.12).
 	Workspaces []string `yaml:"-" json:"-"`
+	// WorkspaceSkills lists the skills directories that the Workspaces of
+	// an ax Task name in spec.skills.path, which the package ax sets.
+	// SkillDirs reads them after the directories of the process.
+	WorkspaceSkills []string `yaml:"-" json:"-"`
 	// ConfigFile is the configuration file that the loader read, or "".
 	ConfigFile string `yaml:"-" json:"-"`
 	// FileProfiles names the profiles that the loader read from the files
@@ -877,15 +881,28 @@ func (c *Config) ModelSelector(name string) string {
 
 // SkillDirs returns the directories that hold skills: Tools.Skills, or the
 // skills directory under the home directory.
+//
+// The Workspace directories (WorkspaceSkills) come last, so a skill of the
+// process shadows a skill of a Workspace with the same name (LoadSkills
+// keeps the first): the configuration of the operator wins over a
+// Workspace that a Task brings.
 func (c *Config) SkillDirs() []string {
+	var dirs []string
 	if len(c.Tools.Skills) > 0 {
-		return c.Tools.Skills
+		dirs = slices.Clone(c.Tools.Skills)
+	} else {
+		home := c.Home
+		if home == "" {
+			home = DefaultHome()
+		}
+		dirs = []string{filepath.Join(home, "skills")}
 	}
-	home := c.Home
-	if home == "" {
-		home = DefaultHome()
+	for _, d := range c.WorkspaceSkills {
+		if d != "" && !slices.Contains(dirs, d) {
+			dirs = append(dirs, d)
+		}
 	}
-	return []string{filepath.Join(home, "skills")}
+	return dirs
 }
 
 // Reserved returns the paths that hold the state and the configuration of

@@ -94,13 +94,7 @@ func Prepare(ctx context.Context, bindings []Binding, home string, log *slog.Log
 }
 
 func prepareOne(ctx context.Context, b Binding, home string, log *slog.Logger) (PrepareResult, error) {
-	target := b.Path
-	if target == "" {
-		target = DefaultWorkspacePath
-	}
-	if abs, err := filepath.Abs(target); err == nil {
-		target = abs
-	}
+	target := bindingDir(b)
 	res := PrepareResult{Name: b.Ref.Name, Path: target}
 	log = log.With("workspace", b.Ref.Name, "path", target)
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -154,6 +155,16 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 		for _, r := range ws.Spec.Skills.Registries {
 			log.Warn("ax: skill registries are not supported; skipping", "workspace", ws.Metadata.Name, "provider", r.Provider, "project", r.Project, "query", r.Query)
 		}
+		// The skills directory of the Workspace, which Prepare creates, is
+		// relative to the path of the binding when it is not absolute.
+		if p := ws.Spec.Skills.Path; p != "" {
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(bindingDir(b), p)
+			}
+			if !slices.Contains(cfg.WorkspaceSkills, p) {
+				cfg.WorkspaceSkills = append(cfg.WorkspaceSkills, p)
+			}
+		}
 	}
 
 	if cfg.Agents == nil {
@@ -181,6 +192,18 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 	if cfg.Node == "" && atespace != "" && name != "" {
 		cfg.Node = "ax:" + atespace + "/" + name
 	}
+}
+
+// bindingDir returns the directory of a binding as Prepare creates it.
+func bindingDir(b Binding) string {
+	target := b.Path
+	if target == "" {
+		target = DefaultWorkspacePath
+	}
+	if abs, err := filepath.Abs(target); err == nil {
+		target = abs
+	}
+	return target
 }
 
 // bindingPaths returns the path of each binding.

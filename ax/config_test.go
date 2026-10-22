@@ -3,6 +3,7 @@ package ax
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -265,5 +266,56 @@ func TestBootstrapWorksInTheRoot(t *testing.T) {
 	}
 	if !q.FilesRoot || q.Agent != BootstrapProfile {
 		t.Fatalf("queued = %+v", q)
+	}
+}
+
+// The skills directory of a Workspace joins the skill directories after
+// the directories of the process, relative to its binding when it is not
+// absolute, so a local skill shadows a Workspace skill of the same name.
+func TestApplyToConfigSkillsPath(t *testing.T) {
+	unsetEnv(t, EnvAtespace)
+	unsetEnv(t, EnvBootstrapTimeout)
+	home := t.TempDir()
+	ws1 := t.TempDir()
+	cfg := fw.DefaultConfig()
+	cfg.Home = home
+	task := &Task{Metadata: ObjectMeta{Name: "reviewer", Atespace: "team-a"}}
+	bindings := []Binding{
+		{Ref: WorkspaceRef{Name: "one"}, Path: ws1, Workspace: &Workspace{Metadata: ObjectMeta{Name: "one"}, Spec: WorkspaceSpec{Skills: SkillsConfig{Path: ".skills"}}}},
+		{Ref: WorkspaceRef{Name: "two"}, Path: "/workspace/two", Workspace: &Workspace{Metadata: ObjectMeta{Name: "two"}, Spec: WorkspaceSpec{Skills: SkillsConfig{Path: "/opt/skills"}}}},
+		{Ref: WorkspaceRef{Name: "three"}, Path: "/workspace/three", Workspace: &Workspace{Metadata: ObjectMeta{Name: "three"}}},
+	}
+	ApplyToConfig(cfg, task, bindings)
+	ApplyToConfig(cfg, task, bindings)
+	want := []string{filepath.Join(home, "skills"), filepath.Join(ws1, ".skills"), "/opt/skills"}
+	if got := cfg.SkillDirs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("SkillDirs = %v, want %v", got, want)
+	}
+	cfg.Tools.Skills = []string{"/etc/fw/skills"}
+	if got := cfg.SkillDirs(); !reflect.DeepEqual(got, []string{"/etc/fw/skills", filepath.Join(ws1, ".skills"), "/opt/skills"}) {
+		t.Fatalf("SkillDirs with tools.skills = %v", got)
+	}
+	cfg.Tools.Skills = nil
+
+	// A skill of the home shadows a Workspace skill of the same name, and a
+	// Workspace skill with a name of its own joins the list.
+	write := func(dir, name, desc string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name, fw.SkillFile), []byte("---\nname: "+name+"\ndescription: "+desc+"\n---\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, "skills"), "deploy", "local")
+	write(filepath.Join(ws1, ".skills"), "deploy", "from the workspace")
+	write(filepath.Join(ws1, ".skills"), "triage", "from the workspace")
+	skills, err := fw.LoadSkills(cfg.SkillDirs()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 2 || skills[0].Name != "deploy" || skills[0].Description != "local" || skills[1].Name != "triage" {
+		t.Fatalf("skills = %+v", skills)
 	}
 }
