@@ -423,13 +423,29 @@ func (t ToolLimits) For(name string) Limit {
 // CompactionConfig sets when the kernel compacts the history of a run
 // (docs/ARCHITECTURE.md section 5.4). At is the size of the context, in
 // estimated tokens, that starts a compaction before the next model call.
-// Zero turns compaction off, both before a call and after a call that fails
-// because the context is too long. Model is a selector or a name from
-// Config.Models for the summary call. Empty means the model of the run,
-// which reads the prompt cache of the run.
+// Model is a selector or a name from Config.Models for the summary call.
+// Empty means the model of the run, which reads the prompt cache of the
+// run. Off turns compaction off, both before a call and after a call that
+// fails because the context is too long.
+//
+// In the configuration, the block of the process, At zero turns
+// compaction off too, and Off wins over At. In a profile
+// (AgentProfile.Compaction), a zero At or an empty Model takes the value
+// of the process, Off turns compaction off for the runs of the profile,
+// and Off with an At is invalid (CheckCompaction). The kernel resolves the
+// setting of a run when it queues the run (ResolvedProfile.Compaction).
 type CompactionConfig struct {
 	At    int    `yaml:"at" json:"at"`
 	Model string `yaml:"model,omitempty" json:"model,omitempty"`
+	Off   bool   `yaml:"off,omitempty" json:"off,omitempty"`
+}
+
+// on reports whether the block turns compaction on, and at which size.
+func (c CompactionConfig) on() (int, bool) {
+	if c.Off || c.At <= 0 {
+		return 0, false
+	}
+	return c.At, true
 }
 
 // Scopes of the memory tool.
@@ -667,7 +683,7 @@ const (
 	DefaultMaxCallsPerTurn = 32
 	DefaultMaxRepeats      = 5
 	DefaultSpawnDepth      = 3
-	DefaultCompactAt       = 150_000
+	DefaultCompactAt       = 262_144
 	DefaultSpawnChildren   = 16
 	// DefaultSpawnDescendants bounds a whole tree to 32 runs under its
 	// root: the 16 children that spawn.maxChildren gives one run, and as

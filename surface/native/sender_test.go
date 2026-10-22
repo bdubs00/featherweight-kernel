@@ -3,6 +3,7 @@ package native
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -123,3 +124,26 @@ func TestReactions(t *testing.T) {
 }
 
 func itoa(n uint64) string { return strconv.FormatUint(n, 10) }
+
+// TestInlineProfileCompaction checks the block compaction of the inline
+// profile of POST /v1/runs: a good block reaches the resolved profile of
+// the run, and a bad one is a 400 that names the key.
+func TestInlineProfileCompaction(t *testing.T) {
+	a := newAgent(t, newScript(endTurn("done")).model())
+	srv := serve(t, a)
+	resp, b := do(t, "POST", srv.URL+"/v1/runs", `{"input":"hi","wait":true,"profile":{"compaction":{"at":4096}}}`)
+	r := decodeRun(t, resp, b, http.StatusOK)
+	var q fw.RunQueuedData
+	for _, e := range collect(t, a, r.ID) {
+		if e.Type == fw.EvRunQueued {
+			_ = e.Decode(&q)
+		}
+	}
+	if q.Resolved == nil || q.Resolved.Compaction == nil || q.Resolved.Compaction.At != 4096 {
+		t.Fatalf("resolved = %+v", q.Resolved)
+	}
+	resp, b = do(t, "POST", srv.URL+"/v1/runs", `{"input":"hi","profile":{"compaction":{"at":-1}}}`)
+	if p := decodeProblem(t, resp, b, http.StatusBadRequest); !strings.Contains(p.Detail, "profile.compaction.at") {
+		t.Fatalf("detail = %q", p.Detail)
+	}
+}

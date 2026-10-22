@@ -678,7 +678,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		// A request that does not fit the context window gets one
 		// compaction per turn, and the next step calls the model again.
 		retried := c.turnOpen && c.compactSeq > c.turnSeq
-		if IsContextOverflow(err) && a.k.compactAt > 0 && !retried {
+		if at, _ := a.compactionOf(rs); IsContextOverflow(err) && at > 0 && !retried {
 			msg := "model: " + err.Error()
 			if _, err := a.emit(ctx, rs, EvError, ErrorData{Message: msg + " (compacting the context)", Retryable: true}); err != nil {
 				return err

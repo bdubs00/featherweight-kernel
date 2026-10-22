@@ -206,6 +206,10 @@ type AgentProfile struct {
 	Budget       *Budget  `yaml:"budget,omitempty" json:"budget,omitempty"`
 	Access       *Access  `yaml:"access,omitempty" json:"access,omitempty"` // who owns and uses the agent
 	Outcome      *Outcome `yaml:"outcome,omitempty" json:"outcome,omitempty"`
+	// Compaction sets when the runs of the profile compact their history:
+	// at, model, and off, over the block compaction of the configuration
+	// (see CompactionConfig). Nil takes the block of the configuration.
+	Compaction *CompactionConfig `yaml:"compaction,omitempty" json:"compaction,omitempty"`
 }
 
 // Overlay returns p with the set fields of o applied on top. A set System,
@@ -214,7 +218,10 @@ type AgentProfile struct {
 // list of p. The policy is the stricter of the two, so an overlay can
 // tighten the rules but cannot loosen them. The budget takes every set field of o, and the
 // kernel caps the budget of a child run by its parent afterwards. A set
-// outcome block replaces the block of p as a whole.
+// outcome block replaces the block of p as a whole. The compaction block
+// takes every set field of o, as the budget does: a set At turns
+// compaction on with that size, Off turns it off, and a set Model
+// replaces the model.
 func (p AgentProfile) Overlay(o AgentProfile) AgentProfile {
 	if o.Name != "" {
 		p.Name = o.Name
@@ -262,6 +269,22 @@ func (p AgentProfile) Overlay(o AgentProfile) AgentProfile {
 			b := o.Budget.Merge(*p.Budget)
 			p.Budget = &b
 		}
+	}
+	if o.Compaction != nil {
+		var c CompactionConfig
+		if p.Compaction != nil {
+			c = *p.Compaction
+		}
+		switch {
+		case o.Compaction.Off:
+			c.Off, c.At = true, 0
+		case o.Compaction.At != 0:
+			c.Off, c.At = false, o.Compaction.At
+		}
+		if o.Compaction.Model != "" {
+			c.Model = o.Compaction.Model
+		}
+		p.Compaction = &c
 	}
 	if o.Outcome != nil {
 		out := *o.Outcome

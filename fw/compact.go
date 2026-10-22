@@ -277,19 +277,73 @@ func (b *boundModel) Stream(ctx context.Context, req *Request, on func(Delta)) (
 	return resp, err
 }
 
+// CheckCompaction reports with ErrInvalidRequest whether the kernel
+// accepts the compaction block of a profile. At must not be negative, Off
+// and At do not go together, and Model must be a provider/model selector
+// or, with cfg, a name from models. The text of the error names the key,
+// such as compaction.at.
+func CheckCompaction(cfg *Config, c *CompactionConfig) error {
+	if c == nil {
+		return nil
+	}
+	if c.At < 0 {
+		return fmt.Errorf("%w: compaction.at %d is negative; 0 takes compaction.at of the configuration, and off: true turns compaction off", ErrInvalidRequest, c.At)
+	}
+	if c.Off && c.At != 0 {
+		return fmt.Errorf("%w: compaction.off turns compaction off, so compaction.at must be 0", ErrInvalidRequest)
+	}
+	if c.Model != "" {
+		sel := c.Model
+		if cfg != nil {
+			sel = cfg.ModelSelector(sel)
+		}
+		if provider, model := SplitSelector(sel); provider == "" || model == "" || strings.ContainsAny(sel, " \t\r\n") {
+			return fmt.Errorf("%w: compaction.model %q is neither a provider/model selector nor a name from models", ErrInvalidRequest, c.Model)
+		}
+	}
+	return nil
+}
+
+// compactionOf returns the compaction setting of a run: the size that
+// starts a compaction, 0 when the run never compacts, and the selector of
+// the summary model, "" for the model of the run. A run that the kernel
+// resolved keeps the setting of its queue time (ResolvedProfile); a run
+// from the ledger of an older kernel reads the block of the configuration.
+func (a *Agent) compactionOf(rs *runState) (int, string) {
+	if r := rs.queuedData().Resolved; r != nil && r.Compaction != nil {
+		at, _ := r.Compaction.on()
+		return at, r.Compaction.Model
+	}
+	c := a.processCompaction()
+	at, _ := c.on()
+	if c.Model != "" {
+		return at, a.cfg.ModelSelector(c.Model)
+	}
+	return at, ""
+}
+
+// processCompaction returns the compaction block of the configuration,
+// with the size that the kernel took from it at start.
+func (a *Agent) processCompaction() CompactionConfig {
+	c := a.cfg.Compaction
+	c.At = a.k.compactAt
+	return c
+}
+
 // maybeCompact compacts the history before a model call when the estimated
-// size of the request reaches compaction.at. next is the request of the
-// call without its messages, and extra is the estimate of its system prompt
-// and tools. A compactor error is recorded, and the turn goes on with the
-// full history.
+// size of the request reaches the compaction size of the run. next is the
+// request of the call without its messages, and extra is the estimate of
+// its system prompt and tools. A compactor error is recorded, and the turn
+// goes on with the full history.
 func (a *Agent) maybeCompact(ctx context.Context, rs *runState, m Model, next *Request, extra int) error {
-	if a.k.compactAt <= 0 {
+	at, _ := a.compactionOf(rs)
+	if at <= 0 {
 		return nil
 	}
 	rs.emitMu.Lock()
 	_, tokens := rs.historyLocked(extra)
 	rs.emitMu.Unlock()
-	if tokens < a.k.compactAt {
+	if tokens < at {
 		return nil
 	}
 	_, err := a.compact(ctx, rs, m, next)
@@ -310,7 +364,8 @@ func (a *Agent) compact(ctx context.Context, rs *runState, m Model, next *Reques
 		c = DefaultCompactor()
 	}
 	bm := &boundModel{m: m, next: next}
-	summary, keep, err := a.runCompactor(ctx, c, bm, h)
+	_, model := a.compactionOf(rs)
+	summary, keep, err := a.runCompactor(ctx, c, bm, h, model)
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, errStopped
@@ -339,11 +394,12 @@ func (a *Agent) compact(ctx context.Context, rs *runState, m Model, next *Reques
 	return err == nil, err
 }
 
-// runCompactor calls the compactor. The summary call goes to
-// compaction.model when it is set, else to the model of the run.
-func (a *Agent) runCompactor(ctx context.Context, c Compactor, bm *boundModel, h History) (Block, []Message, error) {
-	if name := a.cfg.Compaction.Model; name != "" {
-		sm, err := a.ModelFor(ctx, name)
+// runCompactor calls the compactor. The summary call goes to the model
+// selector of the compaction setting of the run when it is set, else to
+// the model of the run.
+func (a *Agent) runCompactor(ctx context.Context, c Compactor, bm *boundModel, h History, model string) (Block, []Message, error) {
+	if model != "" {
+		sm, err := a.openModel(ctx, model)
 		if err != nil {
 			return Block{}, nil, fmt.Errorf("compaction.model: %w", err)
 		}

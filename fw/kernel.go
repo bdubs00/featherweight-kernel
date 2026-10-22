@@ -922,6 +922,9 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 	if p.Budget != nil && p.Budget.negative() {
 		return fmt.Errorf("%w: a budget limit is negative", ErrInvalidRequest)
 	}
+	if err := CheckCompaction(a.cfg, p.Compaction); err != nil {
+		return err
+	}
 	return CheckOutcome(a.cfg, p.Outcome)
 }
 

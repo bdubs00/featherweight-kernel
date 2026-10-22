@@ -251,8 +251,9 @@ budget:                         # maxTokens, maxCostUSD, and maxToolCalls hold f
   reportTimeout: 2m             # the time limit of the report call; 0 is the default
 
 compaction:                     # a long run replaces its history with a summary (docs/ARCHITECTURE.md section 5.4)
-  at: 150000                    # estimated tokens of context that start a summary; 0 is off. An overflow error from the model also starts one.
+  at: 262144                    # estimated tokens of context that start a summary; 0 is off. An overflow error from the model also starts one.
   model: ""                     # the model of the summary call, a selector or a name from models; empty is the model of the run
+  off: false                    # true turns compaction off, as at: 0 does; a profile can set at, model, and off for its own runs
 
 
 time:                           # the clock of the agent (docs/ARCHITECTURE.md section 5.8)
@@ -286,6 +287,10 @@ agents:                         # profiles; also one file each under <home>/agen
     timeZone: America/Chicago   # the zone of the runs of this profile; empty is time.zone
     policy:
       ask: []                   # read-only profile, nothing to ask about
+    compaction:                 # over the block compaction above, for the runs of this profile; a run keeps it for its life
+      at: 120000                # 0 takes compaction.at; a negative value is invalid
+      model: fast               # empty takes compaction.model
+      off: false                # true: the runs of this profile never compact; do not set at with it
     access:                     # who owns and uses this agent; a profile without it follows access.default
       owners: ["alice@example.com"]           # manage the profile, and everything below
       operators: ["group:platform-team"]      # start runs, send follow-ups, approve, cancel

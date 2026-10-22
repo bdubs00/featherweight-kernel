@@ -458,6 +458,9 @@ func profileProblems(c *fw.Config, name string, prof fw.AgentProfile) []string {
 	if err := fw.CheckOutcome(c, prof.Outcome); err != nil {
 		p = append(p, key+"."+strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
 	}
+	if err := fw.CheckCompaction(c, prof.Compaction); err != nil {
+		p = append(p, key+"."+strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
+	}
 	if prof.Access != nil {
 		p = append(p, checkEntries(key+".access.owners", prof.Access.Owners)...)
 		p = append(p, checkEntries(key+".access.operators", prof.Access.Operators)...)

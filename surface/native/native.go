@@ -231,6 +231,9 @@ type profileBody struct {
 	TimeZone     string      `json:"timeZone"`
 	Policy       *rulesBody  `json:"policy"`
 	Budget       *budgetBody `json:"budget"`
+	// Compaction overlays the compaction block of the named profile
+	// (fw.CompactionConfig); the kernel checks it.
+	Compaction *fw.CompactionConfig `json:"compaction"`
 }
 
 // rulesBody is fw.Rules: a default verdict and three rule lists, plus All,
@@ -378,6 +381,14 @@ func (p *profileBody) profile() (*fw.AgentProfile, error) {
 		return nil, err
 	}
 	out.Budget = b
+	if p.Compaction != nil {
+		c := *p.Compaction
+		c.Model = strings.TrimSpace(c.Model)
+		if err := fw.CheckCompaction(nil, &c); err != nil {
+			return nil, errors.New("profile." + strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
+		}
+		out.Compaction = &c
+	}
 	return out, nil
 }
 

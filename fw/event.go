@@ -194,8 +194,12 @@ type RunQueuedData struct {
 // configuration. Skills and Tools are the allowlists of the overlay.
 // Budget is the budget of the overlay with each zero field taken from the
 // budget of the configuration. Policy is the rules of the overlay; the
-// rules that the named profile has now apply on top as a tightening. The
-// description and the access block of a profile are never part of it.
+// rules that the named profile has now apply on top as a tightening.
+// Compaction is the compaction block of the overlay over the block of the
+// configuration: At is the size that starts a compaction, Off is true when
+// the run never compacts, and Model is the selector of the summary call,
+// empty for the model of the run. The description and the access block of
+// a profile are never part of it.
 type ResolvedProfile struct {
 	Model              string   `json:"model,omitempty"`
 	Effort             string   `json:"effort,omitempty"`
@@ -206,6 +210,9 @@ type ResolvedProfile struct {
 	Budget             *Budget  `json:"budget,omitempty"`
 	SystemDigest       string   `json:"systemDigest,omitempty"`
 	InstructionsDigest string   `json:"instructionsDigest,omitempty"`
+	// Compaction is nil in the ledger of an older kernel; such a run reads
+	// the block of the configuration at each step.
+	Compaction *CompactionConfig `json:"compaction,omitempty"`
 }
 
 // Metadata keys that the kernel sets with fw.run.annotated when the text

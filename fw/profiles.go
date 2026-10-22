@@ -97,7 +97,36 @@ func (a *Agent) resolveProfile(ctx context.Context, req RunRequest, named AgentP
 		b = prof.Budget.Merge(b)
 	}
 	res.Budget = &b
+	res.Compaction = a.resolveCompaction(prof.Compaction)
 	return res
+}
+
+// resolveCompaction returns the compaction setting of a new run: the block
+// of its profile over the block of the configuration, with the model as a
+// selector, so a later change of models or of the configuration does not
+// reach the run.
+func (a *Agent) resolveCompaction(p *CompactionConfig) *CompactionConfig {
+	c := a.processCompaction()
+	if p != nil {
+		switch {
+		case p.Off:
+			c.Off = true
+		case p.At > 0:
+			c.Off, c.At = false, p.At
+		}
+		if p.Model != "" {
+			c.Model = p.Model
+		}
+	}
+	if c.Model != "" {
+		c.Model = a.cfg.ModelSelector(c.Model)
+	}
+	if at, on := c.on(); on {
+		c.At = at
+	} else {
+		c.Off, c.At = true, 0
+	}
+	return &c
 }
 
 // pinText returns the text of a new run, which stays in memory (textOf),

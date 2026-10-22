@@ -638,6 +638,7 @@ agents:
   d: {}
   e: {skills: ["", "x"], tools: [files, " "], budget: {maxTurns: -1}}
   f: {timeZone: Atlantis/Capital}
+  g: {compaction: {at: -5}}
 `)
 	_, err := Load(path)
 	var ve *ValidationError
@@ -654,7 +655,7 @@ agents:
 		"time.zone \"Mars/Olympus_Mons\"", "time.noteAfter -1m0s is negative", "agents.f.timeZone \"Atlantis/Capital\"",
 		"tools.limits.maxInputBytes -1", "tools.limits.maxOutputBytes -1", "tools.limits.timeout -1s",
 		"tools.limits.perTool.git.[ is not a glob", "tools.limits.perTool.http.maxInputBytes -1",
-		"agents.a.model", "agents.b.model", "agents.c.effort", "agents.e.skills[0] is empty", "agents.e.tools[1] is empty", "agents.e.budget.maxTurns -1",
+		"agents.a.model", "agents.b.model", "agents.c.effort", "agents.e.skills[0] is empty", "agents.e.tools[1] is empty", "agents.e.budget.maxTurns -1", "agents.g.compaction.at -5 is negative",
 	}
 	for _, w := range wants {
 		if !strings.Contains(err.Error(), w) {

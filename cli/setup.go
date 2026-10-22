@@ -60,7 +60,7 @@ budget:                          # limits of every run; a profile or a request c
   maxRepeats: 5                  # the same tool call in a row before the run fails
 
 compaction:                      # a long run replaces its history with a summary before the context fills
-  at: 150000                     # estimated tokens that start a summary; lower it for a model with a small window, 0 is off
+  at: 262144                     # estimated tokens that start a summary; lower it for a model with a small window, 0 is off
 
 time:
   zone: ""                       # an IANA name such as America/Chicago; empty is the zone of this host, UTC in a sandbox

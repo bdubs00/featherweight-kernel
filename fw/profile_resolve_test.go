@@ -52,6 +52,7 @@ func TestQueuedEventRecordsTheResolvedProfile(t *testing.T) {
 		Budget:             &Budget{MaxTurns: 9, MaxTokens: 1000},
 		SystemDigest:       textDigest(DefaultSystemPrompt),
 		InstructionsDigest: textDigest("NAMED-INSTRUCTION\n\ninline"),
+		Compaction:         &CompactionConfig{At: DefaultCompactAt},
 	}
 	if q.Resolved == nil || !reflect.DeepEqual(*q.Resolved, want) {
 		t.Fatalf("resolved profile = %+v\nwant %+v", q.Resolved, want)
