@@ -66,6 +66,20 @@ type RunInfo struct {
 	Dir string
 }
 
+// Keys of the _meta object that the MCP client of the kernel puts on each
+// tools/call of a run (docs/ARCHITECTURE.md section 7.3): the id of the
+// run, the name of its profile, and the node of the process, and for a
+// server that tools.mcp marks trusted, the subject and the kind of the
+// principal of the run. A server reads them as data about its caller. The
+// kernel reads nothing back from them.
+const (
+	MCPMetaRun           = "io.featherweight/run"
+	MCPMetaAgent         = "io.featherweight/agent"
+	MCPMetaNode          = "io.featherweight/node"
+	MCPMetaPrincipal     = "io.featherweight/principal"
+	MCPMetaPrincipalKind = "io.featherweight/principalKind"
+)
+
 type runKey struct{}
 
 // WithRunInfo stores run info in the context.

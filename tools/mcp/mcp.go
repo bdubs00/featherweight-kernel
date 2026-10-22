@@ -786,7 +786,7 @@ func (s *Server) callSession(ctx context.Context, name string, arguments any,
 	}
 	token := s.track(c)
 	defer s.untrack(token)
-	params := &sdk.CallToolParams{Name: name, Arguments: arguments}
+	params := &sdk.CallToolParams{Name: name, Arguments: arguments, Meta: s.callMeta(ctx)}
 	params.SetProgressToken(token)
 	res, err := cs.CallTool(cctx, params)
 	if err != nil {
@@ -820,6 +820,33 @@ func (s *Server) callSession(ctx context.Context, name string, arguments any,
 	}
 	s.succeeded()
 	return convertResult(res), false, nil
+}
+
+// callMeta returns the _meta keys that name the run behind a call: the
+// run, its profile, and the node of the process, and for a trusted entry
+// the principal of the run and its kind (fw.MCPMetaRun and the keys after
+// it). A call without a run in ctx gets none, and a run without a
+// principal gets no principal keys. The keys are data for the server; fw
+// reads nothing back from them.
+func (s *Server) callMeta(ctx context.Context) sdk.Meta {
+	info := fw.RunInfoFrom(ctx)
+	if info.RunID == "" {
+		return nil
+	}
+	m := sdk.Meta{fw.MCPMetaRun: info.RunID}
+	if info.Agent != "" {
+		m[fw.MCPMetaAgent] = info.Agent
+	}
+	if a := fw.AgentFrom(ctx); a != nil && a.Node() != "" {
+		m[fw.MCPMetaNode] = a.Node()
+	}
+	if s.cfg.Trusted && info.Principal != "" {
+		m[fw.MCPMetaPrincipal] = info.Principal
+		if info.PrincipalKind != "" {
+			m[fw.MCPMetaPrincipalKind] = info.PrincipalKind
+		}
+	}
+	return m
 }
 
 // callFailed turns a failed call into an error result and records the

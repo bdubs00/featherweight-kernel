@@ -523,7 +523,7 @@ Each HTTP server entry has these fields:
 | `auth.oauth` | OAuth 2.1 client fields: `clientId`, `clientSecret`, `scopes`, and `grant`, which says whose authority a call carries (section 7.11) | none |
 | `headers` | Extra headers on every request. Values resolve through `Secrets`. | none |
 | `timeout` | Time limit per call | `60s` |
-| `trusted` | Treat the tool annotations and titles of this server as true. A title becomes the label of the button that allows a call. | `false` |
+| `trusted` | Treat the tool annotations and titles of this server as true. A title becomes the label of the button that allows a call. Each call also names the person of the run in `_meta` (see The run behind a call). | `false` |
 
 Use `https://` for every endpoint outside the cluster. `fw` logs a warning at start for an `http://` endpoint whose host is not a loopback address or a cluster-local name.
 
@@ -556,6 +556,19 @@ A result with `resultType: "input_required"` means the server needs something be
 - `sampling/createMessage` and `roots/list` are deprecated in this revision. `fw` answers them for older servers only: sampling with the run model under the run budget, roots with the workspace paths.
 
 A result with `resultType: "task"` needs the extension `io.modelcontextprotocol/tasks` in the capabilities that `fw` declared. `fw` stores the `taskId` in the `fw.tool.requested` data, polls `tasks/get` at `pollIntervalMs`, and answers `input_required` through `tasks/update`. If the run is canceled, `fw` sends `tasks/cancel`. A resumed run continues polling from the stored task id. This is how a long upstream tool survives a suspend and a resume.
+
+#### The run behind a call
+
+Every `tools/call` of a run carries the run in `_meta`, next to the keys that the revision requires:
+
+| Key | Value |
+|---|---|
+| `io.featherweight/run` | The id of the run |
+| `io.featherweight/agent` | The name of the profile of the run |
+| `io.featherweight/node` | The name of the process, from the key `node` of the configuration, as the egress stream carries it (section 9.4) |
+| `io.featherweight/principal`, `io.featherweight/principalKind` | The subject and the kind of the person of the run. Only a server with `trusted: true` gets them. |
+
+A call without a run, such as a call of a Go caller outside the turn loop, carries none of these keys. A run without a principal carries no principal keys. A server, such as the MCP server of the front of a fleet, reads the keys to know which run and which agent calls it, and for which person. The keys are data for the server. The kernel reads nothing back from them, and they grant nothing: a server still authenticates the caller, because any client can send the same keys. The Go names of the keys are `fw.MCPMetaRun`, `fw.MCPMetaAgent`, `fw.MCPMetaNode`, `fw.MCPMetaPrincipal`, and `fw.MCPMetaPrincipalKind`.
 
 #### Failure handling
 
