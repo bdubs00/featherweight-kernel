@@ -376,25 +376,7 @@ func egressOf(e *EgressSpec) *v1alpha1.EgressSpec {
 	if e == nil {
 		return nil
 	}
-	out := &v1alpha1.EgressSpec{}
-	hosts := func(h *EgressHosts) *v1alpha1.EgressHosts {
-		return &v1alpha1.EgressHosts{Hostnames: append([]string(nil), h.Hostnames...), Ports: append([]int32(nil), h.Ports...)}
-	}
-	for _, r := range e.Rules {
-		rule := &v1alpha1.EgressRule{}
-		switch {
-		case r.HTTP != nil:
-			rule.Http = hosts(r.HTTP)
-		case r.HTTPS != nil:
-			rule.Https = hosts(r.HTTPS)
-		case r.TLS != nil:
-			rule.Tls = hosts(r.TLS)
-		default:
-			continue
-		}
-		out.Rules = append(out.Rules, rule)
-	}
-	return out
+	return &v1alpha1.EgressSpec{Hosts: append([]string(nil), e.Hosts...)}
 }
 
 // childName makes the name of a child Task from the name of its parent and

@@ -60,27 +60,17 @@ type TaskSpec struct {
 	Egress     *EgressSpec    `yaml:"egress,omitempty" json:"egress,omitempty"`
 }
 
-// EgressSpec is spec.egress of a Task: the outbound connections that the
-// Task may open, which ax writes to the egress policy of the actor before
-// the Task first runs. A child Task inherits the egress of its parent, so
-// it reaches what the parent reaches and nothing more.
+// EgressSpec is spec.egress of a Task: the outbound destinations that the
+// Task may reach, which ax writes to the egress policy of the actor before
+// the Task first runs. Each host is a DNS name with an optional scheme and
+// an optional port, "[http://|https://]host[:port]": a name alone is TLS
+// on port 443 that the egress gateway forwards without decryption, http://
+// is cleartext HTTP on port 80, https:// is HTTPS on port 443 that the
+// gateway intercepts, and a port after the name replaces the default. A
+// child Task inherits the egress of its parent, so it reaches what the
+// parent reaches and nothing more.
 type EgressSpec struct {
-	Rules []EgressRule `yaml:"rules,omitempty" json:"rules,omitempty"`
-}
-
-// EgressRule allows one protocol to a set of destinations. Exactly one of
-// HTTP, HTTPS, and TLS is set.
-type EgressRule struct {
-	HTTP  *EgressHosts `yaml:"http,omitempty" json:"http,omitempty"`
-	HTTPS *EgressHosts `yaml:"https,omitempty" json:"https,omitempty"`
-	TLS   *EgressHosts `yaml:"tls,omitempty" json:"tls,omitempty"`
-}
-
-// EgressHosts names the destinations of a rule: hostname patterns and
-// ports, with the default port of the protocol when Ports is empty.
-type EgressHosts struct {
-	Hostnames []string `yaml:"hostnames,omitempty" json:"hostnames,omitempty"`
-	Ports     []int32  `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Hosts []string `yaml:"hosts,omitempty" json:"hosts,omitempty"`
 }
 
 // EnvVar is one spec.env entry.

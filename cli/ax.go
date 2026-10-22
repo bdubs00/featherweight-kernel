@@ -101,7 +101,7 @@ func (g *globals) axFlags(sub string, a *axArgs) *flag.FlagSet {
 	if in("render", "up") {
 		fs.StringVar(&a.file, "f", "", "the profile `file`: a fragment of fw.yaml, such as policy, access, and agents")
 		fs.StringVar(&a.image, "image", "", "the `image` of the Task by digest, name@sha256:... (required)")
-		fs.Var(&a.egress, "egress", "allow one more `destination`: host:port (http), tls:host:port, https:host:port, or a URL; repeat for more")
+		fs.Var(&a.egress, "egress", "allow one more `destination`, as spec.egress.hosts takes it: a host for TLS on port 443, http://host[:port], https://host[:port], or a ws, wss, or rediss URL; repeat for more")
 		fs.Var(&a.env, "env", "set `NAME=VALUE` in spec.env of the Task; repeat for more")
 		fs.Var(&a.files, "workspace-file", "ship the local file at `path=localpath` in the Workspace; repeat for more")
 		fs.BoolVar(&a.debug, "debug", false, "set spec.debug, which turns on the guest services of ax ssh; they carry no authentication")
@@ -223,8 +223,7 @@ func renderAX(cfg *fw.Config, a *axArgs, lookup func(string) (string, bool), pla
 	}
 	egress := &v1alpha1.EgressSpec{}
 	for _, rule := range rules {
-		h := &v1alpha1.EgressHosts{Hostnames: []string{rule.host}, Ports: []int32{rule.port}}
-		egress.Rules = append(egress.Rules, map[string]*v1alpha1.EgressRule{"http": {Http: h}, "tls": {Tls: h}, "https": {Https: h}}[rule.kind])
+		egress.Hosts = append(egress.Hosts, rule.entry())
 	}
 	meta := func(name string) *v1alpha1.ObjectMeta { return &v1alpha1.ObjectMeta{Name: name, Atespace: a.atespace} }
 	r.ws = &v1alpha1.Workspace{ApiVersion: ax.APIVersion, Kind: ax.KindWorkspace, Metadata: meta(ws), Spec: &v1alpha1.WorkspaceSpec{Files: files}}
@@ -534,6 +533,29 @@ type axRule struct {
 
 func (r axRule) addr() string { return net.JoinHostPort(r.host, strconv.Itoa(int(r.port))) }
 
+// entry is the rule as an entry of spec.egress.hosts: the host and the
+// port, behind the scheme for http and https, and bare for tls.
+func (r axRule) entry() string {
+	if r.kind == "tls" {
+		return r.addr()
+	}
+	return r.kind + "://" + r.addr()
+}
+
+// parseAXExtra reads one --egress value: an entry of spec.egress.hosts as
+// the ax API takes it, or a ws, wss, or rediss URL, which gives the rule
+// of its scheme as an endpoint does.
+func parseAXExtra(s string) (axRule, error) {
+	if scheme, _, ok := strings.Cut(s, "://"); ok && (scheme == "ws" || scheme == "wss" || scheme == "rediss") {
+		return parseAXURL(s)
+	}
+	e, err := v1alpha1.ParseEgressHost(s)
+	if err != nil {
+		return axRule{}, err
+	}
+	return axRule{kind: e.Protocol, host: e.Host, port: e.Port}, nil
+}
+
 // parseAXURL reads an endpoint, a URL or a host:port that means http, as
 // the rule that it needs: http for http and ws, tls for https, wss, and
 // rediss.
@@ -574,15 +596,11 @@ func axRules(c *fw.Config, extras []string, getenv func(string) string, w *axRen
 		}
 	}
 	for _, s := range extras {
-		// host:port is http, a URL takes the rule of its scheme, and
-		// tls:host:port and https:host:port name theirs, port 443 by default.
-		r, err := parseAXURL(s)
-		if k, rest, _ := strings.Cut(s, ":"); (k == "tls" || k == "https") && !strings.HasPrefix(rest, "//") {
-			r, err = parseAXURL("https://" + rest)
-			r.kind = k
-		}
-		if err != nil || r.kind == "" || (!strings.Contains(s, "://") && strings.Contains(s, "/")) {
-			return nil, fmt.Errorf("ax: --egress %q is not host:port, tls:host:port, https:host:port, or a URL", s)
+		// An entry of spec.egress.hosts gives its rule, and a ws, wss, or
+		// rediss URL the rule of its scheme, as an endpoint does.
+		r, err := parseAXExtra(s)
+		if err != nil {
+			return nil, fmt.Errorf("ax: --egress %q is not an entry of spec.egress.hosts ([http://|https://]host[:port]) or a ws, wss, or rediss URL: %v", s, err)
 		}
 		if !slices.Contains(rules, r) {
 			rules = append(rules, r)

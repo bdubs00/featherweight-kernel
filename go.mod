@@ -117,4 +117,4 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 )
 
-replace github.com/google/ax => github.com/bdubs00/ax v0.3.2-0.20261018223907-fc509c5026dc
+replace github.com/google/ax => github.com/bdubs00/ax v0.3.2-0.20261022230613-27c950eb99fc

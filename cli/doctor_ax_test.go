@@ -102,7 +102,7 @@ func TestDoctorAXReach(t *testing.T) {
 		"bus 127.0.0.1:4222 (the egress gateway carries only HTTP and TLS)",
 		"tokens " + closed + " (no answer: ",
 		"mcp github " + host(denied.URL) + " (the egress gateway denies it)",
-		"fw ax render derives a rule for each endpoint",
+		"fw ax render derives a host for each endpoint",
 		"; these answer: model openai " + host(answering.URL),
 		"mcp secure " + host(secure.URL) + " (its certificate does not verify here)",
 		"mcp tickets " + host(answering.URL),
@@ -153,7 +153,7 @@ func TestDoctorAXTrust(t *testing.T) {
 	t.Cleanup(func() { axTrustBundle = prev })
 
 	ok, line := doctorAXTrust(context.Background(), nil, nil, time.Second)
-	if !ok || line != "ax trust bundle: absent at "+axTrustBundle+"; https egress rules need the SystemInfo volume there, so use http and tls rules" {
+	if !ok || line != "ax trust bundle: absent at "+axTrustBundle+"; https:// hosts of spec.egress need the SystemInfo volume there, so use http:// and plain hosts" {
 		t.Errorf("absent: %v %q", ok, line)
 	}
 	if err := os.MkdirAll(filepath.Dir(axTrustBundle), 0o755); err != nil {
@@ -173,7 +173,7 @@ func TestDoctorAXTrust(t *testing.T) {
 	if err := os.WriteFile(axTrustBundle, append(data, data...), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if ok, line := doctorAXTrust(context.Background(), nil, nil, time.Second); !ok || line != "ax trust bundle: present at "+axTrustBundle+" with 2 certificates; https egress rules can work" {
+	if ok, line := doctorAXTrust(context.Background(), nil, nil, time.Second); !ok || line != "ax trust bundle: present at "+axTrustBundle+" with 2 certificates; https:// hosts of spec.egress can work" {
 		t.Errorf("present: %v %q", ok, line)
 	}
 }
