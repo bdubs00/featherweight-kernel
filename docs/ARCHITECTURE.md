@@ -629,10 +629,34 @@ A rule is one of four forms:
 |---|---|---|
 | a flag | `destructive` | every tool with that flag |
 | a tool glob | `git.*` | the tool name |
-| a tool and a command pattern | `bash: git push*` | the `command` field of the input |
+| a tool and a command pattern | `bash: git push*` | the `command` field of the input, and for a deny or an ask rule each simple command in it |
 | a tool, a field, and a pattern | `files: path=*.env` | that string field of the input |
 
 In a command or field pattern, `*` matches any text, slashes included, and `?` matches one character. If the input holds that field, the field form applies. Otherwise the text matches the command, so `bash: FOO=bar*` still matches a command. With the field form, a deployment restricts what a tool call can touch: a path, a URL, a subject, a method.
+
+#### Compound commands
+
+A command pattern matches the whole text of the command from its start. A model often joins commands, as in `cd /work && git push`. So a deny or an ask rule also matches each simple command in the text. A simple command is one command and its arguments, such as `git push origin main`. The kernel splits the text where the shell starts a new command: at `&&`, `||`, `;`, `|`, `&`, and a new line. A separator inside quotes or after a backslash does not split the text. A redirection such as `2>&1` or `&>file` does not split it either. The kernel removes the blanks at the start and the end of each part. The field form on the field `command`, such as `bash: command=git push*`, splits the same way.
+
+| Rule | Command | Verdict |
+|---|---|---|
+| `ask: bash: git push*` | `cd /work && git push origin main 2>&1` | ask |
+| `ask: bash: git push*` | `echo "a && git push"` | no match: the separator is inside quotes |
+| `deny: bash: rm -rf*` | `make clean; rm -rf build` | deny |
+
+The shell also runs a command in other places. So the kernel matches these parts too (`fw/command.go`):
+
+- Each simple command inside `( )`, `$( )`, `<( )`, and backquotes, also inside double quotes. So `echo "$(git push)"` matches `git push*`. Single quotes keep their text as data, so `echo '$(git push)'` does not match.
+- The text from the command word on. Variable assignments such as `FOO=1` can come before the command word. A function header such as `f()` can come there too. So can the reserved words `!`, `{`, `if`, `then`, and `elif`. The reserved words `else`, `do`, `while`, `until`, and `coproc` can come there too. So `GIT_SSH_COMMAND=x git push` and `if git push; then` match `git push*`.
+- After a runner, the text from each later word on. A runner is a command that runs another command from its arguments. The runners are `sudo`, `doas`, `su`, `runuser`, `env`, `time`, `nohup`, and `xargs`. `nice`, `ionice`, `timeout`, `stdbuf`, `setsid`, `chroot`, and `flock` are runners too. So are `watch`, `command`, `builtin`, `exec`, `eval`, `find`, and `ssh`. The last runners are the shells `sh`, `bash`, `zsh`, `dash`, `ksh`, and `fish`. A later word can also hold a whole command line, as the argument of `sh -c` does. When a later word holds a blank, a quote, or a special character, the kernel reads it as a command line too. It removes the quotes of the word first. So `sudo -u ci git push`, `echo origin | xargs git push`, and `bash -c 'cd x && git push'` match `git push*`.
+- Each line of a here-document. When its delimiter has no quotes, a body runs its `$( )` parts. A script that a body writes to a file can run later. A quote in a body does not reach past its line.
+- Each of these parts without its quotes and backslashes, with one space between its words. So `git 'push'` and `git  push` match `git push*`.
+
+The split errs on the side of a match. A quote that does not close counts as a plain character, so it hides no text. A word after a runner matches also as a plain argument, as in `sudo echo git push`. A line of a here-document that only goes to a file matches too. Such a command asks although it does not have to. A command that the kernel cannot split within its bounds matches every deny and ask rule with a command pattern for its tool. The bounds are 8 levels of nesting and 16 MiB for all the parts together.
+
+An allow rule matches the whole text of the command only. One part of a compound command never allows the other parts. So `allow: bash: git status*` does not allow `cd x && git status`. A deny or an ask rule that matches a part wins over an allow rule that matches the whole text.
+
+A command pattern guards against the plain forms of a command. It is not a sandbox. It matches the words as the model wrote them. So `git push*` does not match `git -C repo push`, a command in a variable such as `$GIT push`, or a script that runs `git push`. A rule for such a form names it too, such as `bash: git -C * push*`. A boundary that must hold does not rest on a command pattern alone. The run then also lacks the credential, or the agent gets a narrower tool in place of `bash`.
 
 A tool can resolve its input before the policy decides (`fw.Resolver`). The `files` tool gives the real path of the file, relative to its root, after `./`, an absolute path, and symbolic links. With `tools.files.perRun`, its root is the directory of the run, so a rule such as `files: path=docs/*` matches `docs` in that directory. A deny or an ask rule matches the path of the model or the resolved path. An allow rule matches only the resolved path, so `docs/../secrets/a` does not pass `allow: files: path=docs/*`. `policy.external` gets the resolved input in the field `resolved`.
 

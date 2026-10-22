@@ -58,6 +58,15 @@ func (f PolicyFunc) Decide(ctx context.Context, call ToolCall) Decision { return
 //     holds that field; otherwise the text matches the command, so
 //     "bash: FOO=bar*" still matches a command.
 //
+// A rule that matches the field "command", in the command form or as
+// "command=", matches the whole text of the command. A deny or an ask rule
+// also matches each simple command of a compound command, such as the
+// "git push origin main" of "cd /work && git push origin main", and the
+// other forms that commandForms gives. A command that passes a bound of
+// the split matches every such deny and ask rule. An allow rule matches
+// the whole text only, so one part of a compound command never allows
+// the other parts.
+//
 // When the tool resolves its input (see Resolver), a field rule also sees
 // the resolved value, such as the real path of a file relative to the root
 // of the files tool. A deny or an ask rule matches the value of the model
@@ -128,18 +137,19 @@ func rulesClauses(r Rules) []Rules {
 // and clauses nest recursively. The reason names the clause that decided.
 func NewRulesPolicy(r Rules) Policy {
 	own := PolicyFunc(func(_ context.Context, call ToolCall) Decision {
+		m := newCallMatcher(call)
 		for _, rule := range r.Deny {
-			if ruleMatches(rule, call, false) {
+			if m.matches(rule, false) {
 				return Decision{Verdict: VerdictDeny, Reason: "rule: deny " + rule}
 			}
 		}
 		for _, rule := range r.Ask {
-			if ruleMatches(rule, call, false) {
+			if m.matches(rule, false) {
 				return Decision{Verdict: VerdictAsk, Reason: "rule: ask " + rule}
 			}
 		}
 		for _, rule := range r.Allow {
-			if ruleMatches(rule, call, true) {
+			if m.matches(rule, true) {
 				return Decision{Verdict: VerdictAllow, Reason: "rule: allow " + rule}
 			}
 		}
@@ -173,42 +183,100 @@ func NewRulesPolicy(r Rules) Policy {
 // field rule of an allow list, which matches only the resolved value of a
 // field when the tool resolves it.
 func ruleMatches(rule string, call ToolCall, allow bool) bool {
+	return newCallMatcher(call).matches(rule, allow)
+}
+
+// callMatcher matches the rules of a policy against one tool call. It
+// decodes the input once, and it splits a command once for all the rules.
+type callMatcher struct {
+	call  ToolCall
+	in    map[string]json.RawMessage
+	res   map[string]json.RawMessage
+	resOK bool
+	split map[string]commandSplit
+}
+
+// commandSplit is the result of commandForms for one text.
+type commandSplit struct {
+	forms    []string
+	complete bool
+}
+
+func newCallMatcher(call ToolCall) *callMatcher {
+	m := &callMatcher{call: call}
+	_ = json.Unmarshal(call.Input, &m.in)
+	m.resOK = json.Unmarshal(call.Resolved, &m.res) == nil
+	return m
+}
+
+// matches reports whether a rule matches the call. allow selects the rule
+// of an allow list: its field rule matches only the resolved value of a
+// field when the tool resolves it, and its command rule matches only the
+// whole text of the command.
+func (m *callMatcher) matches(rule string, allow bool) bool {
 	rule = strings.TrimSpace(rule)
 	if tool, rest, ok := strings.Cut(rule, ":"); ok {
-		if !globMatch(strings.TrimSpace(tool), call.Spec.Name) {
+		if !globMatch(strings.TrimSpace(tool), m.call.Spec.Name) {
 			return false
 		}
 		rest = strings.TrimSpace(rest)
-		var in map[string]json.RawMessage
-		_ = json.Unmarshal(call.Input, &in)
 		if field, pattern, ok := strings.Cut(rest, "="); ok && isFieldName(field) {
-			if raw, present := in[field]; present {
+			if raw, present := m.in[field]; present {
 				pattern = strings.TrimSpace(pattern)
-				var res map[string]json.RawMessage
-				if json.Unmarshal(call.Resolved, &res) == nil {
-					if r, known := res[field]; known {
+				if m.resOK {
+					if r, known := m.res[field]; known {
 						if allow {
-							return wildcardMatch(pattern, stringOf(r))
+							return m.valueMatches(field, pattern, stringOf(r), allow)
 						}
-						return wildcardMatch(pattern, stringOf(raw)) || wildcardMatch(pattern, stringOf(r))
+						return m.valueMatches(field, pattern, stringOf(raw), allow) || m.valueMatches(field, pattern, stringOf(r), allow)
 					}
 				}
-				return wildcardMatch(pattern, stringOf(raw))
+				return m.valueMatches(field, pattern, stringOf(raw), allow)
 			}
 		}
-		return wildcardMatch(rest, stringOf(in["command"]))
+		return m.valueMatches("command", rest, stringOf(m.in["command"]), allow)
 	}
 	switch strings.ToLower(rule) {
 	case "readonly", "read-only":
-		return call.Spec.ReadOnly
+		return m.call.Spec.ReadOnly
 	case "idempotent":
-		return call.Spec.Idempotent
+		return m.call.Spec.Idempotent
 	case "destructive":
-		return call.Spec.Destructive
+		return m.call.Spec.Destructive
 	case "parallel", "parallelsafe":
-		return call.Spec.ParallelSafe
+		return m.call.Spec.ParallelSafe
 	}
-	return globMatch(rule, call.Spec.Name)
+	return globMatch(rule, m.call.Spec.Name)
+}
+
+// valueMatches matches a pattern against the value of a field of the
+// input. A deny or an ask rule on the field "command" also matches each
+// form of the command (commandForms), and every form of a command that
+// passes a bound of the split.
+func (m *callMatcher) valueMatches(field, pattern, value string, allow bool) bool {
+	if wildcardMatch(pattern, value) {
+		return true
+	}
+	if allow || field != "command" || value == "" {
+		return false
+	}
+	sp, ok := m.split[value]
+	if !ok {
+		sp.forms, sp.complete = commandForms(value)
+		if m.split == nil {
+			m.split = map[string]commandSplit{}
+		}
+		m.split[value] = sp
+	}
+	if !sp.complete {
+		return true
+	}
+	for _, f := range sp.forms {
+		if wildcardMatch(pattern, f) {
+			return true
+		}
+	}
+	return false
 }
 
 // isFieldName reports whether s is a JSON field name of the simple kind:
