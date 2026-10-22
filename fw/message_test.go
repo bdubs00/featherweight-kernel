@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,81 @@ func TestMessageFromAnAgentIsABlock(t *testing.T) {
 	req = s.requests()[2]
 	if last := req.Messages[len(req.Messages)-1]; TextOf(last.Content) != "Ship it." || req.System != s.requests()[1].System {
 		t.Fatalf("the message of a person = %+v, system %q", last, req.System)
+	}
+}
+
+// requestedOf returns the data of every fw.model.requested of a run.
+func requestedOf(t *testing.T, l Ledger, run string) []ModelRequestedData {
+	t.Helper()
+	var out []ModelRequestedData
+	for _, e := range ledgerEvents(t, l, run) {
+		var d ModelRequestedData
+		if e.Type == EvModelRequested && e.Decode(&d) == nil {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// Each fw.model.requested names the sentences of the kernel that end the
+// system prompt of its call, in their order, and holds no text of the
+// prompt. A call without such a sentence names none.
+func TestModelRequestedNamesTheSystemNotes(t *testing.T) {
+	ctx := testCtx(t)
+	token := &Principal{Subject: "token", Kind: KindToken}
+	from := MessageFrom{Kind: FromAgent, Name: "migrator-1"}
+	cases := []struct {
+		name  string
+		tools []Tool
+		first []string
+		later []string
+	}{
+		{"no context", nil, nil, []string{SystemNoteMessage}},
+		{"context", []Tool{&contextTool{name: "notes", text: "- /memories/a.md: a note"}}, []string{SystemNoteContext}, []string{SystemNoteContext, SystemNoteMessage}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newScript(endTurn("first"), endTurn("second"), endTurn("third"))
+			a := newTestAgent(t, s.Model(), WithTools(c.tools...))
+			r, err := a.Run(ctx, "review the change")
+			mustState(t, r, err, StateCompleted)
+			// A message of a person adds no sentence.
+			if err := a.Send(WithPrincipal(ctx, token), r.ID, UserText("Look again."), OriginHTTP, WithMessageFrom(MessageFrom{Kind: FromPerson, Name: "alice"})); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Wait(ctx, r.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.Send(WithPrincipal(ctx, token), r.ID, UserText("The tests pass."), OriginHTTP, WithMessageFrom(from)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Wait(ctx, r.ID); err != nil {
+				t.Fatal(err)
+			}
+			got := requestedOf(t, a.Ledger(), r.ID)
+			want := [][]string{c.first, c.first, c.later}
+			if len(got) != len(want) {
+				t.Fatalf("fw.model.requested = %+v", got)
+			}
+			for i, d := range got {
+				if !slices.Equal(d.SystemNotes, want[i]) {
+					t.Errorf("call %d names %q, want %q", i, d.SystemNotes, want[i])
+				}
+				// The names match the sentences of the request.
+				sys := s.requests()[i].System
+				for name, text := range systemNoteText {
+					if strings.Contains(sys, text) != slices.Contains(d.SystemNotes, name) {
+						t.Errorf("call %d: the prompt holds %s %v, the event names %q", i, name, strings.Contains(sys, text), d.SystemNotes)
+					}
+				}
+			}
+			// The event holds names, never the text of the prompt.
+			for _, e := range ledgerEvents(t, a.Ledger(), r.ID) {
+				if e.Type == EvModelRequested && (strings.Contains(string(e.Data), "another agent") || strings.Contains(string(e.Data), "context> blocks")) {
+					t.Fatalf("fw.model.requested holds the text of a sentence: %s", e.Data)
+				}
+			}
+		})
 	}
 }
 

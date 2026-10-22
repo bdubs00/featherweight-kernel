@@ -324,13 +324,28 @@ type TurnData struct {
 // Report is true for the final report call at a limit (see Budget). Its
 // response is the report and not a turn: the kernel runs no tool call of
 // it, and the run finishes after it.
+//
+// SystemNotes names the sentences of the kernel at the end of the system
+// prompt of the call, in their order: SystemNoteContext for ContextNote
+// and SystemNoteMessage for MessageNote. It holds the names only, never
+// the text of the prompt, so a consumer of the egress stream can check
+// that a call carried a sentence. The turn loop of the kernel sets it,
+// and a hosted harness, which builds its own prompt, does not.
 type ModelRequestedData struct {
-	Provider             string `json:"provider"`
-	Model                string `json:"model"`
-	Effort               string `json:"effort,omitempty"`
-	EstimatedInputTokens int    `json:"estimatedInputTokens,omitempty"`
-	Report               bool   `json:"report,omitempty"`
+	Provider             string   `json:"provider"`
+	Model                string   `json:"model"`
+	Effort               string   `json:"effort,omitempty"`
+	EstimatedInputTokens int      `json:"estimatedInputTokens,omitempty"`
+	Report               bool     `json:"report,omitempty"`
+	SystemNotes          []string `json:"systemNotes,omitempty"`
 }
+
+// Names of the sentences of the kernel in the system prompt of a model
+// call (ModelRequestedData.SystemNotes).
+const (
+	SystemNoteContext = "context" // ContextNote: a context block holds data
+	SystemNoteMessage = "message" // MessageNote: a message block of an agent holds data
+)
 
 // ModelRespondedData is the payload of fw.model.responded. LatencyMS is
 // the whole call, the wait for a slot included. FirstByteMS is the time

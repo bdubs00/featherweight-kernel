@@ -551,15 +551,8 @@ func (a *Agent) callRequest(ctx context.Context, rs *runState, c *cursor, prof A
 	if c.brief != "" {
 		system += "\n\n" + c.brief
 	}
-	if c.context != "" {
-		system += "\n\n" + ContextNote
-	}
-	if c.fromAgent {
-		// The sentence comes with the first message from an agent, so a
-		// run that never gets one keeps its prompt and its cached prefix.
-		// It is not part of the text of the profile, so the digests of the
-		// run (ResolvedProfile) stay as they are.
-		system += "\n\n" + MessageNote
+	for _, name := range systemNotes(c) {
+		system += "\n\n" + systemNoteText[name]
 	}
 	return &Request{
 		System:    system,
@@ -569,6 +562,30 @@ func (a *Agent) callRequest(ctx context.Context, rs *runState, c *cursor, prof A
 		MaxTokens: defaultMaxTokens,
 		Metadata:  map[string]string{"runId": rs.id, "agent": rs.agent},
 	}, effort, nil
+}
+
+// systemNoteText holds the sentence of each name of SystemNotes.
+var systemNoteText = map[string]string{
+	SystemNoteContext: ContextNote,
+	SystemNoteMessage: MessageNote,
+}
+
+// systemNotes names the sentences of the kernel that end the system prompt
+// of a model call of the run, in their order. callRequest adds them, and
+// fw.model.requested records their names. ContextNote comes when a tool
+// added data to the first user message. MessageNote comes with the first
+// message from an agent, so a run that never gets one keeps its prompt
+// and its cached prefix. Neither is part of the text of the profile, so
+// the digests of the run (ResolvedProfile) stay as they are.
+func systemNotes(c *cursor) []string {
+	var names []string
+	if c.context != "" {
+		names = append(names, SystemNoteContext)
+	}
+	if c.fromAgent {
+		names = append(names, SystemNoteMessage)
+	}
+	return names
 }
 
 // stepModel checks the budget, compacts the history when it is too long,
@@ -636,6 +653,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		Model:                name,
 		Effort:               requestedEffort(effort),
 		EstimatedInputTokens: tokens,
+		SystemNotes:          systemNotes(c),
 	})
 	rs.emitMu.Unlock()
 	if err != nil {

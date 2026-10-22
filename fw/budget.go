@@ -259,6 +259,7 @@ func (a *Agent) stepReport(ctx context.Context, rs *runState, c *cursor, n int) 
 		Effort:               requestedEffort(effort),
 		EstimatedInputTokens: tokens,
 		Report:               true,
+		SystemNotes:          systemNotes(c),
 	})
 	rs.emitMu.Unlock()
 	if err != nil {
