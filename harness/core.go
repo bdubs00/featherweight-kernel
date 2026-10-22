@@ -88,6 +88,9 @@ type state struct {
 	terminal bool
 
 	unseen []message // the messages after prompted
+	// fromAgent is true from the first message from another agent on: the
+	// added system text then says what its block is (fw.MessageNote).
+	fromAgent bool
 	// decided holds the decisions that the harness did not get yet, in
 	// order, and decisions every decision by the call id.
 	decided   []decision
@@ -181,10 +184,18 @@ func scan(evs []fw.Event) *state {
 			// Every message counts, so prompted covers it once the harness
 			// got the messages before and after it (Hosted.Finish). Only a
 			// message of a person or a caller has a text for the harness.
+			// A message from another agent reaches the harness inside its
+			// block, as the model of the kernel reads it.
 			m := message{seq: e.Seq}
 			var d fw.MessageReceivedData
 			if e.Decode(&d) == nil && d.Origin != fw.OriginKernel && (d.Role == fw.RoleUser || d.Role == fw.RoleSystem) {
 				m.text = messageText(d.Content)
+				if d.From != nil && d.From.Kind == fw.FromAgent {
+					s.fromAgent = true
+					if m.text != "" {
+						m.text = fw.MessageBlock(*d.From, m.text)
+					}
+				}
 			}
 			msgs = append(msgs, m)
 		case EvEvent:

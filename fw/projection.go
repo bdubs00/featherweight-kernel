@@ -187,7 +187,11 @@ func (b *historyBuilder) history() History {
 }
 
 // receivedMessage returns the message of a fw.message.received event. Only
-// the roles user and system enter the history.
+// the roles user and system enter the history. A message from an agent
+// (MessageReceivedData.From) is a user message whose content sits inside
+// a block that names the agent (MessageBlock), so the model reads it as
+// data with the authority of a tool result. A message of a person reaches
+// the model as it came.
 func receivedMessage(e Event) (Message, bool) {
 	var d MessageReceivedData
 	if e.Decode(&d) != nil || len(d.Content) == 0 {
@@ -198,6 +202,9 @@ func receivedMessage(e Event) (Message, bool) {
 	}
 	if d.Role != RoleUser && d.Role != RoleSystem {
 		return Message{}, false
+	}
+	if d.fromAgent() {
+		return Message{Role: RoleUser, Content: agentContent(*d.From, d.Content)}, true
 	}
 	return Message{Role: d.Role, Content: d.Content}, true
 }

@@ -1061,6 +1061,7 @@ type SendOption func(*sendOptions)
 
 type sendOptions struct {
 	budget *Budget
+	from   *MessageFrom
 }
 
 // WithSendBudget changes the budget of the run together with the message:
@@ -1071,12 +1072,24 @@ type sendOptions struct {
 // time before the message count against the new limits.
 func WithSendBudget(b Budget) SendOption { return func(o *sendOptions) { o.budget = &b } }
 
+// WithMessageFrom names the party that wrote the message when the caller
+// relays it for that party (MessageReceivedData.From), such as the front
+// of a fleet that passes the message of one agent to another. Only the
+// process itself, without a principal in the context, the static token,
+// or a workload relays; Send refuses the option with ErrForbidden for any
+// other principal, so a person cannot pose as another party. A message
+// from an agent has the role user, and the model reads it inside a block
+// (MessageBlock) that has the authority of a tool result.
+func WithMessageFrom(f MessageFrom) SendOption { return func(o *sendOptions) { o.from = &f } }
+
 // Send appends a follow-up message to a run. A finished or idle run starts a
 // new turn. A run in the middle of a turn sends the message with its next
 // model call, after the tool results. A run that waits for an approval holds
 // the message until the decision. WithSendBudget changes the budget of the
 // run in the same step, before the message, so the turn that the message
-// starts has the new limits.
+// starts has the new limits. The message records the subject of the
+// principal in ctx as its sender (MessageReceivedData.By), and
+// WithMessageFrom the party that the sender relays it for.
 func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string, opts ...SendOption) error {
 	if err := a.k.writeError(); err != nil {
 		return err
@@ -1103,6 +1116,17 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 	}
 	if len(msg.Content) == 0 {
 		return fmt.Errorf("%w: a follow-up message has no content", ErrInvalidRequest)
+	}
+	if o.from != nil {
+		if err := checkMessageFrom(*o.from); err != nil {
+			return err
+		}
+		if !speaksForOthers(ctx) {
+			return fmt.Errorf("%w: only the static token or a workload can name the sender of a message", ErrForbidden)
+		}
+		if o.from.Kind == FromAgent && msg.Role != RoleUser {
+			return fmt.Errorf("%w: a message from an agent has the role user", ErrInvalidRequest)
+		}
 	}
 	if o.budget != nil {
 		if err := checkBudgetChange(*o.budget); err != nil {
@@ -1139,7 +1163,7 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 			return err
 		}
 	}
-	_, err = a.emitLocked(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin})
+	_, err = a.emitLocked(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin, By: subjectOf(ctx), From: o.from})
 	rs.emitMu.Unlock()
 	if err != nil {
 		return err

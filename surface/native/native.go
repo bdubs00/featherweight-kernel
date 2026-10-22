@@ -455,7 +455,7 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.ID != "" {
-		if p := fw.PrincipalFrom(r.Context()); p == nil || (p.Kind != fw.KindToken && p.Kind != fw.KindWorkload) {
+		if !trustedCaller(r) {
 			problem(w, r, http.StatusForbidden, "only the static token or a workload can name the id of a run")
 			return
 		}
@@ -673,11 +673,24 @@ func (s *server) runEvents(w http.ResponseWriter, r *http.Request) {
 // string or an array of content blocks. Content can be empty when the
 // message has files. Budget changes the budget of the run with the message
 // (fw.WithSendBudget): each field that it sets replaces the same limit for
-// the work that follows.
+// the work that follows. From names the party that wrote the message when
+// the caller relays it (fw.WithMessageFrom). Only a trusted caller, the
+// static token or a workload, sets it, as for the principal and the id of
+// a run.
 type messageBody struct {
 	Content json.RawMessage `json:"content"`
 	Files   []fileBody      `json:"files"`
 	Budget  *budgetBody     `json:"budget"`
+	From    *fw.MessageFrom `json:"from"`
+}
+
+// trustedCaller reports whether the caller of the request is the static
+// token or a workload, which can name another party in a body: the person
+// of a run, the id of a run, the sender of a message, or the person of a
+// reaction.
+func trustedCaller(r *http.Request) bool {
+	p := fw.PrincipalFrom(r.Context())
+	return p != nil && (p.Kind == fw.KindToken || p.Kind == fw.KindWorkload)
 }
 
 func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -702,6 +715,13 @@ func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	var opts []fw.SendOption
 	if budget != nil {
 		opts = append(opts, fw.WithSendBudget(*budget))
+	}
+	if body.From != nil {
+		if !trustedCaller(r) {
+			problem(w, r, http.StatusForbidden, "only the static token or a workload can name the sender of a message")
+			return
+		}
+		opts = append(opts, fw.WithMessageFrom(*body.From))
 	}
 	id := r.PathValue("id")
 	if err := s.a.Send(r.Context(), id, fw.Message{Role: fw.RoleUser, Content: blocks}, fw.OriginHTTP, opts...); err != nil {

@@ -609,6 +609,11 @@ func TestSummarizeNamesTheWork(t *testing.T) {
 			t.Errorf("%s: summary %q, want the suffix %q", c.name, got, c.want)
 		}
 	}
+	msg := fw.MustEvent("r", fw.EvMessageReceived, fw.MessageReceivedData{Role: fw.RoleUser, Origin: "http", By: "token",
+		From: &fw.MessageFrom{Kind: fw.FromAgent, Name: "reviewer"}, Content: []fw.Block{fw.Text("secret text")}})
+	if got := summarize(msg, map[string]string{}); !strings.HasSuffix(got, "fw.message.received role=user origin=http from=agent:reviewer by=token") {
+		t.Errorf("summary of a message = %q", got)
+	}
 	if got := runTitle(&fw.Run{Input: "Draft the notes. Then send them."}); got != "Draft the notes" {
 		t.Errorf("runTitle from the input = %q", got)
 	}

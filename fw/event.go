@@ -233,6 +233,16 @@ type MessageReceivedData struct {
 	Role    Role    `json:"role"`
 	Content []Block `json:"content"`
 	Origin  string  `json:"origin"`
+	// By is the subject of the principal that sent the message, as
+	// BudgetChangedData.By records it. It is empty for a message of the
+	// kernel and for a caller without a principal.
+	By string `json:"by,omitempty"`
+	// From names the party that wrote the message when the sender relays
+	// it for that party, such as the front of a fleet that passes the
+	// message of one agent to another (see MessageFrom). Only a trusted
+	// caller sets it (WithMessageFrom). A message from an agent reaches
+	// the model inside a block (MessageBlock).
+	From *MessageFrom `json:"from,omitempty"`
 	// Note names the kind of a system message from the kernel: NoteLoop,
 	// NoteTime, NoteBudget, or NoteReport, and of the user message from the
 	// kernel with the notes of a grader, NoteOutcome. It is empty for every
@@ -242,6 +252,30 @@ type MessageReceivedData struct {
 	// gives no note twice.
 	Budget *BudgetNoteData `json:"budget,omitempty"`
 }
+
+// MessageFrom names the party that wrote a message that another party
+// relays. Kind is FromPerson or FromAgent. Name is the name that the party
+// goes by, such as the handle of an agent or the subject of a person. Run
+// is the run of the agent that wrote the message, and Member is the seat
+// of the party in the work that relays the message, such as a member of
+// a channel. The kernel shows Kind and Name, puts them in the block of a
+// message from an agent, and reads nothing else. Each field holds at most
+// MaxMessageFromBytes bytes and no control character.
+type MessageFrom struct {
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Run    string `json:"run,omitempty"`
+	Member string `json:"member,omitempty"`
+}
+
+// Kinds of the party that wrote a relayed message (MessageFrom.Kind).
+const (
+	FromPerson = "person"
+	FromAgent  = "agent"
+)
+
+// MaxMessageFromBytes bounds each field of a MessageFrom.
+const MaxMessageFromBytes = 256
 
 // Kinds of the system messages from the kernel.
 const (

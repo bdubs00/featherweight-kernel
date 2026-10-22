@@ -120,6 +120,9 @@ func (b *cursorBuilder) apply(e Event) {
 		if e.Decode(&d) != nil {
 			break
 		}
+		if d.fromAgent() {
+			c.fromAgent = true
+		}
 		if d.Origin != OriginKernel {
 			c.reportInput(false)
 			break

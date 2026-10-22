@@ -59,6 +59,9 @@ func TestQualityInterventionsAndZeroEpisodes(t *testing.T) {
 	for _, origin := range []string{fw.OriginKernel, fw.OriginBus, fw.OriginTool, fw.OriginA2A} {
 		f.emit(fw.EvMessageReceived, fw.MessageReceivedData{Role: fw.RoleUser, Origin: origin})
 	}
+	// A message that the front relays from another agent is no action of
+	// a person.
+	f.emit(fw.EvMessageReceived, fw.MessageReceivedData{Role: fw.RoleUser, Origin: fw.OriginHTTP, By: "token", From: &fw.MessageFrom{Kind: fw.FromAgent, Name: "reviewer"}})
 	f.emit(fw.EvApprovalDecided, fw.ApprovalDecidedData{Decider: "parent"})
 	f.emit(fw.EvApprovalDecided, fw.ApprovalDecidedData{})
 	f.emit(fw.EvBudgetChanged, fw.BudgetChangedData{Origin: fw.OriginHTTP})

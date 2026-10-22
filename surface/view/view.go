@@ -416,7 +416,7 @@ func describe(e fw.Event) string {
 	case fw.EvMessageReceived:
 		var d fw.MessageReceivedData
 		if e.Decode(&d) == nil {
-			s := string(d.Role) + " message"
+			s := string(d.Role) + " message" + senderOf(d)
 			if d.Origin != "" {
 				s += " over " + d.Origin
 			}
@@ -630,6 +630,27 @@ func describe(e fw.Event) string {
 		}
 	}
 	return strings.TrimPrefix(e.Type, "fw.")
+}
+
+// senderOf names the sender of a message for its event line: " from the
+// agent reviewer through token" for a message that the static token relays
+// from an agent, " from alice" for a message of alice, and "" for a
+// message without a sender, such as a note of the kernel.
+func senderOf(d fw.MessageReceivedData) string {
+	if f := d.From; f != nil {
+		s := " from " + oneLine(f.Name, 60)
+		if f.Kind == fw.FromAgent {
+			s = " from the agent " + oneLine(f.Name, 60)
+		}
+		if d.By != "" && d.By != f.Name {
+			s += " through " + oneLine(d.By, 60)
+		}
+		return s
+	}
+	if d.By != "" {
+		return " from " + oneLine(d.By, 60)
+	}
+	return ""
 }
 
 // oneLine folds the whitespace of s and cuts it to n runes.

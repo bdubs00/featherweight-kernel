@@ -333,7 +333,10 @@ func intervention(e fw.Event, st *qualityRun) string {
 	case fw.EvMessageReceived:
 		var d fw.MessageReceivedData
 		_ = e.Decode(&d)
-		if d.Role == fw.RoleUser && d.Note == "" && interactive(d.Origin) {
+		// A message that a trusted caller relays from another agent is no
+		// action of a person.
+		fromAgent := d.From != nil && d.From.Kind == fw.FromAgent
+		if d.Role == fw.RoleUser && d.Note == "" && interactive(d.Origin) && !fromAgent {
 			return "followup"
 		}
 	case fw.EvBudgetChanged:

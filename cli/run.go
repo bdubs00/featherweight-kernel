@@ -495,6 +495,17 @@ func summarize(e fw.Event, tools map[string]string) string {
 		if e.Decode(&d) == nil {
 			add("model=%s tools=%d", d.Model, len(d.Tools))
 		}
+	case fw.EvMessageReceived:
+		var d fw.MessageReceivedData
+		if e.Decode(&d) == nil {
+			add("role=%s origin=%s", d.Role, d.Origin)
+			if d.From != nil {
+				add("from=%s:%s", d.From.Kind, oneLine(d.From.Name))
+			}
+			if d.By != "" {
+				add("by=%s", d.By)
+			}
+		}
 	case fw.EvTurnStarted, fw.EvTurnFinished:
 		var d fw.TurnData
 		if e.Decode(&d) == nil {

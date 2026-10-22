@@ -260,7 +260,9 @@ func memRights(tool string, notes, recall bool) string {
 // instructions of the run, then, for a run with the memory tool, the
 // memory section of the system prompt, the names of the tools of the
 // memory server when the harness has the server, and the sentence that
-// says that a context block holds data. It never holds a note.
+// says that a context block holds data, and last, from the first message
+// from another agent on, the sentence that says what the block of such a
+// message is. It never holds a note.
 func (r *run) systemText(server bool) string {
 	parts := []string{strings.TrimSpace(r.hr.Queued().Instructions)}
 	if notes, _ := r.h.memoryTools(r.hr.Queued()); notes {
@@ -269,6 +271,9 @@ func (r *run) systemText(server bool) string {
 			parts = append(parts, memToolsNote)
 		}
 		parts = append(parts, fw.ContextNote)
+	}
+	if r.st != nil && r.st.fromAgent {
+		parts = append(parts, fw.MessageNote)
 	}
 	return joinText(parts...)
 }

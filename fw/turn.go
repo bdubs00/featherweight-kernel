@@ -87,6 +87,7 @@ type cursor struct {
 	lastSeq    uint64
 	brief      string    // the brief of fw.run.started
 	context    string    // the context of fw.run.started (ContextBriefer)
+	fromAgent  bool      // a message from another agent arrived (MessageNote)
 	compactSeq uint64    // the latest fw.context.compacted
 	toolCalls  int       // fw.tool.requested events in the run
 	keptTurns  int       // the turns that a branch kept from its source (RunQueuedData.Kept)
@@ -158,6 +159,9 @@ func analyze(events []Event) *cursor {
 			var d MessageReceivedData
 			if e.Decode(&d) != nil {
 				break
+			}
+			if d.fromAgent() {
+				c.fromAgent = true
 			}
 			if d.Origin != OriginKernel {
 				c.reportInput(false)
@@ -549,6 +553,13 @@ func (a *Agent) callRequest(ctx context.Context, rs *runState, c *cursor, prof A
 	}
 	if c.context != "" {
 		system += "\n\n" + ContextNote
+	}
+	if c.fromAgent {
+		// The sentence comes with the first message from an agent, so a
+		// run that never gets one keeps its prompt and its cached prefix.
+		// It is not part of the text of the profile, so the digests of the
+		// run (ResolvedProfile) stay as they are.
+		system += "\n\n" + MessageNote
 	}
 	return &Request{
 		System:    system,

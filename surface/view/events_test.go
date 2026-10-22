@@ -69,3 +69,21 @@ func TestDescribeMemoryChanged(t *testing.T) {
 		}
 	}
 }
+
+func TestLineNamesTheSender(t *testing.T) {
+	for _, c := range []struct {
+		data fw.MessageReceivedData
+		want string
+	}{
+		{fw.MessageReceivedData{Role: fw.RoleUser, Origin: "http", By: "alice", Content: []fw.Block{fw.Text("again")}}, "user message from alice over http: again"},
+		{fw.MessageReceivedData{Role: fw.RoleUser, Origin: "http", By: "token", From: &fw.MessageFrom{Kind: fw.FromAgent, Name: "reviewer"}, Content: []fw.Block{fw.Text("rebase")}},
+			"user message from the agent reviewer through token over http: rebase"},
+		{fw.MessageReceivedData{Role: fw.RoleUser, Origin: "http", By: "token", From: &fw.MessageFrom{Kind: fw.FromPerson, Name: "alice"}, Content: []fw.Block{fw.Text("ship")}},
+			"user message from alice through token over http: ship"},
+		{fw.MessageReceivedData{Role: fw.RoleUser, Origin: "cli", Content: []fw.Block{fw.Text("go")}}, "user message over cli: go"},
+	} {
+		if got := describe(fw.MustEvent("r1", fw.EvMessageReceived, c.data)); got != c.want {
+			t.Errorf("line = %q, want %q", got, c.want)
+		}
+	}
+}
