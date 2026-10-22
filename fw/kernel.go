@@ -1810,6 +1810,10 @@ func cloneRun(r *Run) *Run {
 		cp.Outcome = &o
 	}
 	cp.Reactions = maps.Clone(r.Reactions)
+	if r.Activity != nil {
+		act := *r.Activity
+		cp.Activity = &act
+	}
 	return &cp
 }
 

@@ -396,6 +396,10 @@ type Run struct {
 	// ReactionHeart. It holds nothing more; the front of a fleet keeps
 	// the list. A branch counts its own reactions only.
 	Reactions map[string]int `json:"reactions,omitempty"`
+	// Activity is what a run that works does now: its turn, and the tool
+	// call that it waits for (see RunActivity). A run that waits or
+	// finished has none. The ledger never holds it.
+	Activity *RunActivity `json:"activity,omitempty"`
 	// kept is RunQueuedData.Kept: the events of a branch that are copies of
 	// the events of its source, whose usage the branch leaves out.
 	kept uint64
@@ -405,6 +409,27 @@ type Run struct {
 	// budget holds the set fields of every fw.budget.changed of the run,
 	// a later change on top of an earlier one (see Agent.ChangeBudget).
 	budget Budget
+	// turn is the number of the turn that is open, or 0, and paused the
+	// activity before the run waited for a decision or was suspended, so
+	// the activity comes back when the run works again (applyActivity).
+	turn   int
+	paused *RunActivity
+}
+
+// RunActivity is what a run that works does now, as the status projection
+// follows it from the events of the run (Run.Activity). Turn is the number
+// of the open turn. Tool and CallID name the tool call that the run waits
+// for, and are empty while the model works. Since is the time of the event
+// that began this activity: the start of the turn, the request of the
+// tool, the result of the tool, or a decision or a resume after which the
+// run works again. A surface words it with the step phrase of the tool
+// (view.ActivityPhrase), which reads the input of the call from the
+// fw.tool.requested of the run with the same call id.
+type RunActivity struct {
+	Turn   int       `json:"turn"`
+	Tool   string    `json:"tool,omitempty"`
+	CallID string    `json:"callId,omitempty"`
+	Since  time.Time `json:"since"`
 }
 
 // RunRequest describes a run to start.

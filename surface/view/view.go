@@ -1,7 +1,8 @@
 // Package view holds the shapes that the native API returns about agents
 // and runs: the caller with its roles, agent profiles with the role of the
 // caller and their abilities in plain words, run lists, file views, event
-// lines, and the catalog of tools. A surface that serves the same facts in
+// lines, the step phrases of tool calls and the activity of a run, and the
+// catalog of tools. A surface that serves the same facts in
 // another form, such as the workbench, builds on these functions, so every
 // surface reads one shape.
 //

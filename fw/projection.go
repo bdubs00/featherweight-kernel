@@ -268,6 +268,9 @@ func (r *Run) Apply(e Event, prices Prices) {
 	if !e.Time.IsZero() && !late {
 		r.UpdatedAt = e.Time
 	}
+	if !late {
+		r.applyActivity(e)
+	}
 	switch e.Type {
 	case EvRunQueued:
 		var d RunQueuedData
@@ -439,6 +442,73 @@ func (r *Run) Apply(e Event, prices Prices) {
 			r.State = StateFailed
 		}
 		r.Output, r.Error = d.Output, d.Error
+	}
+}
+
+// applyActivity follows what the run does now (Run.Activity), before the
+// event changes the state. fw.turn.started sets the turn and clears the
+// tool. fw.tool.requested sets the tool and the call id. fw.tool.responded
+// of that call clears the tool. fw.turn.finished and fw.run.finished clear
+// the activity and close the turn. fw.approval.requested and
+// fw.run.suspended clear the activity and keep it aside; a decision, or a
+// resume of a run that does not wait for one, brings it back while the
+// turn is open, so a call that asked a question goes on with its tool.
+// Each change sets a new value, so a copy of the run keeps its own.
+func (r *Run) applyActivity(e Event) {
+	switch e.Type {
+	case EvTurnStarted:
+		var d TurnData
+		if e.Decode(&d) != nil {
+			return
+		}
+		r.turn, r.paused = d.Turn, nil
+		r.Activity = &RunActivity{Turn: d.Turn, Since: e.Time}
+	case EvToolRequested:
+		var d struct {
+			Tool   string `json:"tool"`
+			CallID string `json:"callId"`
+		}
+		if e.Decode(&d) != nil || r.State.Terminal() {
+			return
+		}
+		r.Activity = &RunActivity{Turn: r.turn, Tool: d.Tool, CallID: d.CallID, Since: e.Time}
+	case EvToolResponded:
+		var d struct {
+			CallID string `json:"callId"`
+		}
+		if r.Activity == nil || r.Activity.CallID == "" || e.Decode(&d) != nil || d.CallID != r.Activity.CallID {
+			return
+		}
+		r.Activity = &RunActivity{Turn: r.turn, Since: e.Time}
+	case EvApprovalRequested:
+		r.paused, r.Activity = r.Activity, nil
+	case EvRunSuspended:
+		if r.Activity != nil {
+			r.paused = r.Activity
+		}
+		r.Activity = nil
+	case EvApprovalDecided, EvRunResumed:
+		if r.turn == 0 || r.State.Terminal() {
+			return
+		}
+		if e.Type == EvApprovalDecided {
+			var d struct {
+				ApprovalID string `json:"approvalId"`
+			}
+			if e.Decode(&d) != nil || r.Pending == nil || r.Pending.ID != d.ApprovalID {
+				return
+			}
+		} else if r.Pending != nil {
+			return
+		}
+		act := RunActivity{Turn: r.turn}
+		if r.paused != nil {
+			act = *r.paused
+		}
+		act.Since = e.Time
+		r.Activity, r.paused = &act, nil
+	case EvTurnFinished, EvRunFinished:
+		r.Activity, r.paused, r.turn = nil, nil, 0
 	}
 }
 
