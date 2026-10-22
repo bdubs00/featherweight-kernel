@@ -644,7 +644,14 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 
 	mctx, cut := a.deadlineCut(ctx, rs)
 	start := time.Now()
-	resp, err := model.Stream(mctx, req, func(Delta) {})
+	// The text of the answer goes to the live stream of the run as the
+	// adapter yields it (live.go); the ledger records the answer whole.
+	turn := c.turns
+	if !c.turnOpen {
+		turn++
+	}
+	live := a.liveOn(rs.id, turn)
+	resp, err := model.Stream(mctx, req, live)
 	var interrupted *StreamInterruptedError
 	if mctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && errors.As(err, &interrupted) {
 		// No delta leaves this call, and the cut response is never
@@ -661,11 +668,12 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 			err = mctx.Err()
 		case <-timer.C:
 			if err = mctx.Err(); err == nil {
-				resp, err = model.Stream(mctx, req, func(Delta) {})
+				resp, err = model.Stream(mctx, req, live)
 			}
 		}
 	}
 	latency := time.Since(start).Milliseconds()
+	a.liveDone(rs.id, turn, resp, err)
 	if cut() && err != nil && ctx.Err() == nil {
 		// The working time reached the deadline while the call was in
 		// flight. The call has no answer to record; the run reports.

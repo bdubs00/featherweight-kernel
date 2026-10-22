@@ -33,6 +33,7 @@ type Agent struct {
 	toolMW    []ToolMiddleware
 	tools     []Tool
 	sources   []ToolSource
+	live      liveHub // the live streams of the runs (live.go)
 	policy    Policy
 	ledger    Ledger
 	bus       Bus

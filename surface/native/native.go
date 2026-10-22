@@ -101,6 +101,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/runs", s.listRuns},
 		{"GET /v1/runs/{id}", s.remote(s.getRun)},
 		{"GET /v1/runs/{id}/events", s.remote(s.runEvents)},
+		{"GET /v1/runs/{id}/live", s.remote(s.live)},
 		{"POST /v1/runs/{id}/messages", s.remote(s.sendMessage)},
 		{"POST /v1/runs/{id}/reactions", s.remote(s.react)},
 		{"PATCH /v1/runs/{id}/budget", s.remote(s.changeBudget)},
