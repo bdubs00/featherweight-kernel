@@ -131,6 +131,7 @@ bus:
   deadLetter: true              # send a record of each failed or rejected job to <intake>.dead, for example fw.jobs.reviewer.dead. FW_BUS_DEAD_LETTER
   egress: ""                    # subject prefix to publish ledger events to, for example fw.events; the front of a fleet reads it
   egressTypes: []               # empty publishes every type
+  egressMaxBytes: 0             # cut each string value in the data of a published event to this many bytes, with a note such as " [cut 1234 of 5678 bytes]"; 0 publishes the data whole; the ledger stays whole. FW_BUS_EGRESS_MAX_BYTES
   options: {}                   # driver options; FW_BUS_OPTIONS_<NAME>; nats and redis take concurrency, the messages handled at a time (default: maxRuns, 1 under ax)
 
 tokens:                         # the tokens of people, from a broker outside this process (docs/ARCHITECTURE.md section 7.11)

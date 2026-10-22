@@ -216,15 +216,22 @@ type LedgerConfig struct {
 // spends model tokens. DeadLetter turns off the dead-letter subject
 // "<intake>.dead" when it is false. The default is on, because a record
 // costs nothing (docs/ARCHITECTURE.md section 9.3).
+//
+// EgressMaxBytes bounds each string value in the data of an event that the
+// egress publishes: a longer value goes out cut to its first
+// EgressMaxBytes bytes, at a rune boundary, with a note of the cut. The
+// default, 0, publishes the data whole. The ledger always stays whole
+// (docs/ARCHITECTURE.md section 9.4).
 type BusConfig struct {
-	Driver        string            `yaml:"driver" json:"driver"`
-	URL           string            `yaml:"url,omitempty" json:"url,omitempty"`
-	Intake        string            `yaml:"intake,omitempty" json:"intake,omitempty"`
-	IntakeRetries int               `yaml:"intakeRetries,omitempty" json:"intakeRetries,omitempty"`
-	DeadLetter    *bool             `yaml:"deadLetter,omitempty" json:"deadLetter,omitempty"`
-	Egress        string            `yaml:"egress,omitempty" json:"egress,omitempty"`
-	EgressTypes   []string          `yaml:"egressTypes,omitempty" json:"egressTypes,omitempty"`
-	Options       map[string]string `yaml:"options,omitempty" json:"options,omitempty"`
+	Driver         string            `yaml:"driver" json:"driver"`
+	URL            string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Intake         string            `yaml:"intake,omitempty" json:"intake,omitempty"`
+	IntakeRetries  int               `yaml:"intakeRetries,omitempty" json:"intakeRetries,omitempty"`
+	DeadLetter     *bool             `yaml:"deadLetter,omitempty" json:"deadLetter,omitempty"`
+	Egress         string            `yaml:"egress,omitempty" json:"egress,omitempty"`
+	EgressTypes    []string          `yaml:"egressTypes,omitempty" json:"egressTypes,omitempty"`
+	EgressMaxBytes int               `yaml:"egressMaxBytes,omitempty" json:"egressMaxBytes,omitempty"`
+	Options        map[string]string `yaml:"options,omitempty" json:"options,omitempty"`
 }
 
 // DeadLetterSuffix is the last token of the dead-letter subject of an

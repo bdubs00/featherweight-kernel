@@ -40,12 +40,15 @@ const egressRescan = time.Minute
 // Either way, a ledger append never waits for the bus, and when the bus
 // refuses, the goroutine tries again with a pause that doubles up to
 // intakeRetryMax. Config.Bus.EgressTypes, when set, limits the types. Each
-// entry is a type or a glob such as "fw.run.*".
+// entry is a type or a glob such as "fw.run.*". Config.Bus.EgressMaxBytes,
+// when above 0, cuts each long string value in the data of the copy that
+// goes to the bus (cutStrings); the ledger keeps the event whole.
 type egress struct {
 	a        *Agent
 	prefix   string
 	atespace string
 	types    []string
+	maxBytes int           // Config.Bus.EgressMaxBytes; 0 publishes the data whole
 	cursors  EgressCursors // nil: the queue in memory
 	route    string        // the name of the cursors of this prefix, atespace, and filter
 
@@ -97,7 +100,7 @@ func (a *Agent) startEgress() {
 }
 
 func newEgress(a *Agent, prefix string) *egress {
-	e := &egress{a: a, prefix: prefix, atespace: a.k.atespace, types: a.cfg.Bus.EgressTypes, wake: make(chan struct{}, 1)}
+	e := &egress{a: a, prefix: prefix, atespace: a.k.atespace, types: a.cfg.Bus.EgressTypes, maxBytes: max(a.cfg.Bus.EgressMaxBytes, 0), wake: make(chan struct{}, 1)}
 	e.cursors, _ = a.ledger.(EgressCursors)
 	if e.cursors != nil {
 		e.route = egressRoute(prefix, e.atespace, e.types)
@@ -216,11 +219,17 @@ func (e *egress) requeue(ids []string) {
 	}
 }
 
-// publish sends one event and counts it.
+// publish sends one event and counts it. With a bound on the strings, the
+// copy of the event that goes to the bus has each longer string value of
+// its data cut; the event of the ledger and of the queue stays whole.
 func (e *egress) publish(ctx context.Context, item egressItem) error {
 	ctx, cancel := context.WithTimeout(ctx, egressTimeout)
 	defer cancel()
-	if err := e.a.bus.Publish(ctx, item.subject, item.event); err != nil {
+	ev := item.event
+	if e.maxBytes > 0 {
+		ev.Data = cutStrings(ev.Data, e.maxBytes)
+	}
+	if err := e.a.bus.Publish(ctx, item.subject, ev); err != nil {
 		return err
 	}
 	e.a.countBus("out")
