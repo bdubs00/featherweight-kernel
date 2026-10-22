@@ -614,6 +614,10 @@ func TestSummarizeNamesTheWork(t *testing.T) {
 	if got := summarize(msg, map[string]string{}); !strings.HasSuffix(got, "fw.message.received role=user origin=http from=agent:reviewer by=token") {
 		t.Errorf("summary of a message = %q", got)
 	}
+	pinned := fw.MustEvent("r", fw.EvMessageReceived, fw.MessageReceivedData{Role: fw.RoleUser, Origin: "http", By: "alice", Pinned: true, Content: []fw.Block{fw.Text("x")}})
+	if got := summarize(pinned, map[string]string{}); !strings.HasSuffix(got, "fw.message.received role=user origin=http by=alice pinned=true") {
+		t.Errorf("summary of a pinned message = %q", got)
+	}
 	react := fw.MustEvent("r", fw.EvRunReacted, fw.ReactionData{Seq: 118, Reaction: fw.ReactionUp, By: "alice", Note: "private note", Receipt: true})
 	if got := summarize(react, map[string]string{}); !strings.HasSuffix(got, "fw.run.reacted reaction=up seq=118 by=alice receipt=true") {
 		t.Errorf("summary of a reaction = %q", got)

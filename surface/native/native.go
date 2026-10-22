@@ -688,12 +688,14 @@ func (s *server) runEvents(w http.ResponseWriter, r *http.Request) {
 // the work that follows. From names the party that wrote the message when
 // the caller relays it (fw.WithMessageFrom). Only a trusted caller, the
 // static token or a workload, sets it, as for the principal and the id of
-// a run.
+// a run. Pinned keeps the message through every compaction
+// (fw.WithMessagePinned); any caller who can send sets it.
 type messageBody struct {
 	Content json.RawMessage `json:"content"`
 	Files   []fileBody      `json:"files"`
 	Budget  *budgetBody     `json:"budget"`
 	From    *fw.MessageFrom `json:"from"`
+	Pinned  bool            `json:"pinned"`
 }
 
 // trustedCaller reports whether the caller of the request is the static
@@ -734,6 +736,9 @@ func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		opts = append(opts, fw.WithMessageFrom(*body.From))
+	}
+	if body.Pinned {
+		opts = append(opts, fw.WithMessagePinned())
 	}
 	id := r.PathValue("id")
 	if err := s.a.Send(r.Context(), id, fw.Message{Role: fw.RoleUser, Content: blocks}, fw.OriginHTTP, opts...); err != nil {

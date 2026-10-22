@@ -418,6 +418,9 @@ func describe(e fw.Event) string {
 		var d fw.MessageReceivedData
 		if e.Decode(&d) == nil {
 			s := string(d.Role) + " message" + senderOf(d)
+			if d.Pinned {
+				s = "pinned " + s
+			}
 			if d.Origin != "" {
 				s += " over " + d.Origin
 			}

@@ -318,6 +318,15 @@ func (r *Run) Apply(e Event, prices Prices) {
 			r.State = StateRunning
 		}
 	case EvMessageReceived:
+		var pin struct {
+			Pinned bool `json:"pinned"`
+		}
+		if e.Decode(&pin) == nil && pin.Pinned {
+			var d MessageReceivedData
+			if e.Decode(&d) == nil {
+				r.pinnedBytes += contentBytes(d.Content)
+			}
+		}
 		if r.Pending != nil {
 			return
 		}

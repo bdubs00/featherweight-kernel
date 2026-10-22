@@ -251,6 +251,10 @@ type MessageReceivedData struct {
 	// caller sets it (WithMessageFrom). A message from an agent reaches
 	// the model inside a block (MessageBlock).
 	From *MessageFrom `json:"from,omitempty"`
+	// Pinned is true for a message that survives every compaction: the new
+	// epoch holds it verbatim after the summary (WithMessagePinned). The
+	// pinned messages of a run hold at most MaxPinnedBytes together.
+	Pinned bool `json:"pinned,omitempty"`
 	// Note names the kind of a system message from the kernel: NoteLoop,
 	// NoteTime, NoteBudget, or NoteReport, and of the user message from the
 	// kernel with the notes of a grader, NoteOutcome. It is empty for every

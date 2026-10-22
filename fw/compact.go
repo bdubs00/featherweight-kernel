@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -382,7 +383,14 @@ func (a *Agent) compact(ctx context.Context, rs *runState, m Model, next *Reques
 	}
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
-	// A message that arrived during the summary call belongs to the new epoch.
+	// The pinned messages of the run come right after the summary, in
+	// ledger order and verbatim, once each: a pinned message that the
+	// compactor kept is not kept twice.
+	if pinned := pinnedMessages(rs.events[:n]); len(pinned) > 0 {
+		d.Kept = append(pinned, withoutMessages(d.Kept, pinned)...)
+	}
+	// A message that arrived during the summary call belongs to the new
+	// epoch, after them.
 	for _, e := range rs.events[n:] {
 		if e.Type == EvMessageReceived {
 			if msg, ok := receivedMessage(e); ok {
@@ -392,6 +400,22 @@ func (a *Agent) compact(ctx context.Context, rs *runState, m Model, next *Reques
 	}
 	_, err = a.emitLocked(ctx, rs, EvContextCompacted, d)
 	return err == nil, err
+}
+
+// withoutMessages returns msgs without one copy of each message of drop,
+// the last one, so a pinned message that the compactor also kept stays
+// once.
+func withoutMessages(msgs, drop []Message) []Message {
+	out := append([]Message(nil), msgs...)
+	for _, m := range drop {
+		for i := len(out) - 1; i >= 0; i-- {
+			if reflect.DeepEqual(out[i], m) {
+				out = append(out[:i], out[i+1:]...)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // runCompactor calls the compactor. The summary call goes to the model

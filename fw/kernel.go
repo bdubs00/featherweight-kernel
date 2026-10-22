@@ -87,6 +87,9 @@ type kernel struct {
 	// reactMu serializes Agent.React, so each reaction is checked against
 	// the earlier ones before it appends.
 	reactMu sync.Mutex
+	// pinMu serializes the Sends of pinned messages, so the bound of the
+	// pinned messages of a run holds (MaxPinnedBytes).
+	pinMu sync.Mutex
 
 	sem      chan struct{} // one slot per active run, Config.MaxRuns slots
 	childSem chan struct{} // one slot per working child run, Config.Spawn.MaxRunning slots; nil for no limit
@@ -1069,6 +1072,7 @@ type SendOption func(*sendOptions)
 type sendOptions struct {
 	budget *Budget
 	from   *MessageFrom
+	pinned bool
 }
 
 // WithSendBudget changes the budget of the run together with the message:
@@ -1088,6 +1092,14 @@ func WithSendBudget(b Budget) SendOption { return func(o *sendOptions) { o.budge
 // from an agent has the role user, and the model reads it inside a block
 // (MessageBlock) that has the authority of a tool result.
 func WithMessageFrom(f MessageFrom) SendOption { return func(o *sendOptions) { o.from = &f } }
+
+// WithMessagePinned pins the message: every compaction keeps it verbatim
+// in the new epoch, after the summary, so a skill or a standing
+// instruction that a person hands into a running conversation does not
+// vanish (docs/ARCHITECTURE.md section 5.4). The pinned messages of a run
+// hold at most MaxPinnedBytes together; Send refuses a message past the
+// bound with ErrInvalidRequest.
+func WithMessagePinned() SendOption { return func(o *sendOptions) { o.pinned = true } }
 
 // Send appends a follow-up message to a run. A finished or idle run starts a
 // new turn. A run in the middle of a turn sends the message with its next
@@ -1140,6 +1152,15 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 			return err
 		}
 	}
+	if o.pinned {
+		// The pinned messages of a run change only here, one Send at a
+		// time, so the check and the append are one step.
+		a.k.pinMu.Lock()
+		defer a.k.pinMu.Unlock()
+		if total := rs.snapshot().pinnedBytes + contentBytes(msg.Content); total > MaxPinnedBytes {
+			return fmt.Errorf("%w: the pinned messages of run %s would hold %d bytes, and the bound is %d bytes (64 KB)", ErrInvalidRequest, id, total, MaxPinnedBytes)
+		}
+	}
 	// The message can start a driver. Reserve its place before any write,
 	// even while a driver is active, because the driver can idle before the
 	// message lands. A follow-up continues a run that this process
@@ -1170,7 +1191,7 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 			return err
 		}
 	}
-	_, err = a.emitLocked(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin, By: subjectOf(ctx), From: o.from})
+	_, err = a.emitLocked(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin, By: subjectOf(ctx), From: o.from, Pinned: o.pinned})
 	rs.emitMu.Unlock()
 	if err != nil {
 		return err

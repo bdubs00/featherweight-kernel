@@ -94,6 +94,44 @@ func checkMessageFrom(f MessageFrom) error {
 	return nil
 }
 
+// MaxPinnedBytes bounds the pinned messages of a run together: the bytes
+// of their text, their inline data, and their files (WithMessagePinned).
+const MaxPinnedBytes = 64 << 10
+
+// contentBytes is the size of content blocks as the bound of the pinned
+// messages counts it: text, inline data, and the size of each file.
+func contentBytes(blocks []Block) int {
+	n := 0
+	for _, b := range blocks {
+		n += len(b.Text) + len(b.Data) + contentBytes(b.Content)
+		if b.File != nil {
+			n += int(b.File.Size)
+		}
+	}
+	return n
+}
+
+// pinnedMessages returns the pinned messages among events, in ledger
+// order, as the model reads them.
+func pinnedMessages(events []Event) []Message {
+	var out []Message
+	for _, e := range events {
+		if e.Type != EvMessageReceived {
+			continue
+		}
+		var d struct {
+			Pinned bool `json:"pinned"`
+		}
+		if e.Decode(&d) != nil || !d.Pinned {
+			continue
+		}
+		if m, ok := receivedMessage(e); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // speaksForOthers reports whether the caller in ctx can name another
 // party: the process itself, without a principal, the static token, or a
 // workload. A person speaks for themself alone.

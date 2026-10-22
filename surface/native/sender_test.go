@@ -147,3 +147,29 @@ func TestInlineProfileCompaction(t *testing.T) {
 		t.Fatalf("detail = %q", p.Detail)
 	}
 }
+
+// TestPinnedMessage checks pinned in the body of a follow-up: any caller
+// who can send pins a message, and the bound of the pinned messages is a
+// 400 that names it.
+func TestPinnedMessage(t *testing.T) {
+	ctx := testCtx(t)
+	callers := tokenMap{"alice-token": {Subject: "alice", Kind: fw.KindUser}}
+	a := newAgent(t, newScript(endTurn("first"), endTurn("second")).model(), fw.WithAuthn(callers))
+	srv := serve(t, a)
+	resp, b := do(t, "POST", srv.URL+"/v1/runs", `{"input":"hi","wait":true}`, "Authorization", "Bearer alice-token")
+	r := decodeRun(t, resp, b, http.StatusOK)
+	resp, b = do(t, "POST", srv.URL+"/v1/runs/"+r.ID+"/messages", `{"content":"Always answer in French.","pinned":true}`, "Authorization", "Bearer alice-token")
+	decodeRun(t, resp, b, http.StatusAccepted)
+	if _, err := a.Wait(ctx, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	msgs := messagesOf(t, a, r.ID)
+	if len(msgs) != 1 || !msgs[0].Pinned || msgs[0].By != "alice" {
+		t.Fatalf("messages = %+v", msgs)
+	}
+	big := strings.Repeat("x", fw.MaxPinnedBytes)
+	resp, b = do(t, "POST", srv.URL+"/v1/runs/"+r.ID+"/messages", `{"content":"`+big+`","pinned":true}`, "Authorization", "Bearer alice-token")
+	if p := decodeProblem(t, resp, b, http.StatusBadRequest); !strings.Contains(p.Detail, "64 KB") {
+		t.Fatalf("detail = %q", p.Detail)
+	}
+}

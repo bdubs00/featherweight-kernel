@@ -505,6 +505,9 @@ func summarize(e fw.Event, tools map[string]string) string {
 			if d.By != "" {
 				add("by=%s", d.By)
 			}
+			if d.Pinned {
+				add("pinned=true")
+			}
 		}
 	case fw.EvTurnStarted, fw.EvTurnFinished:
 		var d fw.TurnData

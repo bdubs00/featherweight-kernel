@@ -437,6 +437,9 @@ type Run struct {
 	// the activity comes back when the run works again (applyActivity).
 	turn   int
 	paused *RunActivity
+	// pinnedBytes is the size of the pinned messages of the run
+	// (MaxPinnedBytes).
+	pinnedBytes int
 }
 
 // RunActivity is what a run that works does now, as the status projection

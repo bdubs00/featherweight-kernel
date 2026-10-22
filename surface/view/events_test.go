@@ -81,6 +81,7 @@ func TestLineNamesTheSender(t *testing.T) {
 		{fw.MessageReceivedData{Role: fw.RoleUser, Origin: "http", By: "token", From: &fw.MessageFrom{Kind: fw.FromPerson, Name: "alice"}, Content: []fw.Block{fw.Text("ship")}},
 			"user message from alice through token over http: ship"},
 		{fw.MessageReceivedData{Role: fw.RoleUser, Origin: "cli", Content: []fw.Block{fw.Text("go")}}, "user message over cli: go"},
+		{fw.MessageReceivedData{Role: fw.RoleUser, Origin: "http", By: "alice", Pinned: true, Content: []fw.Block{fw.Text("Use French.")}}, "pinned user message from alice over http: Use French."},
 	} {
 		if got := describe(fw.MustEvent("r1", fw.EvMessageReceived, c.data)); got != c.want {
 			t.Errorf("line = %q, want %q", got, c.want)
