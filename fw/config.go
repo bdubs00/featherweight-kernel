@@ -1,6 +1,7 @@
 package fw
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -508,6 +509,91 @@ type MCPServerConfig struct {
 	Headers  map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 	Timeout  time.Duration     `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	Trusted  bool              `yaml:"trusted" json:"trusted"`
+	// Skills says where the skills of the server come from (see
+	// MCPSkills): skills/list when the server declares the skills
+	// extension, the default, or the SKILL.md resources that the operator
+	// pins.
+	Skills MCPSkills `yaml:"skills,omitempty" json:"skills,omitempty"`
+}
+
+// MCPSkills is tools.mcp[].skills, where the skills of a server come from
+// (docs/ARCHITECTURE.md section 7.3). Empty or MCPSkillsAuto, the default,
+// lists them with skills/list when the server declares the extension
+// io.modelcontextprotocol/skills. A list of the URIs of SKILL.md resources
+// pins those skills, for a server that does not answer skills/list, such
+// as one behind a gateway that refuses the method; the kernel reads each
+// one with resources/read. A list that holds MCPSkillsAuto and URIs tries
+// skills/list first and takes the pins when the server does not declare
+// the extension or does not answer the method. MCPSkillsOff reads no skill
+// of the server. In fw.yaml, the value is "auto", "off", or a list; in the
+// environment, a comma list.
+type MCPSkills []string
+
+// Values of MCPSkills.
+const (
+	MCPSkillsAuto = "auto"
+	MCPSkillsOff  = "off"
+)
+
+// UnmarshalYAML takes a scalar, such as auto, or a list.
+func (s *MCPSkills) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		var v string
+		if err := n.Decode(&v); err != nil {
+			return err
+		}
+		*s = MCPSkills{v}
+		return nil
+	}
+	var list []string
+	if err := n.Decode(&list); err != nil {
+		return err
+	}
+	*s = list
+	return nil
+}
+
+// UnmarshalJSON takes a string, such as "auto", or an array.
+func (s *MCPSkills) UnmarshalJSON(b []byte) error {
+	var v string
+	if json.Unmarshal(b, &v) == nil {
+		*s = MCPSkills{v}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(b, &list); err != nil {
+		return fmt.Errorf("fw: tools.mcp[].skills is auto, off, or a list of URIs: %w", err)
+	}
+	*s = list
+	return nil
+}
+
+// Off reports whether the skills of the server are off.
+func (s MCPSkills) Off() bool { return len(s) == 1 && strings.TrimSpace(s[0]) == MCPSkillsOff }
+
+// Auto reports whether the kernel asks the server with skills/list: the
+// value is empty or holds MCPSkillsAuto.
+func (s MCPSkills) Auto() bool {
+	if len(s) == 0 {
+		return true
+	}
+	for _, v := range s {
+		if strings.TrimSpace(v) == MCPSkillsAuto {
+			return true
+		}
+	}
+	return false
+}
+
+// Pinned returns the URIs that the operator pins.
+func (s MCPSkills) Pinned() []string {
+	var out []string
+	for _, v := range s {
+		if v = strings.TrimSpace(v); v != "" && v != MCPSkillsAuto && v != MCPSkillsOff {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // TLSConfig configures a client connection.

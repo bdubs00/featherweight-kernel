@@ -117,6 +117,7 @@ type Server struct {
 
 	connMu    sync.Mutex // one connect at a time
 	refreshMu sync.Mutex // one tools/list at a time
+	skillsMu  sync.Mutex // one listing of the skills at a time
 
 	mu        sync.Mutex
 	session   *sdk.ClientSession
@@ -130,6 +131,7 @@ type Server struct {
 	closed    bool
 	persons   map[string]*person   // the sessions of people, for grant user
 	skips     map[string]time.Time // runs whose person skipped the service
+	skills    skillState           // the skills of the server (skills.go)
 }
 
 // New validates an entry and returns a Server for it. It does not connect:
@@ -177,6 +179,9 @@ func (s *Server) configure() error {
 		return errors.New("set endpoint or command")
 	case c.Timeout < 0:
 		return errors.New("timeout must not be negative")
+	}
+	if err := checkSkills(c.Skills); err != nil {
+		return err
 	}
 	if c.Command != "" {
 		if c.TLS != (fw.TLSConfig{}) || c.Auth.Bearer != "" || c.Auth.OAuth != nil || c.Auth.SPIFFE != nil || len(c.Headers) > 0 {
@@ -398,20 +403,31 @@ func (s *Server) dial(ctx context.Context, tr sdk.Transport) (*sdk.ClientSession
 	defer cancel()
 	stop := context.AfterFunc(ctx, cancel)
 	defer stop()
-	client := sdk.NewClient(&sdk.Implementation{Name: "featherweight-kernel", Version: version()}, &sdk.ClientOptions{
-		Logger: s.log,
-		// fw answers form and URL elicitation. It does not offer roots or
-		// sampling, which revision 2026-07-28 deprecates.
-		Capabilities: &sdk.ClientCapabilities{
-			Elicitation: &sdk.ElicitationCapabilities{
-				Form: &sdk.FormElicitationCapabilities{},
-				URL:  &sdk.URLElicitationCapabilities{},
-			},
+	// fw answers form and URL elicitation. It does not offer roots or
+	// sampling, which revision 2026-07-28 deprecates. It declares the
+	// skills extension, and a change of the resources lists the skills
+	// again (skills.go).
+	caps := &sdk.ClientCapabilities{
+		Elicitation: &sdk.ElicitationCapabilities{
+			Form: &sdk.FormElicitationCapabilities{},
+			URL:  &sdk.URLElicitationCapabilities{},
 		},
+	}
+	copts := &sdk.ClientOptions{
+		Logger:                      s.log,
+		Capabilities:                caps,
 		ElicitationHandler:          s.elicit,
 		ToolListChangedHandler:      s.listChanged,
 		ProgressNotificationHandler: s.progress,
-	})
+	}
+	if !s.personal && !s.cfg.Skills.Off() {
+		caps.AddExtension(SkillsExtension, nil)
+		copts.ResourceListChangedHandler = s.resourcesChanged
+	}
+	client := sdk.NewClient(&sdk.Implementation{Name: "featherweight-kernel", Version: version()}, copts)
+	if err := sdk.AddSendingCustomMethod[*skillsListParams, *skillsListResult](client, methodSkillsList); err != nil {
+		return nil, fmt.Errorf("mcp: server %s: %w", s.cfg.Name, err)
+	}
 	var opts *sdk.ClientSessionOptions
 	if s.protocol != "" {
 		opts = &sdk.ClientSessionOptions{ProtocolVersion: s.protocol}

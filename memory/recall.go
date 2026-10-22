@@ -396,9 +396,14 @@ func searchSkills(ctx context.Context, scope fw.MemoryScope, terms []string) []f
 	}
 	var hits []fw.MemoryHit
 	for _, sk := range skillsOf(a, scope) {
-		body, err := sk.Body()
-		if err != nil {
-			continue
+		// A skill of an MCP server is read at the moment of use, not
+		// ahead of need, so a search matches its name and description.
+		body := ""
+		if sk.Origin == "" {
+			var err error
+			if body, err = sk.Body(); err != nil {
+				continue
+			}
 		}
 		score, snippet := matchScore(terms, sk.Name, sk.Description, body)
 		if score == 0 {

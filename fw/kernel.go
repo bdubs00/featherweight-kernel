@@ -247,6 +247,7 @@ func (a *Agent) startKernel(ctx context.Context) error {
 		a.warnNoSpawner()
 	}
 	a.startFollow()
+	a.warmSkills()
 	a.startEgress()
 	a.startOutcomes()
 	a.recover(rec)

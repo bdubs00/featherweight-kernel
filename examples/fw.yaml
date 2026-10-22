@@ -181,6 +181,7 @@ tools:
       headers: {}               # extra headers on every request; values resolve through Secrets
       timeout: 60s
       trusted: true             # treat the tool annotations of the server as true
+      skills: auto              # auto lists its skills with skills/list; or a list of SKILL.md URIs to pin, such as [auto, "skill://acme/review/SKILL.md"]; or off. FW_TOOLS_MCP_<NAME>_SKILLS
     - name: billing
       endpoint: https://mcp.billing.example.com/mcp
       auth:

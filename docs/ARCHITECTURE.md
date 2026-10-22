@@ -535,6 +535,7 @@ Each HTTP server entry has these fields:
 | `auth.oauth` | OAuth 2.1 client fields: `clientId`, `clientSecret`, `scopes`, and `grant`, which says whose authority a call carries (section 7.11) | none |
 | `headers` | Extra headers on every request. Values resolve through `Secrets`. | none |
 | `timeout` | Time limit per call | `60s` |
+| `skills` | Where the skills of the server come from: `auto`, a list of the URIs of `SKILL.md` resources that the operator pins, or `off` (see Skills of a server) | `auto` |
 | `trusted` | Treat the tool annotations and titles of this server as true. A title becomes the label of the button that allows a call. Each call also names the person of the run in `_meta` (see The run behind a call). | `false` |
 
 Use `https://` for every endpoint outside the cluster. `fw` logs a warning at start for an `http://` endpoint whose host is not a loopback address or a cluster-local name.
@@ -568,6 +569,20 @@ A result with `resultType: "input_required"` means the server needs something be
 - `sampling/createMessage` and `roots/list` are deprecated in this revision. `fw` answers them for older servers only: sampling with the run model under the run budget, roots with the workspace paths.
 
 A result with `resultType: "task"` needs the extension `io.modelcontextprotocol/tasks` in the capabilities that `fw` declared. `fw` stores the `taskId` in the `fw.tool.requested` data, polls `tasks/get` at `pollIntervalMs`, and answers `input_required` through `tasks/update`. If the run is canceled, `fw` sends `tasks/cancel`. A resumed run continues polling from the stored task id. This is how a long upstream tool survives a suspend and a resume.
+
+#### Skills of a server
+
+A server can serve skills through the MCP extension `io.modelcontextprotocol/skills` (SEP-2640, on base revision 2026-07-28). It declares the extension in its capabilities. `skills/list` lists the skills: the URI of each, its front matter, and its files with the digest `sha256:...` and the size of each, or `dynamic` for a skill whose files the server lists on demand. The files are resources that `resources/read` returns. The kernel declares the extension on its side and handles these values of `skills` of an entry:
+
+| Value | The kernel |
+|---|---|
+| `auto`, the default | lists the skills with `skills/list` when the server declares the extension. A server that declares it and refuses the method with -32601, or a 404 on revision 2026-07-28, as agentgateway does, is remembered as one that does not answer it. |
+| a list of `SKILL.md` URIs | pins those skills. The kernel reads each one with `resources/read`, takes the name and the description from its front matter, and computes its digest itself. Use it for a server behind a gateway that refuses the method. With `auto` in the list, the kernel tries `skills/list` first and takes the pins when the server does not declare the extension, does not answer the method, or fails. |
+| `off` | reads no skill of the server |
+
+Each skill of a server joins the skills of the agent with the origin `mcp`, the entry name of the server, and the URI of its `SKILL.md`. Its name is `<server>/<name>`, such as `github/review`, so a skill of a server never shadows a skill of the skill directories, and the allowlist `skills` of a profile matches local names and qualified names alike: `github/*` allows every skill of one server. A name that the server lists twice keeps its first entry. The line of the skill in the system prompt names the server: `- github/review: Review a pull request (from the MCP server github)`. A server that acts for the person of a run (section 7.11) gives no skills, because the list must not depend on the person.
+
+The kernel reads the list when the process starts, again when the server sends `notifications/resources/list_changed`, and again when the `ttlMs` of the listing passes. A server that is down keeps its last list, the log says so, and the kernel tries again after 30 seconds. The kernel reads no file of a skill ahead of need. The `skill` tool reads `SKILL.md` of a server skill at the moment of use with `resources/read`, and its field `file` reads a supporting file the same way, so a model reads a reference file of a server skill as it reads one of a local skill. Before it uses a file, the kernel checks its size and its digest against the listing, or, for a pinned skill and a file that the listing does not name, against its own first read, and it checks that the name in the front matter of `SKILL.md` is the name of the listing. A mismatch refuses the file with the reason, and nothing of it reaches the model. A file holds at most 4 MB, and the tool limits of section 7.7 bound the result. A path that leaves the skill, an absolute path, and a hidden file are refused. The tool reads only a skill that the profile of the run allows. `GET /v1/skills` lists the skills of the servers with their origin and their URI. `fw doctor` names, for each server, how many skills it gives and whether it answers `skills/list` or needs a pinned list. `recall` matches a skill of a server by its name and its description only.
 
 #### The run behind a call
 
@@ -1019,8 +1034,8 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | `GET /v1/runs/{id}/files/{path}` | The content of a file that the run changed, or a view of it under `Accept: application/json`. `?download=1` always returns the content (section 7.9). |
 | `GET /v1/agents` | List agent profiles with their descriptions, instructions, and skills. |
 | `GET /v1/tools` | List tools with their specifications. Each entry also has `text`, a plain phrase that says what the tool does. |
-| `GET /v1/skills` | List skills. |
-| `GET /v1/skills/{name}` | The `SKILL.md` text, or JSON with the file list under `Accept: application/json`. |
+| `GET /v1/skills` | List skills, each with `origin`, `local` or `mcp`, and for a skill of an MCP server `server` and `uri` (section 7.3). |
+| `GET /v1/skills/{name}` | The `SKILL.md` text, or JSON with the file list under `Accept: application/json`. The name of a skill of a server has a slash, such as `/v1/skills/github/review`; the kernel reads its text from the server and checks it (section 7.3). |
 | `GET /v1/status` | The state of the agent at a glance: the usage of the runs that the caller can view, the oldest approval that waits, and the counts of runs by state (section 11.8). |
 | `GET /v1/memory` | Search the memory of an agent (section 7.8.3). Query: `agent`, `default` when absent; `q`, the words; `kinds`, a comma list of `note`, `run`, and `skill`; `limit`, 10 by default and 50 at most. The answer holds `scope` and `hits`, and `notes` when a bound stopped a search early. The kind `file` belongs to the tool of a run, so the route refuses it. |
 | `GET /v1/memory/notes` | List the notes of the scope of the caller in an agent, newest first, without their text. Query: `agent`. |
@@ -1655,7 +1670,7 @@ The kernel reads some parts of a run as they are now, because they are not confi
 
 A run from the ledger of an older kernel has no resolved profile and reads the named profile at each step. A fleet can mix kernels. A process of an older kernel that takes a branch through `POST /v1/runs/fork` ignores `resolved` and runs the branch with its own profile, as it reads the named profile at each step.
 
-A skill is a directory with a `SKILL.md` file whose front matter names and describes it. The skills live under `$FW_HOME/skills`, or under the directories in `tools.skills`, and under the ax Workspace skills path. The system prompt lists the skills that the profile allows, one line each. The `skill` tool returns the body of one skill and the list of its other files. The MCP server of the workbench serves the same files as resources under `fw://skills/<name>`. A profile with no `skills` entry sees every skill, and a profile with an empty list sees none.
+A skill is a directory with a `SKILL.md` file whose front matter names and describes it. The skills live under `$FW_HOME/skills`, or under the directories in `tools.skills`, and under the ax Workspace skills path. An MCP server adds skills under the names `<server>/<name>` (section 7.3, Skills of a server). The system prompt lists the skills that the profile allows, one line each: the skills of the directories, sorted by name, then the skills of each server in the order of `tools.mcp`, each with the name of its server. The `skill` tool returns the body of one skill and the list of its other files, and its field `file` returns one of those files. It reads only a skill that the profile of the run allows. The MCP server of the workbench serves the same files as resources under `fw://skills/<name>`. A profile with no `skills` entry sees every skill, and a profile with an empty list sees none.
 
 ### 12.6 Driver registry
 

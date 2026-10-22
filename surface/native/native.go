@@ -115,7 +115,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/status", s.status},
 		{"GET /v1/tools", s.listTools},
 		{"GET /v1/skills", s.listSkills},
-		{"GET /v1/skills/{name}", s.getSkill},
+		{"GET /v1/skills/{name...}", s.getSkill},
 	}
 	routes = append(routes, s.memoryRoutes()...)
 	for _, rt := range routes {
@@ -991,6 +991,17 @@ func (s *server) listTools(w http.ResponseWriter, r *http.Request) {
 type skillInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	// Origin is local for a skill of the skill directories and mcp for a
+	// skill of an MCP server, which also names the server and the URI of
+	// its SKILL.md.
+	Origin string `json:"origin"`
+	Server string `json:"server,omitempty"`
+	URI    string `json:"uri,omitempty"`
+}
+
+// infoOf returns the skill as a listing names it.
+func infoOf(sk fw.Skill) skillInfo {
+	return skillInfo{Name: sk.Name, Description: sk.Description, Origin: sk.OriginName(), Server: sk.Server, URI: sk.URI}
 }
 
 // skillDoc is the JSON shape of GET /v1/skills/{name}.
@@ -1005,7 +1016,7 @@ func (s *server) listSkills(w http.ResponseWriter, _ *http.Request) {
 	skills := s.a.Skills()
 	out := make([]skillInfo, 0, len(skills))
 	for _, sk := range skills {
-		out = append(out, skillInfo{Name: sk.Name, Description: sk.Description})
+		out = append(out, infoOf(sk))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"skills": out})
 }
@@ -1039,7 +1050,7 @@ func (s *server) getSkill(w http.ResponseWriter, r *http.Request) {
 	if files == nil {
 		files = []string{}
 	}
-	writeJSON(w, http.StatusOK, skillDoc{skillInfo: skillInfo{Name: sk.Name, Description: sk.Description}, Body: body, Files: files})
+	writeJSON(w, http.StatusOK, skillDoc{skillInfo: infoOf(sk), Body: body, Files: files})
 }
 
 // writeRun writes the current status of a run.

@@ -45,6 +45,14 @@ type namer interface {
 	Name() string
 }
 
+// skillReporter is a skill source that says how it gives its skills, such
+// as an MCP server: how many, and whether it answers skills/list or needs a
+// pinned list.
+type skillReporter interface {
+	fw.SkillSource
+	SkillsStatus() string
+}
+
 // errNotWritable marks a directory that a check cannot write to.
 var errNotWritable = errors.New("not writable")
 
@@ -656,6 +664,11 @@ func (d *doctor) checkToolSources(ctx context.Context, cfg *fw.Config, secrets f
 		}
 		tctx, cancel := context.WithTimeout(ctx, d.timeout)
 		tools, err := s.Tools(tctx)
+		skills := ""
+		if sr, ok := s.(skillReporter); ok && err == nil {
+			sr.SourceSkills(tctx)
+			skills = "; skills: " + sr.SkillsStatus()
+		}
 		cancel()
 		if c, ok := s.(io.Closer); ok {
 			_ = c.Close()
@@ -664,7 +677,7 @@ func (d *doctor) checkToolSources(ctx context.Context, cfg *fw.Config, secrets f
 			d.fail("tool source %s: tools/list failed: %v", name, err)
 			continue
 		}
-		d.ok("tool source %s: %d tools", name, len(tools))
+		d.ok("tool source %s: %d tools%s", name, len(tools), skills)
 	}
 }
 

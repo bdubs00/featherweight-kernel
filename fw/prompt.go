@@ -102,7 +102,8 @@ func joinInstructions(instructions []string) string {
 }
 
 // SkillsIndex renders the skills that the globs allow as one line each:
-// the name, then the description. It returns "" when no skill is allowed.
+// the name, then the description, and for a skill of an MCP server, the
+// server. It returns "" when no skill is allowed.
 func SkillsIndex(skills []Skill, globs []string) string {
 	var sb strings.Builder
 	for _, s := range skills {
@@ -112,6 +113,9 @@ func SkillsIndex(skills []Skill, globs []string) string {
 		fmt.Fprintf(&sb, "- %s", s.Name)
 		if s.Description != "" {
 			fmt.Fprintf(&sb, ": %s", s.Description)
+		}
+		if s.Origin == SkillOriginMCP && s.Server != "" {
+			fmt.Fprintf(&sb, " (from the MCP server %s)", s.Server)
 		}
 		sb.WriteByte('\n')
 	}
