@@ -137,13 +137,14 @@ func keepsDone(done bool, typ string) bool {
 // child in another process needs it too: the kernel records a child
 // before the spawner creates its process, and a restart must know every
 // process that the spawner created. Queues, budget changes, annotations,
-// and external follow-ups are acknowledged to their caller, so they need
-// the same boundary regardless of the surface that accepted them. Internal
-// kernel notes have no external acknowledgment and stay batched. An absent
-// or unreadable message origin counts as external, never as a kernel note.
+// reactions, and external follow-ups are acknowledged to their caller, so
+// they need the same boundary regardless of the surface that accepted
+// them. Internal kernel notes have no external acknowledgment and stay
+// batched. An absent or unreadable message origin counts as external,
+// never as a kernel note.
 func needsIntentSync(typ string, data json.RawMessage) bool {
 	if typ == EvApprovalRequested || typ == EvApprovalDecided || typ == EvRunChild ||
-		typ == EvRunQueued || typ == EvBudgetChanged || typ == EvRunAnnotated || IsTerminal(typ) {
+		typ == EvRunQueued || typ == EvBudgetChanged || typ == EvRunAnnotated || typ == EvRunReacted || IsTerminal(typ) {
 		return true
 	}
 	if typ == EvMessageReceived {

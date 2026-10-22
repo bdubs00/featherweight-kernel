@@ -10,8 +10,9 @@ import (
 
 // TestNotesAfterTheEndLeaveARunFinished proves that the record and the
 // report of a child that arrive after its parent finished, as for a child
-// that ends after its parent, neither count the parent as active again nor
-// open a run span that never ends.
+// that ends after its parent, and a reaction of a person on the result,
+// neither count the parent as active again, nor open a quality episode,
+// nor open a run span that never ends.
 func TestNotesAfterTheEndLeaveARunFinished(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	m := NewMetrics(reg, nil)
@@ -23,6 +24,10 @@ func TestNotesAfterTheEndLeaveARunFinished(t *testing.T) {
 		f.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeCompleted})
 		f.emit(fw.EvRunChild, fw.RunChildData{Child: "c1", Member: "remote", Started: true})
 		f.emit(fw.EvChildReported, fw.ChildReportedData{Child: "c1", State: fw.StateCompleted})
+		f.emit(fw.EvRunReacted, fw.ReactionData{Seq: 3, Reaction: fw.ReactionHeart, By: "alice"})
+	}
+	if len(m.runs) != 0 || len(m.quality.runs) != 0 {
+		t.Errorf("notes on a finished run opened it: %d runs, %d quality episodes", len(m.runs), len(m.quality.runs))
 	}
 	if got := value(t, reg, "fw_runs_active", map[string]string{"agent": "default"}); got != 0 {
 		t.Errorf("fw_runs_active = %v after notes on a finished run", got)

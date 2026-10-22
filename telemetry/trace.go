@@ -167,10 +167,10 @@ func (t *Tracer) Observe(e fw.Event) {
 		}
 		t.end(e.Subject, rt, ts)
 		return
-	case fw.EvRunAnnotated, fw.EvRunChild, fw.EvChildReported, fw.EvBudgetChanged:
-		// An annotation, the record and the report of a child, and a
-		// change of the budget can arrive after the run finished, so they
-		// never open a run span.
+	case fw.EvRunAnnotated, fw.EvRunChild, fw.EvChildReported, fw.EvBudgetChanged, fw.EvRunReacted:
+		// An annotation, the record and the report of a child, a change
+		// of the budget, and a reaction can arrive after the run finished,
+		// so they never open a run span.
 		if rt != nil {
 			if e.Type == fw.EvBudgetChanged {
 				var d fw.BudgetChangedData

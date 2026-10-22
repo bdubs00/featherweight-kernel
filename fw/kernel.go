@@ -84,6 +84,10 @@ type kernel struct {
 	noSpawner sync.Once                  // the warning that this process cannot reach its children in other processes
 	giveUp    time.Duration              // how long a child that does not answer still counts as reachable (followGiveUp)
 
+	// reactMu serializes Agent.React, so each reaction is checked against
+	// the earlier ones before it appends.
+	reactMu sync.Mutex
+
 	sem      chan struct{} // one slot per active run, Config.MaxRuns slots
 	childSem chan struct{} // one slot per working child run, Config.Spawn.MaxRunning slots; nil for no limit
 
@@ -1805,6 +1809,7 @@ func cloneRun(r *Run) *Run {
 		o := *r.Outcome
 		cp.Outcome = &o
 	}
+	cp.Reactions = maps.Clone(r.Reactions)
 	return &cp
 }
 

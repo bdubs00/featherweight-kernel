@@ -62,14 +62,15 @@ const (
 func IsTerminal(typ string) bool { return typ == EvRunFinished }
 
 // LeavesFinished reports whether an event of the type leaves a finished run
-// finished: fw.run.annotated, fw.run.child, fw.child.reported, and
-// fw.budget.changed add facts to a run and do no work on it, so they can
-// arrive after its end, for example the report of a child that ends after
-// its parent, a branch of a finished run in another process, or a larger
+// finished: fw.run.annotated, fw.run.reacted, fw.run.child,
+// fw.child.reported, and fw.budget.changed add facts to a run and do no
+// work on it, so they can arrive after its end, for example the report of
+// a child that ends after its parent, a branch of a finished run in
+// another process, a reaction of a person on the result, or a larger
 // budget before a follow-up. Every other event after the end, such as a
 // follow-up message, works on the run again.
 func LeavesFinished(typ string) bool {
-	return typ == EvRunAnnotated || typ == EvRunChild || typ == EvChildReported || typ == EvBudgetChanged
+	return typ == EvRunAnnotated || typ == EvRunReacted || typ == EvRunChild || typ == EvChildReported || typ == EvBudgetChanged
 }
 
 // NewEvent builds an event for a run. Seq and Source are set by the ledger.

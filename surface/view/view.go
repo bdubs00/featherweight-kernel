@@ -555,6 +555,11 @@ func describe(e fw.Event) string {
 			}
 			return "annotated: " + strings.Join(keys, ", ")
 		}
+	case fw.EvRunReacted:
+		var d fw.ReactionData
+		if e.Decode(&d) == nil {
+			return reactionLine(d)
+		}
 	case fw.EvContextCompacted:
 		var d fw.ContextCompactedData
 		if e.Decode(&d) == nil {
@@ -651,6 +656,35 @@ func senderOf(d fw.MessageReceivedData) string {
 		return " from " + oneLine(d.By, 60)
 	}
 	return ""
+}
+
+// reactionLine is the event line of a reaction, such as "alice reacted
+// heart to event 118" or "alice reacted up to the run". A thumb that
+// recorded a quality receipt says that the person accepted or rejected
+// the result, and the note follows.
+func reactionLine(d fw.ReactionData) string {
+	who := "the process"
+	if d.By != "" {
+		who = oneLine(d.By, 60)
+	}
+	s := who + " reacted " + d.Reaction
+	if d.Seq == 0 {
+		s += " to the run"
+	} else {
+		s += fmt.Sprintf(" to event %d", d.Seq)
+	}
+	if d.Receipt {
+		switch d.Reaction {
+		case fw.ReactionUp:
+			s += " and accepted the result"
+		case fw.ReactionDown:
+			s += " and rejected the result"
+		}
+	}
+	if t := oneLine(d.Note, 80); t != "" {
+		s += ": " + t
+	}
+	return s
 }
 
 // oneLine folds the whitespace of s and cuts it to n runes.

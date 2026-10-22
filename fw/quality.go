@@ -23,6 +23,9 @@ type QualityObservation struct {
 	DuplicateEffects uint64 `json:"duplicateEffects,omitempty"`
 }
 
+// maxReceiptIDBytes bounds QualityObservation.ID.
+const maxReceiptIDBytes = 128
+
 // QualityAnnotatedData extends fw.run.annotated without changing run state or
 // metadata. Existing readers ignore Quality. CostUSD and UnpricedTokens are
 // computed by ObserveQuality from own ledger usage, never supplied by callers.
@@ -51,8 +54,8 @@ func (a *Agent) ObserveQuality(ctx context.Context, id string, d QualityObservat
 	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
 		return err
 	}
-	if d.ID == "" || len(d.ID) > 128 {
-		return fmt.Errorf("%w: quality receipt id must hold 1 to 128 bytes", ErrInvalidRequest)
+	if d.ID == "" || len(d.ID) > maxReceiptIDBytes {
+		return fmt.Errorf("%w: quality receipt id must hold 1 to %d bytes", ErrInvalidRequest, maxReceiptIDBytes)
 	}
 	switch d.Verification {
 	case "":

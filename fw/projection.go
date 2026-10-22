@@ -367,6 +367,17 @@ func (r *Run) Apply(e Event, prices Prices) {
 			return
 		}
 		r.addUsage(*d.Usage, d.Provider, d.Model, prices)
+	case EvRunReacted:
+		// A reaction changes no state. The count is a new map, so a copy
+		// of the run that shares the old map keeps its count.
+		var d ReactionData
+		if r.keptEvent(e) || e.Decode(&d) != nil || d.Reaction == "" {
+			return
+		}
+		counts := make(map[string]int, len(r.Reactions)+1)
+		maps.Copy(counts, r.Reactions)
+		counts[d.Reaction]++
+		r.Reactions = counts
 	case EvBudgetChanged:
 		// A branch keeps the changes that it copied, because it goes on
 		// with the budget that its source had at that point.

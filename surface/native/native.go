@@ -102,6 +102,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/runs/{id}", s.remote(s.getRun)},
 		{"GET /v1/runs/{id}/events", s.remote(s.runEvents)},
 		{"POST /v1/runs/{id}/messages", s.remote(s.sendMessage)},
+		{"POST /v1/runs/{id}/reactions", s.remote(s.react)},
 		{"PATCH /v1/runs/{id}/budget", s.remote(s.changeBudget)},
 		{"POST /v1/runs/{id}/approvals/{approval}", s.remote(s.decide)},
 		{"POST /v1/runs/{id}/cancel", s.remote(s.cancel)},
@@ -729,6 +730,40 @@ func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeRun(w, r, http.StatusAccepted, id)
+}
+
+// reactionBody is the body of POST /v1/runs/{id}/reactions: the event of
+// the run, 0 for the run as a whole, the reaction, up, down, or heart, a
+// note, and the person. Only a trusted caller, the static token or a
+// workload, names the person in by, as for the sender of a message;
+// anyone else reacts as the principal of the request.
+type reactionBody struct {
+	Seq      uint64 `json:"seq"`
+	Reaction string `json:"reaction"`
+	Note     string `json:"note"`
+	By       string `json:"by"`
+}
+
+// react answers POST /v1/runs/{id}/reactions with the run object after the
+// reaction (fw.Agent.React). The caller needs the operator role on the
+// run.
+func (s *server) react(w http.ResponseWriter, r *http.Request) {
+	var body reactionBody
+	if !s.decode(w, r, &body) {
+		return
+	}
+	by := strings.TrimSpace(body.By)
+	if by != "" && !trustedCaller(r) {
+		problem(w, r, http.StatusForbidden, "only the static token or a workload can name the person of a reaction")
+		return
+	}
+	id := r.PathValue("id")
+	d := fw.ReactionData{Seq: body.Seq, Reaction: strings.ToLower(strings.TrimSpace(body.Reaction)), Note: body.Note, By: by}
+	if err := s.a.React(r.Context(), id, d); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeRun(w, r, http.StatusOK, id)
 }
 
 // budgetAnswer is the answer of PATCH /v1/runs/{id}/budget: the effective

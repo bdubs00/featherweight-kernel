@@ -391,6 +391,11 @@ type Run struct {
 	// from fw.outcome.evaluated (see Outcome). It is nil for a run without
 	// a rubric.
 	Outcome *RunOutcome `json:"outcome,omitempty"`
+	// Reactions counts the reactions of people on the run and its events,
+	// from fw.run.reacted, by reaction: ReactionUp, ReactionDown, and
+	// ReactionHeart. It holds nothing more; the front of a fleet keeps
+	// the list. A branch counts its own reactions only.
+	Reactions map[string]int `json:"reactions,omitempty"`
 	// kept is RunQueuedData.Kept: the events of a branch that are copies of
 	// the events of its source, whose usage the branch leaves out.
 	kept uint64

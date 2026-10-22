@@ -73,6 +73,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.run.started` | model, tool names, brief (the sections that tools add to the system prompt), context (the data that tools add to the first user message, section 7.8.2), time zone |
 | `fw.memory.changed` | one change of a memory note by a tool call: call id, tool, operation, ref, old ref, scope, agent, size, SHA-256; never the text (section 7.8.1) |
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2), or a trusted quality receipt with its own cost snapshot (section 10.1) |
+| `fw.run.reacted` | the reaction of a person on an event of the run: `seq`, the event, `0` for the run as a whole; `reaction`, `up`, `down`, or `heart`; `by`, the subject of the person; `note`, at most 1 KB; and `receipt`, true when a thumb also recorded a quality receipt (sections 8.2 and 10.1) |
 | `fw.message.received` | role, content, origin (`http`, `a2a`, `mcp`, `bus`, `cli`, `kernel`), note kind, and for a budget note what it is about: the limit, the threshold, the use, the limit value, and the run that holds the limit, or `changed` (section 5.2); `by`, the subject of the principal that sent the message, and `from`, the party that a trusted caller relays the message for: kind (`person` or `agent`), name, run, and member (section 5.5) |
 | `fw.turn.started` | turn number |
 | `fw.model.requested` | provider, model, effort (`default` when the provider chooses it, section 6.1), estimated input tokens, and `report` for the final report call at a limit (section 5.2) |
@@ -113,7 +114,7 @@ The model builds its history from the stored events, so the model does not see t
 The default ledger driver writes one file per run at `$FW_HOME/runs/<run>/ledger.jsonl`. JSONL is one JSON object per line. It calls `fsync` before acknowledging each of these events:
 
 - `fw.run.queued`, for every origin, including HTTP and the command line
-- external `fw.message.received`, `fw.budget.changed`, and `fw.run.annotated`
+- external `fw.message.received`, `fw.budget.changed`, `fw.run.annotated`, and `fw.run.reacted`
 - every approval event, every terminal event, and every `fw.run.child`
 - every `fw.tool.requested` that does not explicitly record `idempotent: true`
 
@@ -983,6 +984,7 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 | `GET /v1/runs/{id}` | Get one run. |
 | `GET /v1/runs/{id}/events` | Stream the ledger as server-sent events. `Last-Event-ID` resumes from a sequence number. Under `Accept: application/json`, one page of events with `lines`, the short line of each event, as the MCP tool `run_events` of the workbench gives. |
 | `POST /v1/runs/{id}/messages` | Send a follow-up message. Body fields: `content`, `files`, `budget`, which changes the budget of the run before the message (section 5.2), and `from`, the party that the caller relays the message for (section 5.5). The message records the subject of the caller in `by`. Only a trusted caller, the static token or a workload, sets `from`, as for `id` of `POST /v1/runs`; anyone else gets a 403. |
+| `POST /v1/runs/{id}/reactions` | React to an event of a run, or to the run as a whole (see Reactions below). Body fields: `seq`, the event, `0` or absent for the run; `reaction`, `up`, `down`, or `heart`; `note`, at most 1 KB; and `by`, the person. Only a trusted caller, the static token or a workload, sets `by`, as for `from` of a message; anyone else gets a 403. Without `by`, the caller reacts as itself. The answer is 200 with the run object. A `seq` that the run does not have, an unknown reaction, and a longer note are a 400. It needs the operator role on the run. |
 | `PATCH /v1/runs/{id}/budget` | Change the budget of a run (section 5.2). The body is a budget; each field that it sets replaces the same field for the work that follows. The answer holds `budget`, the effective budget after the change, and `run`, the run object. It needs the operator role on the run, as a decision does. |
 | `POST /v1/runs/{id}/approvals/{approval}` | Decide a pending approval. Body fields: `decision`, `note`. |
 | `POST /v1/runs/{id}/cancel` | Cancel a run. |
@@ -1025,6 +1027,8 @@ The routes of the memory take the scope from the agent of the query and the prin
 
 `usage` sums the work of the run: the input, output, cache read, and cache write tokens of its model calls, its turns, its tool calls, and `costUSD`, the cost of the calls whose model has a price (section 5.2). `usage` never holds the work of a child run. `unpricedTokens` counts the tokens of the calls whose model has no price, because their cost is unknown, not zero. A price of zero is a price. The kernel records the usage of the run so far as `totals` on every `fw.run.finished` and `fw.run.suspended`, across follow-ups, so a run that finishes again carries more. The projection takes those totals in place of its own sum, and `usageSeq` is the sequence number of the latest event that carried them. The ledger gives the same usage with and without the totals, because they are the sum of the events before them. After a restart with another price table, the work before the latest totals keeps the cost at the prices of its time. A consumer that receives only the lifecycle events of a run therefore knows its usage each time the run finishes or is suspended (section 9.4). A branch counts its own work only (section 4.7).
 
+`reactions` counts the reactions of people on the run and its events by reaction, such as `{"up": 2, "heart": 1}`, and holds nothing more. A run without a reaction has no field. The front of a fleet keeps the list of the reactions in its own store.
+
 A run that started a child also has `treeUsage`, the usage of the run and of every run under it, as the process that holds the run knows it: its children in this process as they are now, and its children in other processes as each last reported its own tree. `treeOpen` counts the runs under it that did not finish, and `treeWorking` the runs of those that work: queued or running. `treeUsage` includes `usage`, so a sum over several runs, such as the usage of a job, adds `usage` and never `treeUsage`. The ledger never holds either field: the kernel sets them when it reports a run, so a parent in another process reads the whole tree of a child in one read (section 11.9).
 
 The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET /v1/agents/{name}`. The workbench serves `PUT` and `DELETE /v1/agents/{name}` and `GET /v1/whoami`, the caller with its roles and its teams.
@@ -1044,6 +1048,14 @@ The kernel makes no title call. A title that a model writes comes from the workb
 `Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entries `idempotencyKey`, `fw.drift.system`, and `fw.drift.instructions` (section 12.5) are the kernel's and cannot change. A request cannot set them either, on any surface. The metadata after the merge must fit the bounds of `fw.CheckMetadata`. The entries that the kernel sets, also `fw.forkOf` and `fw.forkSeq` of a branch (section 4.7) and the `fw.intake.*` entries of a job from the bus intake (section 9.3), do not count, so an entry of the kernel never makes a later annotation fail.
 
 The kernel annotates a run itself when the text of its profile changed across a restart, with the keys `fw.drift.system` and `fw.drift.instructions` (section 12.5).
+
+#### Reactions
+
+`Agent.React` records the reaction of a person on an event of a run, or on the run as a whole, as the event `fw.run.reacted`: a thumb up, a thumb down, or a heart, with a note of at most 1 KB. With a principal, the caller needs the operator role on the run, as for an annotation. `by` is the subject of the caller. The process itself, the static token, or a workload can name another person in `by`, so the front of a fleet records the reaction of a person on a run of a Task; any other principal that names another person gets `ErrForbidden`. A reaction that the same person already put on the same event appends nothing, also with another note. The run object counts the reactions in `reactions`. The metadata of a run is one flat map with a bound on its entries, so a reaction is an event of its own and not an annotation: a run with fifty reactions can still take its next annotation.
+
+A thumb on the `fw.run.finished` of a completed episode is also a quality receipt (section 10.1): `React` calls `Agent.ObserveQuality` with `accepted` for `up` or `rejected` for `down`, that completion, and the receipt id `reaction:<run>:<seq>:<by>`. A subject that makes the id longer than 128 bytes gives its place to the first 16 bytes of its SHA-256. The reaction then records `receipt: true`. When `ObserveQuality` refuses the receipt, because a receipt of another person or another thumb of the same person already verified the completion, the reaction still records, with `receipt: false`, and the log says why. A heart records no receipt, and neither does a thumb on any other event.
+
+A reaction changes the state of a run in no way, as an annotation does. One that arrives after `fw.run.finished` leaves the run finished: the metrics and the traces open no run for it, the file ledger closes the file of the run again after it, and a restart does not resume the run. The file ledger syncs the event before `React` returns, as it does for an annotation.
 
 An annotation changes the state of a run in no way. One that arrives after `fw.run.finished` leaves the run finished, as the record and the report of a child do (section 11.9): the metrics and the traces open no run for it, the file ledger closes the file of the run again after it, and a restart does not resume the run, because the rebuild reads the state of a run and not its last event (section 4.5).
 
@@ -1236,7 +1248,7 @@ The model latency histogram has buckets up to 900 seconds, because one turn on a
 
 Execution completion is not verification. `fw_task_completions_total` counts each own completion episode, including failure and cancellation, and labels the model grader judgment separately. `unverified` means that no grader judgment was recorded. A follow-up starts another episode. Copied branch history contributes no completion or intervention.
 
-A trusted integration calls `Agent.ObserveQuality` with a stable receipt ID and the sequence of an own completed `fw.run.finished`. It records a final `accepted`, `satisfied`, `rejected`, or `unknown` verification as `fw.run.annotated`. Accepted means that a person accepted the result; satisfied means that an external verifier checked it. Model grading alone creates neither. Identical receipt retries append nothing, including after restart; a conflicting receipt or second final verification of the same completion is refused. The API needs operator access when a principal is present and is not a model tool.
+A trusted integration calls `Agent.ObserveQuality` with a stable receipt ID and the sequence of an own completed `fw.run.finished`. It records a final `accepted`, `satisfied`, `rejected`, or `unknown` verification as `fw.run.annotated`. Accepted means that a person accepted the result; satisfied means that an external verifier checked it. Model grading alone creates neither. Identical receipt retries append nothing, including after restart; a conflicting receipt or second final verification of the same completion is refused. The API needs operator access when a principal is present and is not a model tool. A thumb of a person on that `fw.run.finished`, through `Agent.React` or `POST /v1/runs/{id}/reactions`, records such a receipt for the person: `accepted` for a thumb up and `rejected` for a thumb down, with the receipt id `reaction:<run>:<seq>:<by>`. The first thumb on a result verifies it, and a later thumb records the reaction without a receipt (section 8.2, Reactions).
 
 `fw_task_verifications_total` counts those receipts. Use all execution episodes as the denominator for an overall verified-success rate, or completed episodes for verification coverage. Completions without receipts remain unverified; an explicit unknown receipt is not success. A late receipt can refer to a completion outside the query window, so short-window ratios need that interpretation.
 
@@ -1689,6 +1701,11 @@ func (a *Agent) ChangeBudget(ctx context.Context, id string, change Budget, orig
 func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string, opts ...SendOption) error
 func WithSendBudget(b Budget) SendOption
 func WithMessageFrom(f MessageFrom) SendOption
+
+// React records the reaction of a person on an event of a run as
+// fw.run.reacted. A thumb on the end of a completed episode is also a
+// quality receipt (section 8.2).
+func (a *Agent) React(ctx context.Context, id string, d ReactionData) error
 
 // Following counts the children in other processes that work; the
 // process is not idle while one does (section 11.9).

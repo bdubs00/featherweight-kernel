@@ -614,6 +614,10 @@ func TestSummarizeNamesTheWork(t *testing.T) {
 	if got := summarize(msg, map[string]string{}); !strings.HasSuffix(got, "fw.message.received role=user origin=http from=agent:reviewer by=token") {
 		t.Errorf("summary of a message = %q", got)
 	}
+	react := fw.MustEvent("r", fw.EvRunReacted, fw.ReactionData{Seq: 118, Reaction: fw.ReactionUp, By: "alice", Note: "private note", Receipt: true})
+	if got := summarize(react, map[string]string{}); !strings.HasSuffix(got, "fw.run.reacted reaction=up seq=118 by=alice receipt=true") {
+		t.Errorf("summary of a reaction = %q", got)
+	}
 	if got := runTitle(&fw.Run{Input: "Draft the notes. Then send them."}); got != "Draft the notes" {
 		t.Errorf("runTitle from the input = %q", got)
 	}

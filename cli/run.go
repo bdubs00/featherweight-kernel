@@ -574,6 +574,17 @@ func summarize(e fw.Event, tools map[string]string) string {
 				add("by=%s", d.By)
 			}
 		}
+	case fw.EvRunReacted:
+		var d fw.ReactionData
+		if e.Decode(&d) == nil {
+			add("reaction=%s seq=%d", d.Reaction, d.Seq)
+			if d.By != "" {
+				add("by=%s", d.By)
+			}
+			if d.Receipt {
+				add("receipt=true")
+			}
+		}
 	case fw.EvLoopDetected:
 		var d fw.LoopDetectedData
 		if e.Decode(&d) == nil {
