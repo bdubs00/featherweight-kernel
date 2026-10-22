@@ -5,7 +5,8 @@ package native
 // example, adds its page, its sign-in, and its views. An extension gets a
 // Kit with the agent and the helpers of the run routes, so its routes
 // answer errors as the run routes do. An extension can also set a Relay,
-// which answers a request about a run that another process holds.
+// which answers a request about a run that another process holds, and
+// with AgentRelay about a profile that another process runs.
 
 import (
 	"net/http"
@@ -75,14 +76,29 @@ func (k *Kit) Remote(next http.HandlerFunc) http.HandlerFunc { return k.s.remote
 // process holds: a run of another process, by the path value id of a run
 // route, or a place to start a run, by the query parameter member of POST
 // /v1/runs. Take reports whether it answered the request. The kernel knows
-// nothing about the other processes; the fleet of the workbench registers
-// a relay through SetRelay.
+// nothing about the other processes. The fleet of the workbench registers
+// a relay through SetRelay. See AgentRelay for the route of one agent.
 type Relay interface {
 	Take(w http.ResponseWriter, r *http.Request) bool
 }
 
+// An AgentRelay is a Relay that also answers GET /v1/agents/{name} for a
+// profile that another process runs, such as the profile of a pool of
+// workers of a fleet, which the process of the surface does not hold. The
+// surface asks the relay of SetRelay for this interface. It calls
+// TakeAgent after the authentication of the caller and before its own
+// lookup, with the path value name. TakeAgent reports whether it answered
+// the request. The kernel checks no right before the call, so the relay
+// answers a name that the caller cannot view as the kernel does, with a
+// 404. A relay that does not implement AgentRelay, or no relay, leaves the
+// route to the kernel.
+type AgentRelay interface {
+	TakeAgent(w http.ResponseWriter, r *http.Request, name string) bool
+}
+
 // SetRelay sets the relay of the surface. The last extension to set one
-// wins.
+// wins. A relay that also implements AgentRelay answers the route of one
+// agent too.
 func (k *Kit) SetRelay(rl Relay) { k.s.relay = rl }
 
 // Start starts a run for the caller of the request. When it returns false,

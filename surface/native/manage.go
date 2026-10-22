@@ -36,9 +36,14 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 }
 
 // getAgent answers GET /v1/agents/{name} with one profile, the role of the
-// caller, and the usage of its visible runs.
+// caller, and the usage of its visible runs. A relay that implements
+// AgentRelay can answer first, for a profile that another process runs.
 func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
-	v, err := view.Agent(r.Context(), s.a, r.PathValue("name"))
+	name := r.PathValue("name")
+	if ar, ok := s.relay.(AgentRelay); ok && ar.TakeAgent(w, r, name) {
+		return // a profile of another process, see AgentRelay
+	}
+	v, err := view.Agent(r.Context(), s.a, name)
 	if err != nil {
 		s.fail(w, r, err)
 		return

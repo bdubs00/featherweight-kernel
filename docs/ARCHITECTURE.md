@@ -1104,7 +1104,7 @@ The routes of the memory take the scope from the agent of the query and the prin
 
 A run that started a child also has `treeUsage`, the usage of the run and of every run under it, as the process that holds the run knows it: its children in this process as they are now, and its children in other processes as each last reported its own tree. `treeOpen` counts the runs under it that did not finish, and `treeWorking` the runs of those that work: queued or running. `treeUsage` includes `usage`, so a sum over several runs, such as the usage of a job, adds `usage` and never `treeUsage`. The ledger never holds either field: the kernel sets them when it reports a run, so a parent in another process reads the whole tree of a child in one read (section 11.9).
 
-The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET /v1/agents/{name}`. The workbench serves `PUT` and `DELETE /v1/agents/{name}` and `GET /v1/whoami`, the caller with its roles and its teams.
+The run states are `queued`, `running`, `input-required`, `completed`, `failed`, `canceled`, and `suspended`. Authentication defaults to a bearer token read from `FW_API_TOKEN`. The setting `auth.mode: none` must be explicit. The modes `oidc` and `spiffe` give every caller an identity, and section 13 says what an identity can do. The native API also serves `GET /v1/agents/{name}`. A relay can answer it first, for a profile that another process runs (section 12.8). The workbench serves `PUT` and `DELETE /v1/agents/{name}` and `GET /v1/whoami`, the caller with its roles and its teams.
 
 An extension adds routes to this surface (section 12.8). The workbench adds the page, the browser sign-in, home, results, transcripts, the builder, the fleet, usage, and connections (the workbench architecture, section 2).
 
@@ -1158,7 +1158,7 @@ The MCP server is part of the workbench. `fw-workbench` serves it at `/mcp` over
 
 ### 8.6 Fleet
 
-The fleet is a feature of the workbench (the workbench architecture, section 4), and the kernel knows no fleet. The kernel gives a linked package three hooks for it. A service runs beside the agent for as long as the agent lives (section 12.4). A relay of the native surface answers a request about a run that another process holds (section 12.8). A collector adds gauges to the metrics surface (section 10.1). A fleet member reads the credential of a caller from `fw.CredentialFrom` and acts on the caller's behalf at the member that owns a run. The field `member` of a run object names the process that holds the run when it is not this one; the kernel never sets it.
+The fleet is a feature of the workbench (the workbench architecture, section 4), and the kernel knows no fleet. The kernel gives a linked package three hooks for it. A service runs beside the agent for as long as the agent lives (section 12.4). A relay of the native surface answers a request about a run that another process holds (section 12.8). It can also answer for a profile that another process runs. A collector adds gauges to the metrics surface (section 10.1). A fleet member reads the credential of a caller from `fw.CredentialFrom` and acts on the caller's behalf at the member that owns a run. When another process holds a run, the field `member` of the run object names that process. The kernel never sets it.
 
 ## 9. Message queues
 
@@ -1703,7 +1703,7 @@ A skill is a directory with a `SKILL.md` file whose front matter names and descr
 
 Each driver registers itself by name at init, for example `fw.RegisterBus("nats", nats.New)`. A third-party Go module adds a driver by being imported. A blank import in `cmd/fw/drivers.go` selects the drivers that the default binary includes. A custom build leaves out a driver by leaving out its import.
 
-A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), `fw.RegisterRunAnnotator` adds a run annotator, `fw.RegisterService` adds a service (section 12.4), `fw.RegisterSpawner` adds a spawner driver (section 11.9), `metrics.RegisterCollector` adds series to the metrics surface (section 10.1), `cli.RegisterDoctorCheck` adds a line to `fw doctor`, `Kit.SetRelay` of the native surface sets the relay for the runs of other processes (section 12.8), and `Agent.SetPersonTokens` gives the tool sources the tokens of people (section 7.11).
+A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), `fw.RegisterRunAnnotator` adds a run annotator, `fw.RegisterService` adds a service (section 12.4), `fw.RegisterSpawner` adds a spawner driver (section 11.9), `metrics.RegisterCollector` adds series to the metrics surface (section 10.1), `cli.RegisterDoctorCheck` adds a line to `fw doctor`, `Kit.SetRelay` of the native surface sets the relay for the runs and the profiles of other processes (section 12.8), and `Agent.SetPersonTokens` gives the tool sources the tokens of people (section 7.11).
 
 ### 12.7 Out-of-process extension
 
@@ -1720,7 +1720,19 @@ The package `fw` is the main public package. It holds the interfaces above, the 
 - `cli` holds the command line. `cli.Run` runs a verb. A binary sets function variables such as `cli.NewLogger`, `cli.CardJSON`, and `cli.ServeMCPStdio` for the packages that it links. A nil variable turns off what needs it.
 - `surface/native` is the extension point of the native API. `native.Extend` registers an `Extension`, and `native.New` mounts each one after the run routes. `native.NewWith(exts...)` mounts only the given ones.
 
-An extension gets a `*native.Kit`. The kit has `Agent`, `Handle` (behind authentication), `HandlePublic`, and `SetSigninPath`. It also has the helpers of the run routes: `Remote`, `OwnerOf`, `Forward`, `Start`, `Fail`, `Decode`, and `DecodeFiles`. The package also exports `WriteProblem`, `WriteJSON`, `Accepts`, `Cause`, `Attachments`, the type `FileBody`, and the limits `DefaultEventsLimit` and `MaxEventsLimit`.
+An extension gets a `*native.Kit`. The kit has `Agent`, `Handle` (behind authentication), `HandlePublic`, `SetSigninPath`, and `SetRelay`. It also has the helpers of the run routes: `Remote`, `Start`, `Fail`, `Decode`, and `DecodeFiles`. The package also exports `WriteProblem`, `WriteJSON`, `Accepts`, `Cause`, `Attachments`, the type `FileBody`, and the limits `DefaultEventsLimit` and `MaxEventsLimit`.
+
+A relay (`native.Relay`) answers a request about what another process holds. An extension sets it with `Kit.SetRelay`, and the last one to set it wins. The surface calls its method `Take(w, r) bool` before the handler of each route of one run, and before `POST /v1/runs`. When `Take` answered the request, it returns true. `Kit.Remote` wraps a route of an extension in the same way.
+
+A relay can also answer `GET /v1/agents/{name}` for a profile that another process runs, such as the profile of a pool of workers of a fleet. The process of the surface holds no such profile, so its own lookup answers 404. For this route the relay implements the optional interface `native.AgentRelay`:
+
+```go
+type AgentRelay interface {
+    TakeAgent(w http.ResponseWriter, r *http.Request, name string) bool
+}
+```
+
+The surface checks the relay for this interface. It calls `TakeAgent` after the authentication of the caller and before its own lookup, with the path value `name`. When `TakeAgent` answered the request, it returns true. With false, the kernel answers as it does without a relay. The kernel checks no right before the call. So the relay checks the rights of the caller itself. It answers a name that the caller cannot view with a 404, as the kernel does. Without a relay, or with a relay that does not implement `AgentRelay`, the route does not change.
 
 Semantic versioning applies to these three packages. A sketch of `fw`:
 
