@@ -1975,6 +1975,8 @@ Every surface authenticates every request with the `Authn` plug and puts the pri
 
 `auth.mode` names one mode, or several separated by commas that are tried in order, for example `oidc,spiffe,token`. The first mode that accepts the credential wins, and the first mode writes the challenge.
 
+A refused request gets a 401 with the challenge, and the log gets one line at level info, `request refused without a valid credential`. The line holds the method, the route pattern, the path, the reason, and `node`, the name of the process, so the log of several replicas says which one refused. The reason is `no credential` for a request without an `Authorization` header and without a client certificate. Otherwise it names the reason of each mode, such as `oidc: token expired; token: the bearer token is not the static token`. No token and no other value of a header enters the line. For each method, route, and reason, at most one line goes out per minute, and the next line counts the refusals that the log left out in `skipped`. A client that loops on a 401 therefore writes one line a minute.
+
 | Mode | Credential | Subject |
 |---|---|---|
 | `token` | the static bearer token from the secret `auth.tokenEnv` | `token` |

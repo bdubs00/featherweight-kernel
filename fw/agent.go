@@ -56,6 +56,7 @@ type Agent struct {
 	giveUp      time.Duration // how long a child that does not answer still counts as reachable
 	node        string        // the name of this process, see Config.Node
 	started     time.Time     // when New built this agent, see Started
+	refusals    refusalLog    // the log lines of refused requests, see RequireAuth
 
 	tokMu        sync.RWMutex
 	personTokens PersonTokens // the tokens of people from a linked package, see connect.go
