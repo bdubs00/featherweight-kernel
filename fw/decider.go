@@ -233,10 +233,7 @@ func serverMessage(raw []byte) string {
 			msg = s
 		}
 	}
-	if len(msg) > 300 {
-		msg = msg[:300] + "..."
-	}
-	return msg
+	return clipText(msg, 300, "the message")
 }
 
 // ParseSystemOne reads the response body of a System One server for the

@@ -219,7 +219,7 @@ func TestRenderRoutine(t *testing.T) {
 		t.Errorf("render = %s; want %s", got, want)
 	}
 	// A find that matches nothing fails before any call.
-	if _, err := RenderRoutine(`{{ find .input `+"`issue (\\d+)`"+` }}`, data); err == nil || err.Error() != `hole "issue (\\d+)" empty` {
+	if _, err := RenderRoutine(`{{ find .input `+"`issue (\\d+)`"+` }}`, data); err == nil || err.Error() != `hole issue (\d+) empty` {
 		t.Errorf("empty hole: %v", err)
 	}
 	// A missing field fails too.

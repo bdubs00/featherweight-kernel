@@ -289,7 +289,7 @@ func TestRoutineFallsThrough(t *testing.T) {
 		{name: "check failure", answers: confident, read: `{"labels": "type/bug,status/new"}`, applied: true, failed: 4, steps: 4,
 			reason: `check 1 gitea.issue_read: the result lacks "status/triaged"`},
 		{name: "empty hole", answers: confident, input: "Ticket without a number", applied: true, failed: 2, steps: 1,
-			reason: `step 2 gitea.issue_write: hole "#(\\d+)" empty`},
+			reason: `step 2 gitea.issue_write: hole #(\d+) empty`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,7 +114,11 @@ func readRoutine(path string) (fw.Routine, error) {
 	if err != nil {
 		return r, err
 	}
-	if err := yaml.Unmarshal(b, &r); err != nil {
+	// A key that a routine does not have, such as lack: for lacks, is an
+	// error, so a typo never turns a check off.
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(&r); err != nil {
 		return r, fmt.Errorf("%s: %w", path, err)
 	}
 	return r, nil

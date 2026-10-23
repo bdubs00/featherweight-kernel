@@ -100,7 +100,7 @@ Semantics:
   Otherwise the routine fails before any call, with the step and the parse
   error in the event.
 - A rendered `find` that finds nothing fails the routine at that step,
-  with the reason `hole "<pattern>" empty`. A routine therefore never
+  with the reason `hole <pattern> empty`. A routine therefore never
   calls a tool with a missing value. A missing field fails the step too.
 - The `steps` run in order. Each one is a normal tool call of the run.
   The policy applies (allow, ask, deny), the limits apply, and the budget

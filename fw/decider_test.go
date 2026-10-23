@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // readmeQuestions are the questions of the model card example. The answer
@@ -231,5 +232,12 @@ func TestSystemOneNumericLevels(t *testing.T) {
 		if a := res.Answers["severity"]; a.Choice != "3" || a.Probability != 0.7 || a.Probabilities["1"] != 0.1 {
 			t.Errorf("%s: severity = %+v", name, a)
 		}
+	}
+}
+
+func TestServerMessageCutsAtACharacter(t *testing.T) {
+	msg := serverMessage([]byte(`{"error": {"type": "x", "message": "` + strings.Repeat("é", 400) + `"}}`))
+	if !utf8.ValidString(msg) || !strings.Contains(msg, "[Cut: the message has") {
+		t.Fatalf("message = %q", msg)
 	}
 }

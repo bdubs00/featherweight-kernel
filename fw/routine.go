@@ -465,10 +465,10 @@ func routineFind(text any, pattern string) (string, error) {
 	m := re.FindStringSubmatch(fmt.Sprint(text))
 	switch {
 	case m == nil:
-		return "", fmt.Errorf("hole %q empty", pattern)
+		return "", fmt.Errorf("hole %s empty", pattern)
 	case len(m) > 1:
 		if m[1] == "" {
-			return "", fmt.Errorf("hole %q empty", pattern)
+			return "", fmt.Errorf("hole %s empty", pattern)
 		}
 		return m[1], nil
 	}
@@ -538,7 +538,7 @@ func RenderRoutineInput(text string, data map[string]any) (json.RawMessage, erro
 }
 
 // unwrapExec returns the error of a template function without the text of
-// text/template around it, so a reason reads "hole "#(\d+)" empty".
+// text/template around it, so a reason reads "hole #(\d+) empty".
 func unwrapExec(err error) error {
 	var ee template.ExecError
 	if errors.As(err, &ee) {

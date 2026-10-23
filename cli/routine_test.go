@@ -125,3 +125,18 @@ func TestRoutineName(t *testing.T) {
 		}
 	}
 }
+
+// A key that a routine does not have is an error, so a typo such as lack:
+// never turns a check off.
+func TestRoutineFileKnownFields(t *testing.T) {
+	env(t)
+	file := filepath.Join(t.TempDir(), "r.yaml")
+	body := strings.Replace(labelRoutine, "answer: 'LABEL {{ .kind }}'", "after:\n  - tool: tracker.read\n    input: '{}'\n    lack: [bug]\nanswer: 'LABEL {{ .kind }}'", 1)
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := run(t, "", "routine", "replay", "--routine", file, "--ledger", t.TempDir())
+	if code == 0 || !strings.Contains(errOut, "field lack not found") {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+}
