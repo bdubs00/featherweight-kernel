@@ -581,7 +581,7 @@ func TestRoutineAnInlineProfileIsChecked(t *testing.T) {
 	bad := ackRoutine(RoutineLive)
 	bad.Decider = "jev"
 	_, err := a.Start(ctx, "x", WithRunProfile(AgentProfile{Routines: []Routine{bad}}))
-	if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), `decider "jev" is not a key of deciders`) {
+	if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), `no model answers questions under the name "jev"`) {
 		t.Fatalf("start = %v", err)
 	}
 	// The inline profile replaces the routines and pins them.

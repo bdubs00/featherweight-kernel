@@ -192,6 +192,15 @@ var (
 // sets.
 var routineReserved = []string{"input", "json", "meta"}
 
+// CheckRoutineName reports with ErrInvalidRequest whether a name is the
+// name of a routine: 1 to 64 of a-z, 0-9, and -.
+func CheckRoutineName(name string) error {
+	if !routineName.MatchString(name) {
+		return fmt.Errorf("%w: %q is not the name of a routine; a name holds 1 to 64 of a-z, 0-9, and -", ErrInvalidRequest, name)
+	}
+	return nil
+}
+
 // CheckRoutines reports with ErrInvalidRequest whether the kernel accepts
 // the routines of a profile. The error names the first problem. cfg names
 // the deciders. A nil cfg checks no decider, so a
@@ -216,8 +225,8 @@ func RoutineProblems(cfg *Config, rs []Routine) []string {
 	seen := map[string]bool{}
 	for i, r := range rs {
 		key := fmt.Sprintf("routines[%d]", i)
-		if !routineName.MatchString(r.Name) {
-			p = append(p, fmt.Sprintf("%s.name %q is not 1 to 64 of a-z, 0-9, and -", key, r.Name))
+		if err := CheckRoutineName(r.Name); err != nil {
+			p = append(p, fmt.Sprintf("%s.name: %s", key, strings.TrimPrefix(err.Error(), ErrInvalidRequest.Error()+": ")))
 		} else {
 			if seen[r.Name] {
 				p = append(p, fmt.Sprintf("%s.name %q is the name of an earlier routine", key, r.Name))
@@ -252,9 +261,9 @@ func routineProblems(cfg *Config, key string, r Routine) []string {
 	}
 	switch {
 	case len(r.Questions) > 0 && r.Decider == "" && cfg != nil:
-		p = append(p, fmt.Sprintf("%s.decider is empty; a routine with questions names a key of deciders", key))
+		p = append(p, fmt.Sprintf("%s: the routine asks questions and names no model to answer them", key))
 	case r.Decider != "" && cfg != nil && !hasDecider(cfg, r.Decider):
-		p = append(p, fmt.Sprintf("%s.decider %q is not a key of deciders", key, r.Decider))
+		p = append(p, fmt.Sprintf("%s: no model answers questions under the name %q", key, r.Decider))
 	}
 	fields := map[string]string{}
 	for _, name := range r.QuestionNames() {
@@ -428,7 +437,7 @@ func stringList(v any) ([]string, bool) {
 // templateProblems checks the size of one template and parses it.
 func templateProblems(key, text string) []string {
 	if len(text) > MaxRoutineTemplate {
-		return []string{fmt.Sprintf("%s is %d bytes; a template holds at most %d", key, len(text), MaxRoutineTemplate)}
+		return []string{fmt.Sprintf("%s is %d bytes; the limit is %d", key, len(text), MaxRoutineTemplate)}
 	}
 	if _, err := parseRoutine(text); err != nil {
 		return []string{fmt.Sprintf("%s: %v", key, err)}

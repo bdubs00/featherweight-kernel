@@ -128,7 +128,7 @@ func TestProposeProblems(t *testing.T) {
 		t.Fatalf("replay of a proposal without a decider = %+v", res)
 	}
 	_, prop = Propose(runs, ProposeOptions{Name: "Triage Desk"})
-	if prop.Complete || len(prop.Problems) != 1 || !strings.Contains(prop.Problems[0], `name "Triage Desk"`) {
+	if prop.Complete || len(prop.Problems) != 1 || !strings.Contains(prop.Problems[0], `"Triage Desk" is not the name of a routine`) {
 		t.Fatalf("a bad name: %+v", prop.Problems)
 	}
 }

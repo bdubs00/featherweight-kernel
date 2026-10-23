@@ -212,8 +212,10 @@ type AgentProfile struct {
 	Compaction *CompactionConfig `yaml:"compaction,omitempty" json:"compaction,omitempty"`
 	// Routines are the routines of the agent (see Routine). The kernel
 	// pins them in the resolved profile of each run, and the runner acts
-	// on those with standing shadow or live (docs/ROUTINES.md).
-	Routines []Routine `yaml:"routines,omitempty" json:"routines,omitempty"`
+	// on those with standing shadow or live (docs/ROUTINES.md). As with
+	// Skills, the JSON keeps an empty list, which an overlay reads as no
+	// routine, apart from null, which keeps the routines of the profile.
+	Routines []Routine `yaml:"routines,omitempty" json:"routines"`
 }
 
 // Overlay returns p with the set fields of o applied on top. A set System,

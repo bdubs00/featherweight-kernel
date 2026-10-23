@@ -2,6 +2,7 @@ package fw
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -118,9 +119,9 @@ func TestRoutineProblems(t *testing.T) {
 		change func(r *Routine, cfg *Config)
 		want   string
 	}{
-		{"no decider", func(r *Routine, _ *Config) { r.Decider = "" }, "decider is empty"},
-		{"unknown decider", func(r *Routine, _ *Config) { r.Decider = "jev" }, `decider "jev" is not a key of deciders`},
-		{"bad name", func(r *Routine, _ *Config) { r.Name = "Ack" }, `name "Ack"`},
+		{"no decider", func(r *Routine, _ *Config) { r.Decider = "" }, "names no model to answer them"},
+		{"unknown decider", func(r *Routine, _ *Config) { r.Decider = "jev" }, `no model answers questions under the name "jev"`},
+		{"bad name", func(r *Routine, _ *Config) { r.Name = "Ack" }, `name: "Ack" is not the name of a routine`},
 		{"bad standing", func(r *Routine, _ *Config) { r.Standing = "rehearsing" }, `standing "rehearsing"`},
 		{"bad version", func(r *Routine, _ *Config) { r.Version = 0 }, "version 0"},
 		{"too many steps", func(r *Routine, _ *Config) {
@@ -133,7 +134,7 @@ func TestRoutineProblems(t *testing.T) {
 				r.Questions["q"+string(rune('a'+i))] = RoutineQuestion{Question: Question{Type: QuestionNoul}}
 			}
 		}, "the limit is 16"},
-		{"large template", func(r *Routine, _ *Config) { r.Answer = strings.Repeat("x", MaxRoutineTemplate+1) }, "a template holds at most 4096"},
+		{"large template", func(r *Routine, _ *Config) { r.Answer = strings.Repeat("x", MaxRoutineTemplate+1) }, "the limit is 4096"},
 		{"template parse error", func(r *Routine, _ *Config) { r.Steps[1].Input = `{"n": {{ find .input }` }, "routines[0] (acknowledge-a-new-ticket).steps[1].input: template:"},
 		{"expect not an option", func(r *Routine, _ *Config) {
 			q := r.Questions["type"]
@@ -350,6 +351,41 @@ func TestLabRoutine(t *testing.T) {
 	for name, wantObs := range map[string]string{"type": "bug", "priority": "p2", "status": "escalated", "beyond": "yes"} {
 		if got, _ := ObserveAnswer(r.Questions[name], out, nil); got != wantObs {
 			t.Errorf("observe %s = %q; want %q", name, got, wantObs)
+		}
+	}
+}
+
+// An empty list of routines survives JSON as empty, so an overlay that
+// takes the last routine away reaches the runs; null keeps the routines.
+func TestEmptyRoutinesRoundTrip(t *testing.T) {
+	b, err := json.Marshal(AgentProfile{Name: "triage", Routines: []Routine{}})
+	if err != nil || !strings.Contains(string(b), `"routines":[]`) {
+		t.Fatalf("json = %s, %v", b, err)
+	}
+	var back AgentProfile
+	if err := json.Unmarshal(b, &back); err != nil || back.Routines == nil || len(back.Routines) != 0 {
+		t.Fatalf("back = %#v, %v", back.Routines, err)
+	}
+	base := AgentProfile{Routines: []Routine{{Name: "ack", Version: 1, Standing: RoutineLive}}}
+	if got := base.Overlay(back).Routines; got == nil || len(got) != 0 {
+		t.Errorf("the empty list of the wire = %v", got)
+	}
+	var none AgentProfile
+	_ = json.Unmarshal([]byte(`{"name": "triage"}`), &none)
+	if got := base.Overlay(none).Routines; len(got) != 1 {
+		t.Errorf("no list keeps the routines: %v", got)
+	}
+}
+
+func TestCheckRoutineName(t *testing.T) {
+	for _, ok := range []string{"ack", "acknowledge-a-new-ticket", "a1"} {
+		if err := CheckRoutineName(ok); err != nil {
+			t.Errorf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "Ack", "a_b", "a b", strings.Repeat("a", 65)} {
+		if err := CheckRoutineName(bad); !errors.Is(err, ErrInvalidRequest) || strings.Contains(err.Error(), "decider") {
+			t.Errorf("%q: %v", bad, err)
 		}
 	}
 }

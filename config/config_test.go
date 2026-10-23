@@ -868,7 +868,7 @@ agents:
 	wants := []string{
 		"deciders.nomodel.model is empty; a decider has no default model",
 		`deciders.nourl.baseUrl "127.0.0.1:5100" is not an http:// or https:// URL`,
-		`agents.shadow.routines[0] (ack).decider "jev" is not a key of deciders`,
+		`agents.shadow.routines[0] (ack): no model answers questions under the name "jev"`,
 		"agents.shadow.routines[0] (ack).steps[0].input: template:",
 	}
 	for _, w := range wants {
