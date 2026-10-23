@@ -224,11 +224,7 @@ func answersText(answers map[string]Answer) string {
 			parts = append(parts, fmt.Sprintf("%s: the probability of yes is %.2f", name, a.Probability))
 			continue
 		}
-		p := a.Probability
-		if v, ok := a.Probabilities[a.Choice]; ok {
-			p = v
-		}
-		parts = append(parts, fmt.Sprintf("%s: %s with probability %.2f", name, a.Choice, p))
+		parts = append(parts, fmt.Sprintf("%s: %s with probability %.2f", name, a.Choice, a.Probability))
 	}
 	return strings.Join(parts, "; ")
 }

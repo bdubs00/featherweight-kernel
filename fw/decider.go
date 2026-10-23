@@ -47,7 +47,8 @@ type Question struct {
 
 // Answer is the answer of a decider to one question. Choice is the chosen
 // option of a choice and the most probable level of a score. Probability
-// is P(yes) for a noul and the probability of Choice otherwise.
+// is P(yes) for a noul and the probability of Choice otherwise. The
+// client sets it from the probabilities, so a reader needs nothing else.
 // Probabilities holds every option of a choice and every level of a score.
 // Confidence is what the server reports, and the kernel never reads it.
 type Answer struct {

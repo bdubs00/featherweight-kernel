@@ -277,9 +277,6 @@ func chosenProbability(q fw.RoutineQuestion, a fw.Answer) float64 {
 	if q.Type == fw.QuestionNoul {
 		return math.Max(a.Probability, 1-a.Probability)
 	}
-	if p, ok := a.Probabilities[a.Choice]; ok {
-		return p
-	}
 	return a.Probability
 }
 

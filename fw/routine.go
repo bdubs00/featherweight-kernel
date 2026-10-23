@@ -265,15 +265,18 @@ func routineProblems(cfg *Config, key string, r Routine) []string {
 		fields[name] = qkey
 		p = append(p, questionProblems(qkey, r.Questions[name])...)
 	}
+	call := func(key, tool, input string) {
+		if strings.TrimSpace(tool) == "" {
+			p = append(p, key+".tool is empty")
+		}
+		if strings.TrimSpace(input) == "" {
+			p = append(p, key+".input is empty; a call without input has {}")
+		}
+		p = append(p, templateProblems(key+".input", input)...)
+	}
 	for i, s := range r.Steps {
 		skey := fmt.Sprintf("%s.steps[%d]", key, i)
-		if strings.TrimSpace(s.Tool) == "" {
-			p = append(p, skey+".tool is empty")
-		}
-		if strings.TrimSpace(s.Input) == "" {
-			p = append(p, skey+".input is empty; a step without input has {}")
-		}
-		p = append(p, templateProblems(skey+".input", s.Input)...)
+		call(skey, s.Tool, s.Input)
 		if s.As != "" {
 			switch {
 			case !routineField.MatchString(s.As) || slices.Contains(routineReserved, s.As):
@@ -286,13 +289,7 @@ func routineProblems(cfg *Config, key string, r Routine) []string {
 	}
 	for i, c := range r.After {
 		ckey := fmt.Sprintf("%s.after[%d]", key, i)
-		if strings.TrimSpace(c.Tool) == "" {
-			p = append(p, ckey+".tool is empty")
-		}
-		if strings.TrimSpace(c.Input) == "" {
-			p = append(p, ckey+".input is empty; a check without input has {}")
-		}
-		p = append(p, templateProblems(ckey+".input", c.Input)...)
+		call(ckey, c.Tool, c.Input)
 		for j, s := range c.Contains {
 			p = append(p, templateProblems(fmt.Sprintf("%s.contains[%d]", ckey, j), s)...)
 		}
@@ -460,17 +457,24 @@ func routineFind(text any, pattern string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("find: %q is not a regular expression: %w", pattern, err)
 	}
-	m := re.FindStringSubmatch(fmt.Sprint(text))
+	v, ok := firstMatch(re, fmt.Sprint(text))
+	if !ok || v == "" {
+		return "", fmt.Errorf("hole %s empty", pattern)
+	}
+	return v, nil
+}
+
+// firstMatch returns the first capture group of the first match of re in
+// text, or the whole match when re has no group, and whether it matched.
+func firstMatch(re *regexp.Regexp, text string) (string, bool) {
+	m := re.FindStringSubmatch(text)
 	switch {
 	case m == nil:
-		return "", fmt.Errorf("hole %s empty", pattern)
+		return "", false
 	case len(m) > 1:
-		if m[1] == "" {
-			return "", fmt.Errorf("hole %s empty", pattern)
-		}
-		return m[1], nil
+		return m[1], true
 	}
-	return m[0], nil
+	return m[0], true
 }
 
 // routineJSON returns a value as JSON: a string as a JSON string literal.
@@ -566,16 +570,7 @@ func ObserveAnswer(q RoutineQuestion, output string, events []Event) (string, bo
 	if err != nil {
 		return "", true
 	}
-	match := func(text string) (string, bool) {
-		m := re.FindStringSubmatch(text)
-		if m == nil {
-			return "", false
-		}
-		if len(m) > 1 {
-			return m[1], true
-		}
-		return m[0], true
-	}
+	match := func(text string) (string, bool) { return firstMatch(re, text) }
 	var got string
 	found := false
 	if o.Answer != "" {
@@ -648,12 +643,8 @@ func RoutineApplies(r Routine, answers map[string]Answer) (bool, string) {
 			}
 			continue
 		}
-		p := a.Probability
-		if v, ok := a.Probabilities[a.Choice]; ok {
-			p = v
-		}
-		if p < q.Act {
-			why = append(why, fmt.Sprintf("%s below act: %.2f", name, p))
+		if a.Probability < q.Act {
+			why = append(why, fmt.Sprintf("%s below act: %.2f", name, a.Probability))
 		}
 		if len(q.Expect) > 0 && !slices.Contains(q.Expect, a.Choice) {
 			why = append(why, fmt.Sprintf("%s %s not expected", name, a.Choice))

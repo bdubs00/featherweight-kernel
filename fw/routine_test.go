@@ -252,7 +252,7 @@ func TestRoutineApplies(t *testing.T) {
 		t.Fatalf("applies: %s", why)
 	}
 	low := maps2(answers)
-	low["type"] = Answer{Type: QuestionChoice, Choice: "bug", Probabilities: map[string]float64{"bug": 0.61}}
+	low["type"] = Answer{Type: QuestionChoice, Choice: "bug", Probability: 0.61, Probabilities: map[string]float64{"bug": 0.61}}
 	if ok, why := RoutineApplies(r, low); ok || why != "type below act: 0.61" {
 		t.Errorf("below act: %v %q", ok, why)
 	}

@@ -246,7 +246,7 @@ func TestRoutineFallsThrough(t *testing.T) {
 	}{
 		{name: "below act", answers: func() map[string]Answer {
 			m := confident()
-			m["type"] = Answer{Choice: "bug", Probabilities: map[string]float64{"bug": 0.61}}
+			m["type"] = Answer{Choice: "bug", Probability: 0.61, Probabilities: map[string]float64{"bug": 0.61}}
 			return m
 		}, reason: "type below act: 0.61"},
 		{name: "not expected", answers: func() map[string]Answer {
