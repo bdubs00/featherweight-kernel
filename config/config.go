@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -356,6 +357,9 @@ func validate(c *fw.Config, servers bool) error {
 			p = append(p, fmt.Sprintf("providers.%s.maxConcurrent %d is negative", name, c.Providers[name].MaxConcurrent))
 		}
 	}
+	for _, name := range sortedKeys(c.Deciders) {
+		p = append(p, checkDecider("deciders."+name, name, c.Deciders[name])...)
+	}
 	p = append(p, checkLimit("tools.limits", c.Tools.Limits.Limit)...)
 	for _, name := range sortedKeys(c.Tools.Limits.PerTool) {
 		if _, err := path.Match(name, ""); err != nil {
@@ -461,6 +465,9 @@ func profileProblems(c *fw.Config, name string, prof fw.AgentProfile) []string {
 	if err := fw.CheckCompaction(c, prof.Compaction); err != nil {
 		p = append(p, key+"."+strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
 	}
+	for _, problem := range fw.RoutineProblems(c, prof.Routines) {
+		p = append(p, key+"."+problem)
+	}
 	if prof.Access != nil {
 		p = append(p, checkEntries(key+".access.owners", prof.Access.Owners)...)
 		p = append(p, checkEntries(key+".access.operators", prof.Access.Operators)...)
@@ -468,6 +475,28 @@ func profileProblems(c *fw.Config, name string, prof fw.AgentProfile) []string {
 	}
 	return p
 }
+
+// checkDecider lists the problems of one entry of deciders: a name that a
+// routine can name, an http or https base URL, a model, since a decider
+// has no default model, and a timeout that is not negative.
+func checkDecider(key, name string, d fw.DeciderConfig) []string {
+	var p []string
+	if !deciderName.MatchString(name) {
+		p = append(p, fmt.Sprintf("%s: a decider name is 1 to 64 of a-z, 0-9, _, and -", key))
+	}
+	if u, err := url.Parse(strings.TrimSpace(d.BaseURL)); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		p = append(p, fmt.Sprintf("%s.baseUrl %q is not an http:// or https:// URL", key, d.BaseURL))
+	}
+	if strings.TrimSpace(d.Model) == "" {
+		p = append(p, key+".model is empty; a decider has no default model")
+	}
+	if d.Timeout < 0 {
+		p = append(p, fmt.Sprintf("%s.timeout %s is negative", key, d.Timeout))
+	}
+	return p
+}
+
+var deciderName = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
 // checkAuth lists the problems of the auth block: every mode is known, no
 // mode repeats, none stands alone, the block of a mode is present, the

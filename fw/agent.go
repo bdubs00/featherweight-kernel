@@ -82,9 +82,10 @@ type Agent struct {
 
 	decisionPoints []external // policy.external and the points of linked packages, see external.go
 
-	services   []io.Closer // what stops the services, see service.go
-	runner     Runner      // drives the runs in place of the turn loop, see runner.go
-	accessMode string      // AccessModeRules, AccessModeExternal, or AccessModeCustom
+	services   []io.Closer        // what stops the services, see service.go
+	runner     Runner             // drives the runs in place of the turn loop, see runner.go
+	deciders   map[string]Decider // the deciders that WithDecider gave, see decider.go
+	accessMode string             // AccessModeRules, AccessModeExternal, or AccessModeCustom
 
 	k *kernel // runtime state, see kernel.go
 }
@@ -161,6 +162,7 @@ func New(opts ...Option) (*Agent, error) {
 		models:     map[string]Model{},
 		slots:      modelSlots(cfg),
 		noResume:   o.noResume,
+		deciders:   o.deciders,
 	}
 	// Before the kernel starts, only resources opened by this constructor
 	// belong to it. In particular, a failed setup must release the file
@@ -314,6 +316,11 @@ func New(opts ...Option) (*Agent, error) {
 				a.log.Warn("built-in tool not available", "tool", name, "error", err)
 				continue
 			}
+			if t == nil {
+				// The configuration turns the tool off, as no decider
+				// turns off decide.
+				continue
+			}
 			t = a.wrapTool(t)
 			a.tools = append(a.tools, t)
 			keepSetup(t)
@@ -364,6 +371,11 @@ func New(opts ...Option) (*Agent, error) {
 	if a.runner == nil && !o.noDefaults {
 		if a.runner, err = newRunner(ctx, a); err != nil {
 			return nil, err
+		}
+	}
+	for name, p := range cfg.Agents {
+		if err := a.checkHosted(p); err != nil {
+			return nil, fmt.Errorf("fw: agents.%s: %w", name, err)
 		}
 	}
 	if err := a.startKernel(ctx); err != nil {

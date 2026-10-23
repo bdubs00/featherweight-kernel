@@ -58,6 +58,7 @@ func TestRegisteredSpecs(t *testing.T) {
 	cfg := fw.DefaultConfig()
 	cfg.Home = t.TempDir()
 	cfg.Tools.Files.Root = t.TempDir()
+	cfg.Deciders = map[string]fw.DeciderConfig{"clef": {BaseURL: "http://127.0.0.1:5100", Model: "clef"}}
 	type flags struct {
 		native                                        string
 		readOnly, idempotent, destructive, parallelOK bool
@@ -74,6 +75,7 @@ func TestRegisteredSpecs(t *testing.T) {
 		"await_task": {readOnly: true, idempotent: true, parallelOK: true},
 		"skill":      {readOnly: true, idempotent: true, parallelOK: true},
 		"clock":      {readOnly: true, idempotent: true, parallelOK: true},
+		"decide":     {readOnly: true, idempotent: true, parallelOK: true},
 	}
 	registered := fw.RegisteredTools()
 	for name, w := range want {
@@ -109,7 +111,9 @@ func TestActionLabels(t *testing.T) {
 	cfg := fw.DefaultConfig()
 	cfg.Home = t.TempDir()
 	cfg.Tools.Files.Root = t.TempDir()
+	cfg.Deciders = map[string]fw.DeciderConfig{"clef": {BaseURL: "http://127.0.0.1:5100", Model: "clef"}}
 	want := map[string]string{
+		"decide":     "", // reads only
 		"bash":       "Run command",
 		"http":       "Send request",
 		"spawn_task": "Hand off task",

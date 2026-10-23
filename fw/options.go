@@ -40,6 +40,7 @@ type options struct {
 	services   []Service
 	noServices bool
 	spawner    Spawner
+	deciders   map[string]Decider
 	// followEvery and recordEvery replace the intervals of tree.go; only a
 	// test of this package sets them.
 	followEvery time.Duration
@@ -51,6 +52,19 @@ type options struct {
 // WithSpawner runs the children of spawn_task through s, in place of the
 // driver that spawn.driver names or the children in this process.
 func WithSpawner(s Spawner) Option { return func(o *options) { o.spawner = s } }
+
+// WithDecider answers the calls to the decider name with d, in place of
+// the System One client of deciders.<name> (see Agent.DeciderNamed). A
+// test gives a fake decider this way. A routine still names a key of
+// deciders, so the configuration lists the name too.
+func WithDecider(name string, d Decider) Option {
+	return func(o *options) {
+		if o.deciders == nil {
+			o.deciders = map[string]Decider{}
+		}
+		o.deciders[name] = d
+	}
+}
 
 // WithRunner drives the runs of the agent through r, in place of the
 // registered runners and of the turn loop (see Runner).

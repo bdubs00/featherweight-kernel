@@ -929,7 +929,23 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 	if err := CheckCompaction(a.cfg, p.Compaction); err != nil {
 		return err
 	}
+	if err := CheckRoutines(a.cfg, p.Routines); err != nil {
+		return err
+	}
+	if err := a.checkHosted(*p); err != nil {
+		return err
+	}
 	return CheckOutcome(a.cfg, p.Outcome)
+}
+
+// checkHosted refuses routines on a process whose runs a Runner drives,
+// such as a hosted harness (docs/ARCHITECTURE.md section 19): the runner
+// of routines is part of the turn loop, so the routines would never run.
+func (a *Agent) checkHosted(p AgentProfile) error {
+	if a.runner == nil || len(p.Routines) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: routines need the turn loop of the kernel, and a hosted harness drives the runs of this process; remove the routines or the harness", ErrInvalidRequest)
 }
 
 // checkModel makes sure that a run has a model: the one of the request

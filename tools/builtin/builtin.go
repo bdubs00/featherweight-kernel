@@ -1,5 +1,6 @@
 // Package builtin holds the built-in tools of fw: bash, files, http,
-// memory, recall, skill, clock, ask_user, send, spawn_task, and await_task.
+// memory, recall, skill, clock, ask_user, send, spawn_task, await_task, and
+// decide.
 // Each tool registers itself in init through fw.RegisterTool, so a blank
 // import of this package makes them available.
 //
@@ -39,6 +40,7 @@ var titles = map[string]string{
 	"spawn_task": "Hand work to other agents",
 	"await_task": "Wait for the work that it handed off",
 	"send":       "Send messages to the message bus",
+	"decide":     "Answer typed questions with probabilities",
 }
 
 // Title returns the words for a person of a built-in tool, or "" for a

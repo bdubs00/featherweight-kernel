@@ -111,6 +111,8 @@ type cursor struct {
 
 	loop       loopSuffix // exact repeat counts with a bounded fingerprint suffix
 	priorCount int        // repeat count before the latest response
+
+	routine routineCursor // the routine runner of the run (routine_run.go)
 }
 
 // analyze is the cold full-history reference. The turn loop uses the
@@ -142,6 +144,7 @@ func analyze(events []Event) *cursor {
 	var open []string
 	for i, e := range events {
 		c.lastSeq = e.Seq
+		c.applyRoutine(e)
 		switch e.Type {
 		case EvRunQueued:
 			_ = e.Decode(&c.queued)
@@ -415,6 +418,10 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 		c, n := rs.executionCursor()
 		var err error
 		switch {
+		case c.routine.open() && !c.terminal:
+			// A restart cut a live routine off, maybe while it waited
+			// for an approval: the routine ends before anything else.
+			err = a.closeRoutine(ctx, rs, c)
 		case c.terminal || c.pending != nil:
 			if a.idleExit(rs, c.lastSeq) {
 				return exitIdle
@@ -422,6 +429,11 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 			continue
 		case !c.started:
 			err = a.stepStart(ctx, rs, c)
+		case a.routineDue(rs, c):
+			// The routine runner acts once, before the first model turn.
+			err = a.stepRoutine(ctx, rs, c)
+		case routineFinishDue(c):
+			err = a.finishRoutine(ctx, rs, c, n)
 		case c.rep != nil:
 			// The run reached a limit and makes its final report.
 			err = a.stepReport(ctx, rs, c, n)
@@ -818,7 +830,11 @@ func (a *Agent) endTurn(ctx context.Context, rs *runState, c *cursor, n int) err
 	if fresh {
 		return nil
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: TextOf(c.resp.Content)})
+	output := TextOf(c.resp.Content)
+	if err := a.compareLocked(ctx, rs, c, output); err != nil {
+		return err
+	}
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: output})
 	return err
 }
 
@@ -1107,6 +1123,9 @@ type plannedCall struct {
 	// the ledger. The kernel fills it for a resumed call that a Continuer
 	// completes on its own, in place of another run of the tool.
 	answered []AnsweredQuestion
+	// routine names the routine of a call of the routine runner
+	// (ToolRequestedData.Routine).
+	routine string
 }
 
 // stepTools decides every open call of the latest response, asks for an
@@ -1362,6 +1381,10 @@ type callOutcome struct {
 
 // runBatch runs a batch of calls and then records their results in order.
 func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall) error {
+	if len(batch) == 1 && batch[0].run {
+		_, err := a.runOne(ctx, rs, batch[0])
+		return err
+	}
 	outs := make([]callOutcome, len(batch))
 	var aborted atomic.Bool
 	var wg sync.WaitGroup
@@ -1371,13 +1394,9 @@ func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall)
 			outs[i] = callOutcome{res: p.result}
 			continue
 		}
-		if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input, Idempotent: p.spec.Idempotent, Source: p.spec.Source}); err != nil {
+		if err := a.requestCall(ctx, rs, p); err != nil {
 			wg.Wait()
 			return err
-		}
-		if len(batch) == 1 {
-			outs[i] = a.invoke(ctx, rs, p, &aborted)
-			continue
 		}
 		wg.Add(1)
 		go func(i int) {
@@ -1392,23 +1411,52 @@ func (a *Agent) runBatch(ctx context.Context, rs *runState, batch []plannedCall)
 		return errStopped
 	}
 	for i, p := range batch {
-		res := outs[i].res
-		content := res.Content
-		if len(content) == 0 && len(res.Structured) > 0 {
-			content = []Block{Text(string(res.Structured))}
-		}
-		if _, err := a.emit(ctx, rs, EvToolResponded, ToolRespondedData{
-			CallID:    p.use.ID,
-			Tool:      p.use.Name,
-			Content:   validJSONBlocks(content),
-			IsError:   res.IsError,
-			ExitCode:  res.ExitCode,
-			LatencyMS: outs[i].ms,
-		}); err != nil {
+		if _, err := a.respondCall(ctx, rs, p, outs[i]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// runOne runs one call that runs: fw.tool.requested, the call, and
+// fw.tool.responded. It returns the result as the ledger records it. The
+// turn loop and the routine runner both run their calls through it.
+func (a *Agent) runOne(ctx context.Context, rs *runState, p plannedCall) (ToolResult, error) {
+	if err := a.requestCall(ctx, rs, p); err != nil {
+		return ToolResult{}, err
+	}
+	var aborted atomic.Bool
+	out := a.invoke(ctx, rs, p, &aborted)
+	if ctx.Err() != nil || aborted.Load() {
+		return ToolResult{}, errStopped
+	}
+	return a.respondCall(ctx, rs, p, out)
+}
+
+// requestCall records fw.tool.requested for a call that runs.
+func (a *Agent) requestCall(ctx context.Context, rs *runState, p plannedCall) error {
+	_, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: p.use.Name, CallID: p.use.ID, Input: p.use.Input,
+		Idempotent: p.spec.Idempotent, Source: p.spec.Source, Routine: p.routine})
+	return err
+}
+
+// respondCall records fw.tool.responded for a call and returns the result
+// as recorded: structured content without text becomes the text.
+func (a *Agent) respondCall(ctx context.Context, rs *runState, p plannedCall, out callOutcome) (ToolResult, error) {
+	res := out.res
+	if len(res.Content) == 0 && len(res.Structured) > 0 {
+		res.Content = []Block{Text(string(res.Structured))}
+	}
+	res.Content = validJSONBlocks(res.Content)
+	_, err := a.emit(ctx, rs, EvToolResponded, ToolRespondedData{
+		CallID:    p.use.ID,
+		Tool:      p.use.Name,
+		Content:   res.Content,
+		IsError:   res.IsError,
+		ExitCode:  res.ExitCode,
+		LatencyMS: out.ms,
+	})
+	return res, err
 }
 
 // invoke calls one tool. A panic or a Go error becomes an error result.
