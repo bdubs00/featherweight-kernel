@@ -13,6 +13,9 @@ package ax
 // The name of a child
 // Task ends with the id of its run, so the kernel records the name before
 // the Task exists, and a restart of this process finds the Task again.
+// A child that cannot start children of its own gets no ax API host in its
+// egress, and sweep.go removes a child Task once its runs ended
+// ax.childRetention ago.
 
 import (
 	"bytes"
@@ -23,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -57,6 +61,10 @@ const (
 // DefaultServer is the ax API server inside the cluster.
 const DefaultServer = "ax-server.ax-system.svc.cluster.local:8080"
 
+// DefaultChildRetention is how long a child Task stays after its runs
+// ended, when ax.childRetention is zero.
+const DefaultChildRetention = 24 * time.Hour
+
 // Limits of the spawner.
 const (
 	readyTimeout   = 10 * time.Minute // how long a child Task gets to run
@@ -89,6 +97,11 @@ type Spawner struct {
 	http     *http.Client
 	log      *slog.Logger
 
+	// retention is how long a child Task stays after its runs ended
+	// (ax.childRetention), or below zero to keep every child Task.
+	retention time.Duration
+	now       func() time.Time
+
 	// readyPoll and runPoll are the intervals of the waits; tests shorten them.
 	readyPoll time.Duration
 	runPoll   time.Duration
@@ -120,6 +133,10 @@ func NewSpawner(cfg *fw.Config) (*Spawner, error) {
 	if tokenEnv == "" {
 		tokenEnv = "FW_API_TOKEN"
 	}
+	retention := cfg.AX.ChildRetention
+	if retention == 0 {
+		retention = DefaultChildRetention
+	}
 	return &Spawner{
 		cfg:       cfg,
 		server:    server,
@@ -127,6 +144,8 @@ func NewSpawner(cfg *fw.Config) (*Spawner, error) {
 		tokenEnv:  tokenEnv,
 		http:      &http.Client{Timeout: 2 * time.Minute},
 		log:       slog.Default().With("component", "ax.spawn"),
+		retention: retention,
+		now:       time.Now,
 		readyPoll: 2 * time.Second,
 		runPoll:   time.Second,
 	}, nil
@@ -379,6 +398,36 @@ func egressOf(e *EgressSpec) *v1alpha1.EgressSpec {
 	return &v1alpha1.EgressSpec{Hosts: append([]string(nil), e.Hosts...)}
 }
 
+// withoutServer removes from an egress every host with the name and the
+// port of the ax API server, whatever its scheme. A wildcard host stays,
+// because it names other hosts too. An egress that keeps no host is nil,
+// which also means no network.
+func withoutServer(e *v1alpha1.EgressSpec, server string) *v1alpha1.EgressSpec {
+	if e == nil {
+		return nil
+	}
+	if _, after, ok := strings.Cut(server, ":///"); ok {
+		server = after
+	}
+	host, port, err := net.SplitHostPort(server)
+	if err != nil {
+		// gRPC dials port 443 for a target without a port.
+		host, port = server, "443"
+	}
+	var keep []string
+	for _, h := range e.GetHosts() {
+		p, err := v1alpha1.ParseEgressHost(h)
+		if err == nil && strings.EqualFold(p.Host, host) && fmt.Sprint(p.Port) == port {
+			continue
+		}
+		keep = append(keep, h)
+	}
+	if len(keep) == 0 {
+		return nil
+	}
+	return &v1alpha1.EgressSpec{Hosts: keep}
+}
+
 // childName makes the name of a child Task from the name of its parent and
 // the id of the child run, within the length of a DNS label. The id is a
 // ULID, which has only digits and letters, so the name is the same for
@@ -472,7 +521,12 @@ func (s *Spawner) childTask(task *Task, atespace, name string, parent *fw.Run, m
 	}
 	// The child reaches what the parent reaches and nothing more: ax writes
 	// the egress policy of the child actor from this before the child runs.
+	// The ax API has no authentication, so a child that cannot start
+	// children of its own does not reach it.
 	spec.Egress = egressOf(task.Spec.Egress)
+	if disabled {
+		spec.Egress = withoutServer(spec.Egress, s.server)
+	}
 	apiVersion, kind := task.APIVersion, task.Kind
 	if apiVersion == "" {
 		apiVersion = "ax.io/v1alpha1"

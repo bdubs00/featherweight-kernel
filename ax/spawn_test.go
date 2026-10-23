@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // fakeAX is an ax API server that keeps Tasks in memory. A new Task is
@@ -36,6 +37,8 @@ type fakeAX struct {
 	pendingReads int
 	deleted      []string
 	resumed      []string
+	suspended    []string
+	lists        int
 }
 
 func newFakeAX(t *testing.T) *fakeAX {
@@ -107,6 +110,41 @@ func (f *fakeAX) DeleteTask(_ context.Context, req *v1alpha1.DeleteTaskRequest) 
 	delete(f.tasks, k)
 	f.deleted = append(f.deleted, k)
 	return &v1alpha1.DeleteTaskResponse{}, nil
+}
+
+// ListTasks lists the Tasks of an atespace by name, a page at a time.
+func (f *fakeAX) ListTasks(_ context.Context, req *v1alpha1.ListTasksRequest) (*v1alpha1.ListTasksResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lists++
+	var names []string
+	for k := range f.tasks {
+		if space, _, _ := strings.Cut(k, "/"); space == req.GetAtespace() {
+			names = append(names, k)
+		}
+	}
+	slices.Sort(names)
+	out := &v1alpha1.ListTasksResponse{}
+	for i := int(req.GetOffset()); i < len(names) && i < int(req.GetOffset()+req.GetLimit()); i++ {
+		out.Tasks = append(out.Tasks, f.tasks[names[i]])
+	}
+	return out, nil
+}
+
+// SuspendTask suspends a Task and records the time, as ax does in the
+// condition Ready.
+func (f *fakeAX) SuspendTask(_ context.Context, req *v1alpha1.SuspendTaskRequest) (*v1alpha1.Task, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := key(req.GetAtespace(), req.GetName())
+	t, ok := f.tasks[k]
+	if !ok {
+		return nil, status.Error(codes.NotFound, k)
+	}
+	f.suspended = append(f.suspended, k)
+	t.Status.Phase = "Suspended"
+	t.Status.Conditions = []*v1alpha1.Condition{{Type: "Ready", Status: "False", Reason: "TaskSuspended", UpdateTime: timestamppb.Now()}}
+	return t, nil
 }
 
 func (f *fakeAX) created() []*v1alpha1.Task {
@@ -490,8 +528,6 @@ func joinAny(v any, field string) string {
 	return strings.Join(out, ",")
 }
 
-// TestChildTaskCarriesTheDepthTheConfigExpects walks the depth remnant that
-// the child Task carries as the configuration expects it. A child past the
 // A child Task carries the egress of its parent, so it reaches what the
 // parent reaches and nothing more; a parent without egress gives none.
 func TestChildTaskInheritsTheEgress(t *testing.T) {
@@ -510,6 +546,50 @@ func TestChildTaskInheritsTheEgress(t *testing.T) {
 	}
 }
 
+// A child that cannot start children of its own, because the depth or its
+// share of the tree is spent, gets no host of the ax API in its egress,
+// whatever the scheme of the entry; a child that can start children keeps
+// it, and a wildcard and the other hosts stay.
+func TestALeafChildTaskDoesNotReachTheAXAPI(t *testing.T) {
+	ax := newFakeAX(t)
+	router := newFakeRouter(t)
+	s := newSpawnerUnderTest(t, ax, router)
+	s.server = "ax-server.ax-system.svc.cluster.local:8080"
+	hosts := []string{"http://nats.agents.svc:8080", "http://ax-server.ax-system.svc.cluster.local:8080", "ax-server.ax-system.svc.cluster.local:8080",
+		"https://ax-server.ax-system.svc.cluster.local", "*.ax-system.svc.cluster.local:8080", "http://atenet-router.ate-system.svc.cluster.local:80"}
+	base := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img", Egress: &EgressSpec{Hosts: hosts}}}
+	want := []string{"http://nats.agents.svc:8080", "https://ax-server.ax-system.svc.cluster.local", "*.ax-system.svc.cluster.local:8080", "http://atenet-router.ate-system.svc.cluster.local:80"}
+	for name, child := range map[string]*v1alpha1.Task{
+		"no depth left": s.childTask(base, "team", "c", &fw.Run{ID: "01P", Depth: 2}, -1),
+		"no runs left":  s.childTask(base, "team", "c", &fw.Run{ID: "01P"}, 0),
+	} {
+		if got := child.Spec.GetEgress().GetHosts(); !slices.Equal(got, want) {
+			t.Fatalf("%s: hosts = %v, want %v", name, got, want)
+		}
+	}
+	if got := s.childTask(base, "team", "c", &fw.Run{ID: "01P"}, 2).Spec.GetEgress().GetHosts(); !slices.Equal(got, hosts) {
+		t.Fatalf("a child that can spawn: hosts = %v, want %v", got, hosts)
+	}
+	// A parent that reaches only the ax API gives a leaf no network, as a
+	// parent without egress does.
+	only := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img", Egress: &EgressSpec{Hosts: []string{"http://ax-server.ax-system.svc.cluster.local:8080"}}}}
+	if e := s.childTask(only, "team", "c", &fw.Run{ID: "01P"}, 0).Spec.GetEgress(); e != nil {
+		t.Fatalf("egress = %v", e)
+	}
+	// A server named as a gRPC target, and one without a port, which gRPC
+	// dials on 443.
+	for server, hosts := range map[string][]string{
+		"dns:///ax.example:9000": {"http://ax.example:9000"},
+		"ax.example":             {"ax.example", "https://ax.example:443"},
+	} {
+		if e := withoutServer(&v1alpha1.EgressSpec{Hosts: hosts}, server); e != nil {
+			t.Fatalf("server %s kept %v", server, e.GetHosts())
+		}
+	}
+}
+
+// TestChildTaskCarriesTheDepthTheConfigExpects walks the depth remnant that
+// the child Task carries as the configuration expects it. A child past the
 // depth of the tree gets no depth variable, because FW_SPAWN_MAX_DEPTH = 0
 // means unlimited in the configuration; FW_SPAWN_DISABLED represents an
 // exhausted allowance independently of the tool policy.
