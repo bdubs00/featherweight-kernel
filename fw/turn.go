@@ -647,6 +647,10 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		}
 	}
 	h, tokens := rs.historyLocked(extra)
+	if endsWithAnswer(h.Messages, c) {
+		rs.emitMu.Unlock()
+		return a.fail(ctx, rs, "fw: the history of the next model call ends with an answer of the model and no message after it, and a provider refuses such a request")
+	}
 	req.Messages = withRunContext(c.context, a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs)))
 	_, err = a.emitLocked(ctx, rs, EvModelRequested, ModelRequestedData{
 		Provider:             provider,
@@ -739,6 +743,15 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 		Model:       name,
 	})
 	return err
+}
+
+// endsWithAnswer reports whether the messages of a model call end with an
+// answer of the model. A provider takes such a request as a prefill, and
+// newer models refuse it. Only the call that continues a paused turn
+// (StopPauseTurn) sends the answer last on purpose.
+func endsWithAnswer(msgs []Message, c *cursor) bool {
+	n := len(msgs)
+	return n > 0 && msgs[n-1].Role == RoleAssistant && (c.resp == nil || c.resp.StopReason != StopPauseTurn)
 }
 
 // stepResponse acts on the stop reason of the latest response.

@@ -19,8 +19,11 @@ import (
 // fw.model.responded adds the assistant message with its full content,
 // opaque blocks included and in order. The fw.tool.responded events of one
 // response become one user message of tool_result blocks, in the order of
-// the tool_use blocks. A message that arrives while tool calls are open
-// follows the tool results. A tool_use block that never runs gets an error
+// the tool_use blocks. A message that arrives while a model call is open
+// follows the answer of that call, and a message that arrives while tool
+// calls are open follows the tool results, so the next request ends with
+// the message. A call that never answers leaves its messages for the next
+// request, at the end. A tool_use block that never runs gets an error
 // result, so every request has a valid history: this covers a run that
 // finished with open calls and a response that stopped for a reason other
 // than tool_use.
@@ -47,6 +50,7 @@ type historyBuilder struct {
 	tokens   int              // estimated tokens of msgs
 	known    int              // tokens of the latest response of the epoch and its request, from the reported usage
 	after    int              // estimated tokens of the messages after that response
+	asked    bool             // a model call has no answer yet
 	open     []string         // tool_use ids that wait for a result, in order
 	results  map[string]Block // results of open ids
 	deferred []Message        // messages that arrived while calls were open
@@ -64,10 +68,16 @@ func (b *historyBuilder) add(m Message) {
 // the messages after the response. Otherwise it is the estimate of the
 // history plus extra, the estimate of the system prompt and the tools.
 func (b *historyBuilder) contextTokens(extra int) int {
-	if b.known > 0 {
-		return b.known + b.after
+	waiting := 0
+	if len(b.open) == 0 {
+		for _, m := range b.deferred {
+			waiting += estimateTokens(m.Content)
+		}
 	}
-	return b.tokens + extra
+	if b.known > 0 {
+		return b.known + b.after + waiting
+	}
+	return b.tokens + extra + waiting
 }
 
 func (b *historyBuilder) apply(e Event) {
@@ -90,17 +100,24 @@ func (b *historyBuilder) apply(e Event) {
 		if !ok {
 			return
 		}
-		if len(b.open) > 0 {
+		if b.asked || len(b.open) > 0 {
 			b.deferred = append(b.deferred, m)
 			return
 		}
 		b.add(m)
+	case EvModelRequested:
+		// A call that never answered left its messages waiting, and this
+		// request sent them last.
+		b.asked = false
+		b.release()
+		b.asked = true
 	case EvModelResponded:
 		var d ModelRespondedData
 		if e.Decode(&d) != nil {
 			return
 		}
 		b.abandonCalls("no result was recorded for this tool call")
+		b.asked = false
 		if len(d.Content) > 0 {
 			b.add(Message{Role: RoleAssistant, Content: d.Content})
 		}
@@ -110,6 +127,7 @@ func (b *historyBuilder) apply(e Event) {
 		}
 		uses := toolUses(d.Content)
 		if len(uses) == 0 {
+			b.release()
 			return
 		}
 		for _, u := range uses {
@@ -132,6 +150,8 @@ func (b *historyBuilder) apply(e Event) {
 		}
 	case EvRunFinished:
 		b.abandonCalls("the run ended before this tool call finished")
+		b.asked = false
+		b.release()
 	case EvContextCompacted:
 		var d ContextCompactedData
 		if e.Decode(&d) != nil {
@@ -163,6 +183,15 @@ func (b *historyBuilder) closeCalls() {
 	}
 	b.open, b.results = nil, nil
 	b.add(Message{Role: RoleUser, Content: blocks})
+	b.release()
+}
+
+// release adds the messages that waited, once no model call and no tool
+// call is open.
+func (b *historyBuilder) release() {
+	if b.asked || len(b.open) > 0 {
+		return
+	}
 	for _, m := range b.deferred {
 		b.add(m)
 	}
@@ -182,8 +211,14 @@ func (b *historyBuilder) abandonCalls(reason string) {
 	b.closeCalls()
 }
 
+// history returns the messages of the next request. After a model call
+// that has no answer, they end with the messages that wait for it.
 func (b *historyBuilder) history() History {
-	return History{Epoch: b.epoch, Messages: append([]Message(nil), b.msgs...)}
+	msgs := append([]Message(nil), b.msgs...)
+	if len(b.open) == 0 {
+		msgs = append(msgs, b.deferred...)
+	}
+	return History{Epoch: b.epoch, Messages: msgs}
 }
 
 // receivedMessage returns the message of a fw.message.received event. Only
