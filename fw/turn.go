@@ -418,6 +418,10 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 		c, n := rs.executionCursor()
 		var err error
 		switch {
+		case c.routine.open() && !c.terminal:
+			// A restart cut a live routine off, maybe while it waited
+			// for an approval: the routine ends before anything else.
+			err = a.closeRoutine(ctx, rs, c)
 		case c.terminal || c.pending != nil:
 			if a.idleExit(rs, c.lastSeq) {
 				return exitIdle
@@ -428,8 +432,6 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 		case a.routineDue(rs, c):
 			// The routine runner acts once, before the first model turn.
 			err = a.stepRoutine(ctx, rs, c, n)
-		case c.routine.open():
-			err = a.closeRoutine(ctx, rs, c)
 		case routineFinishDue(c):
 			err = a.finishRoutine(ctx, rs, c, n)
 		case c.rep != nil:

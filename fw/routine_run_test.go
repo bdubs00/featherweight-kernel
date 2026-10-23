@@ -624,3 +624,66 @@ func TestRoutineAnInlineProfileIsChecked(t *testing.T) {
 		t.Fatalf("resolved = %+v", q.Resolved)
 	}
 }
+
+// A restart while a call of the routine waits for an approval ends the
+// routine at once: the kernel denies the approval, so a later answer of a
+// person is refused, and the model starts warm.
+func TestRoutineRestartDuringApproval(t *testing.T) {
+	ctx := testCtx(t)
+	l := NewMemLedger()
+	id := "run-routine-approval"
+	routine := ackRoutine(RoutineLive)
+	seed(t, l, id,
+		MustEvent(id, EvRunQueued, RunQueuedData{Agent: "triage", Input: "Ticket #42", Origin: OriginCLI,
+			Resolved: &ResolvedProfile{Model: "anthropic/claude-opus-5-5", Routines: []Routine{routine}}}),
+		MustEvent(id, EvRunStarted, RunStartedData{Model: "anthropic/claude-opus-5-5"}),
+		MustEvent(id, EvRoutineDecided, RoutineDecidedData{Routine: "ack", Version: 2, Standing: RoutineLive, Mode: RoutineLive, Applies: true}),
+		MustEvent(id, EvToolRequested, ToolRequestedData{Tool: "gitea.label_read", CallID: routineCallPrefix + "1", Input: json.RawMessage(`{}`), Routine: "ack"}),
+		MustEvent(id, EvToolResponded, ToolRespondedData{Tool: "gitea.label_read", CallID: routineCallPrefix + "1", Content: []Block{Text("[]")}}),
+		MustEvent(id, EvApprovalRequested, ApprovalRequestedData{ApprovalID: "ap1", Tool: "gitea.issue_write", CallID: routineCallPrefix + "2", Input: json.RawMessage(`{}`), Reason: "rule: ask"}),
+	)
+	s := newScript(endTurn("handled"))
+	h := &helpdesk{}
+	a := routineAgent(t, s.Model(), &fakeDecider{answers: confident()}, h, []Routine{routine}, WithLedger(l))
+	r := waitTerminal(t, a, id)
+	mustState(t, r, nil, StateCompleted)
+	evs := ledgerEvents(t, l, id)
+	var dec ApprovalDecidedData
+	firstOf(t, evs, EvApprovalDecided, &dec)
+	if dec.ApprovalID != "ap1" || dec.Decision != "deny" || dec.Decider != OriginKernel || dec.Note != routineInterrupted {
+		t.Fatalf("decided = %+v", dec)
+	}
+	var app RoutineAppliedData
+	firstOf(t, evs, EvRoutineApplied, &app)
+	if app.OK || app.FailedStep != 2 || app.Steps != 2 || app.Reason != routineInterrupted {
+		t.Fatalf("applied = %+v", app)
+	}
+	if len(h.writes) != 0 || r.Output != "handled" {
+		t.Fatalf("writes %v, output %q", h.writes, r.Output)
+	}
+	if err := a.Decide(ctx, id, ApprovalDecision{ApprovalID: "ap1", Decision: "allow"}); !errors.Is(err, ErrNoPendingApproval) {
+		t.Fatalf("a late answer = %v; want ErrNoPendingApproval", err)
+	}
+	checkCursorPrefixes(t, evs)
+}
+
+// waitTerminal waits until the run ends. Wait returns at a pending
+// approval too, which this test passes on its way.
+func waitTerminal(t *testing.T, a *Agent, id string) *Run {
+	t.Helper()
+	ctx := testCtx(t)
+	for {
+		r, err := a.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.State.Terminal() {
+			return r
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("the run did not end: %+v", r)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}

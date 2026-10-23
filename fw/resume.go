@@ -229,7 +229,7 @@ func (a *Agent) resume(runs []*runState) {
 		}
 		a.log.Info("run resumed", "run", rs.id, "fromSeq", from)
 		rs.mu.Lock()
-		if rs.run.State != StateInputRequired {
+		if rs.run.State != StateInputRequired || rs.routineWaits() {
 			a.launchLocked(rs)
 		}
 		rs.mu.Unlock()

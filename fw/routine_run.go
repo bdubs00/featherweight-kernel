@@ -317,10 +317,32 @@ func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor, n int)
 // the context block of what the routine did.
 func (a *Agent) closeRoutine(ctx context.Context, rs *runState, c *cursor) error {
 	r := c.routine
+	// The approval that a call of the routine waited for has no step to
+	// go to any more. The kernel denies it, so the answer of a person is
+	// refused, not lost.
+	if p := c.pending; p != nil && strings.HasPrefix(p.CallID, routineCallPrefix) {
+		d := ApprovalDecidedData{ApprovalID: p.ApprovalID, Decision: "deny", Decider: OriginKernel, Note: routineInterrupted}
+		if _, err := a.emit(ctx, rs, EvApprovalDecided, d); err != nil {
+			return err
+		}
+	}
+	// The failed step is the call without a result, or else the next one.
+	failed := len(r.calls)
+	if failed == 0 || r.calls[failed-1].responded {
+		failed++
+	}
 	_, err := a.emit(ctx, rs, EvRoutineApplied, RoutineAppliedData{
-		Routine: r.live, Version: r.version, Steps: len(r.calls), FailedStep: len(r.calls), Reason: routineInterrupted,
+		Routine: r.live, Version: r.version, Steps: failed, FailedStep: failed, Reason: routineInterrupted,
 	})
 	return err
+}
+
+// routineWaits reports whether the run waits for an approval of a call of
+// its routine runner. A restart then resumes the run, so the routine ends.
+// The caller holds rs.mu.
+func (rs *runState) routineWaits() bool {
+	p := rs.run.Pending
+	return p != nil && strings.HasPrefix(p.CallID, routineCallPrefix)
 }
 
 // finishRoutine finishes a run whose routine completed when a restart came
