@@ -24,12 +24,16 @@ func cmdRoutine(ctx context.Context, g *globals, args []string) int {
 	switch sub {
 	case "replay":
 		return cmdRoutineReplay(ctx, g, args)
+	case "propose":
+		return cmdRoutinePropose(ctx, g, args)
 	case "", "help", "-h", "-help", "--help":
 		fmt.Fprint(g.stderr, `Usage: fw routine replay --routine <r.yaml> [--ledger <dir>] [--agent <name>] [--decide] [--json]
+       fw routine propose --agent <name> [--ledger <dir>] [--runs <id,id>] [--out <r.yaml>] [--name <name>] [--decider <name>] [--json]
 
 replay checks a routine against the runs of a ledger: for each run, it
 renders the steps with the answers of the agent and compares each input
-with the call that the agent made.
+with the call that the agent made. propose makes a routine from the runs
+of an agent that completed and that no one sent back.
 `)
 		if sub == "" {
 			return exitUsage
@@ -211,5 +215,107 @@ func writeReplay(w io.Writer, r fw.Routine, res routine.ReplayResult) {
 			}
 			fmt.Fprintf(w, "    probability %s: %d runs, %d agreed\n", span, b.Runs, b.Agreed)
 		}
+	}
+}
+
+func cmdRoutinePropose(ctx context.Context, g *globals, args []string) int {
+	fs := g.newFlagSet("routine propose", "")
+	agent := fs.String("agent", "", "the agent `name` whose runs the routine comes from")
+	dir := fs.String("ledger", "", "the root `dir` of a file ledger (default: the configured ledger)")
+	ids := fs.String("runs", "", "read only these runs: `ids` separated by commas")
+	out := fs.String("out", "", "write the routine to this `file` (default: standard output)")
+	name := fs.String("name", "", "the `name` of the routine (default: the agent name)")
+	decider := fs.String("decider", "", "the decider `name` of the questions, a key of deciders")
+	asJSON := fs.Bool("json", false, "print the routine and the proposal as JSON")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
+		return flagExit(err)
+	}
+	if len(pos) != 0 || *agent == "" {
+		fs.Usage()
+		return exitUsage
+	}
+	var cfg *fw.Config
+	if *dir == "" {
+		if cfg, err = g.loadConfig(); err != nil {
+			return g.fail("routine propose", err)
+		}
+	}
+	var list []string
+	for _, id := range strings.Split(*ids, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			list = append(list, id)
+		}
+	}
+	runs, err := readRuns(ctx, cfg, *dir, *agent, list)
+	if err != nil {
+		return g.fail("routine propose", err)
+	}
+	n := *name
+	if n == "" {
+		n = strings.ToLower(*agent)
+	}
+	r, prop := routine.Propose(runs, routine.ProposeOptions{Name: n, Decider: *decider})
+	if len(prop.Runs) == 0 {
+		return g.fail("routine propose", fmt.Errorf("the ledger holds no completed run of the agent %s", *agent))
+	}
+	body, err := yaml.Marshal(r)
+	if err != nil {
+		return g.fail("routine propose", err)
+	}
+	head := fmt.Sprintf("# Proposed by fw routine propose from %d runs of the agent %s.\n", len(prop.Runs), *agent)
+	if !prop.Complete {
+		head += "# Not complete: write each {{/* free ... */}} value, or hand that step to the agent.\n"
+	}
+	body = append([]byte(head), body...)
+	if *out != "" {
+		if err := os.WriteFile(*out, body, 0o644); err != nil {
+			return g.fail("routine propose", err)
+		}
+	}
+	switch {
+	case *asJSON:
+		enc := json.NewEncoder(g.stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(map[string]any{"routine": r, "proposal": prop}); err != nil {
+			return g.fail("routine propose", err)
+		}
+	case *out != "":
+		writeProposal(g.stdout, r, prop)
+	default:
+		_, _ = g.stdout.Write(body)
+		writeProposal(g.stderr, r, prop)
+	}
+	return exitOK
+}
+
+// writeProposal prints a proposal for a person.
+func writeProposal(w io.Writer, r fw.Routine, p routine.Proposal) {
+	total := len(p.Runs) + len(p.Divergent)
+	fmt.Fprintf(w, "%s: %d of %d completed runs make the calls %s (%.0f%%)\n", r.Name, len(p.Runs), total, strings.Join(p.Sequence, ", "), 100*p.Agreement)
+	if len(p.Divergent) > 0 {
+		fmt.Fprintf(w, "  other calls: %s\n", strings.Join(p.Divergent, ", "))
+	}
+	for _, x := range p.Excluded {
+		fmt.Fprintf(w, "  left out: %s, %s\n", x.Run, x.Reason)
+	}
+	if len(p.Holes) > 0 {
+		fmt.Fprintln(w, "Values that differ between runs:")
+	}
+	for _, h := range p.Holes {
+		where := "answer"
+		if h.Step > 0 {
+			where = fmt.Sprintf("step %d %s", h.Step, h.Tool)
+		}
+		fmt.Fprintf(w, "  %s %s: %s, %d values", where, h.Path, h.Kind, h.Distinct)
+		if h.Name != "" {
+			fmt.Fprintf(w, ", %s", h.Name)
+		}
+		fmt.Fprintln(w)
+	}
+	if p.Complete {
+		fmt.Fprintln(w, "The routine is complete. Run fw routine replay on it before it rehearses.")
+	} else {
+		fmt.Fprintln(w, "The routine is not complete: write each free value, or hand that step to the agent.")
 	}
 }
