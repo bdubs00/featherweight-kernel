@@ -128,7 +128,7 @@ func (decideTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResul
 		if ctx.Err() != nil {
 			return canceled(ctx, "decide")
 		}
-		return fw.ErrorResult("decide: " + err.Error()), nil
+		return fw.ErrorResult("decide: " + strings.TrimPrefix(err.Error(), "fw: decider: ")), nil
 	}
 	b, err := json.Marshal(res)
 	if err != nil {

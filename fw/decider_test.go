@@ -91,6 +91,7 @@ func TestSystemOneErrors(t *testing.T) {
 		want   string
 	}{
 		{"status", 401, `{"error": {"type": "authentication_error", "message": "missing or wrong bearer token"}}`, "answered 401: authentication_error: missing or wrong bearer token"},
+		{"long input", 413, `{"error": {"type": "context_length_exceeded", "message": "the input holds 70000 tokens; the limit is 65536"}}`, "answered 413: context_length_exceeded: the input holds 70000 tokens"},
 		{"no answers", 200, `{"model": "clef"}`, "the response has no answers"},
 		{"missing answer", 200, `{"model": "clef", "answers": {}}`, "answers.outage is missing"},
 		{"other type", 200, `{"model": "clef", "answers": {"outage": {"type": "choice", "choice": "a"}}}`, `answers.outage.type is "choice"`},
@@ -166,5 +167,50 @@ func TestDeciderNamedResolvesTheSecret(t *testing.T) {
 	}
 	if _, err := a.DeciderNamed(context.Background(), "jev"); err == nil || !strings.Contains(err.Error(), `no decider "jev"`) {
 		t.Errorf("unknown decider: %v", err)
+	}
+}
+
+// Both spellings of the answers parse: Clef and Workers AI (choice, noul,
+// score with a legend) and TypeSafe (answer, probability, score by level).
+func TestSystemOneSpellings(t *testing.T) {
+	qs := map[string]Question{
+		"team":    {Type: QuestionChoice, Criteria: map[string]any{"billing": "B", "technical": "T"}},
+		"down":    {Type: QuestionNoul},
+		"urgency": {Type: QuestionScore, Criteria: []any{"Can wait", "This week", "Today"}},
+	}
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"clef", `{"model": "clef", "answers": {
+			"team": {"type": "choice", "choice": "technical", "confidence": 0.9, "probabilities": {"billing": 0.1, "technical": 0.9}},
+			"down": {"type": "noul", "noul": 0.8},
+			"urgency": {"type": "score", "score": 1.8, "confidence": 0.7, "legend": {"0": "Can wait", "1": "This week", "2": "Today"}, "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}},
+			"usage": {"input_tokens": 9, "output_tokens": 0}}`},
+		{"clef without legend", `{"model": "clef", "answers": {
+			"team": {"type": "choice", "choice": "technical", "probabilities": {"billing": 0.1, "technical": 0.9}},
+			"down": {"type": "noul", "noul": 0.8},
+			"urgency": {"type": "score", "score": 1.8, "legend": {"0": {"text": "x"}}, "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}}}`},
+		{"typesafe", `{"model": "jev", "answers": {
+			"team": {"type": "choice", "answer": "technical", "confidence": 0.9, "probabilities": {"billing": 0.1, "technical": 0.9}},
+			"down": {"type": "noul", "probability": 0.8},
+			"urgency": {"type": "score", "answer": "Today", "probabilities": {"Can wait": 0.1, "This week": 0.2, "Today": 0.7}}}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res, err := ParseSystemOne([]byte(c.body), qs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a := res.Answers["team"]; a.Choice != "technical" || a.Probability != 0.9 {
+				t.Errorf("team = %+v", a)
+			}
+			if a := res.Answers["down"]; a.Probability != 0.8 {
+				t.Errorf("down = %+v", a)
+			}
+			if a := res.Answers["urgency"]; a.Choice != "Today" || a.Probability != 0.7 || a.Probabilities["This week"] != 0.2 {
+				t.Errorf("urgency = %+v", a)
+			}
+		})
 	}
 }

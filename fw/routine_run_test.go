@@ -550,7 +550,7 @@ func TestRoutineDeciderError(t *testing.T) {
 		t.Fatalf("decider calls %d, ids %v, decided %+v", d.calls, d.ids, decs)
 	}
 	for _, x := range decs {
-		if x.Applies || !strings.HasPrefix(x.Reason, "decider: decide: the server answered 529") {
+		if x.Applies || !strings.HasPrefix(x.Reason, "decider: the server answered 529") {
 			t.Errorf("decided = %+v", x)
 		}
 	}

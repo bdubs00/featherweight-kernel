@@ -445,7 +445,7 @@ func (rr *routineRun) ask(ctx context.Context, decider, routines, input string, 
 		}
 		text := resultText(res)
 		if res.IsError {
-			return nil, "", 0, clipLine(text, 300), nil
+			return nil, "", 0, clipLine(strings.TrimPrefix(text, "decide: "), 300), nil
 		}
 		var d DecideResult
 		if err := json.Unmarshal([]byte(text), &d); err != nil {

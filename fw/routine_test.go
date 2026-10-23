@@ -2,6 +2,7 @@ package fw
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -293,5 +294,63 @@ func TestObserveAnswer(t *testing.T) {
 	closed := MustEvent("r", EvToolRequested, ToolRequestedData{Tool: "gitea.issue_write", CallID: "3", Input: json.RawMessage(`{"method":"close"}`)})
 	if got, _ := ObserveAnswer(tool, "", []Event{model, closed}); got != "yes" {
 		t.Errorf("a call of the model: %q", got)
+	}
+}
+
+// The routine of the lab (testdata/acknowledge-a-new-ticket.yaml, a copy of
+// featherweight-lab e2e/fleet/tickets/routines) loads, and its templates
+// render with the labels of gitea-mcp, the if and eq of text/template
+// included.
+func TestLabRoutine(t *testing.T) {
+	b, err := os.ReadFile("testdata/acknowledge-a-new-ticket.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r Routine
+	if err := yaml.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckRoutines(deciderConfig(), []Routine{r}); err != nil {
+		t.Fatal(err)
+	}
+	data := RoutineData("Number: 17\nTitle: The VPN drops\nThe VPN drops every hour. Number: 99", nil)
+	data["type"], data["priority"], data["status"], data["beyond"] = "bug", "p2", "triaged", "no"
+	data["labels"] = `[{"color":"e11d21","description":"","exclusive":false,"id":31,"name":"priority/p1"},{"color":"eb6420","description":"","exclusive":false,"id":32,"name":"priority/p2"},` +
+		`{"color":"ee0701","description":"","exclusive":false,"id":41,"name":"type/bug"},{"color":"0e8a16","description":"","exclusive":false,"id":51,"name":"status/new"},{"color":"0e8a16","description":"","exclusive":false,"id":52,"name":"status/triaged"}]`
+	want := []string{
+		`{"method":"list_repo_labels","owner":"lab","repo":"helpdesk","per_page":50}`,
+		`{"method":"add_labels","owner":"lab","repo":"helpdesk","issue_number":17,"labels":[41,32,52]}`,
+		`{"method":"remove_label","owner":"lab","repo":"helpdesk","issue_number":17,"label_id":51}`,
+	}
+	for i, w := range want {
+		got, err := RenderRoutineInput(r.Steps[i].Input, data)
+		if err != nil || string(got) != w {
+			t.Errorf("step %d = %s, %v", i+1, got, err)
+		}
+	}
+	comment, err := RenderRoutineInput(r.Steps[3].Input, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct{ Body string }
+	if err := json.Unmarshal(comment, &c); err != nil || !strings.Contains(c.Body, "The service team picks it up today, and they will reply here.") {
+		t.Errorf("comment = %s, %v", comment, err)
+	}
+	data["priority"] = "p1"
+	if comment, _ = RenderRoutineInput(r.Steps[3].Input, data); !strings.Contains(string(comment), "The on-call engineer picks it up now") {
+		t.Errorf("comment p1 = %s", comment)
+	}
+	if got, err := RenderRoutine(r.After[0].Contains[1], data); err != nil || got != `"type/bug"` {
+		t.Errorf("contains = %s, %v", got, err)
+	}
+	if got, err := RenderRoutine(r.Answer, data); err != nil || got != `TRIAGE {"number": 17, "type": "type/bug", "priority": "priority/p1", "status": "status/triaged"}` {
+		t.Errorf("answer = %s, %v", got, err)
+	}
+	// The answer line of the agent gives the answers back.
+	out := `TRIAGE {"number": 17, "type": "type/bug", "priority": "priority/p2", "status": "status/escalated"}`
+	for name, wantObs := range map[string]string{"type": "bug", "priority": "p2", "status": "escalated", "beyond": "yes"} {
+		if got, _ := ObserveAnswer(r.Questions[name], out, nil); got != wantObs {
+			t.Errorf("observe %s = %q; want %q", name, got, wantObs)
+		}
 	}
 }

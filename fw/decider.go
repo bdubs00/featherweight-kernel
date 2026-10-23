@@ -240,11 +240,13 @@ func serverMessage(raw []byte) string {
 }
 
 // ParseSystemOne reads the response body of a System One server for the
-// questions that the call asked. It reads a choice (choice, probabilities,
-// confidence), a noul (noul), and a score (probabilities, legend, score).
-// It also takes answer in place of choice, and probability in place of
-// noul. A missing answer or a field of another shape is an error that
-// names the field.
+// questions that the call asked, in both spellings of the answers. Clef
+// and Workers AI send a choice as choice, probabilities, and confidence, a
+// noul as noul, and a score as score, legend, and probabilities keyed by
+// the place of each level. TypeSafe sends answer in place of choice,
+// probability in place of noul, and a score as answer and probabilities
+// keyed by level. A missing answer or a field of another shape is an error
+// that names the field.
 func ParseSystemOne(raw []byte, questions map[string]Question) (DecideResult, error) {
 	var w struct {
 		Model   string                     `json:"model"`
@@ -283,7 +285,7 @@ func parseAnswer(id string, q Question, raw json.RawMessage) (Answer, error) {
 		Probability   *float64           `json:"probability"`
 		Confidence    *float64           `json:"confidence"`
 		Probabilities map[string]float64 `json:"probabilities"`
-		Legend        map[string]string  `json:"legend"`
+		Legend        map[string]any     `json:"legend"`
 	}
 	if err := json.Unmarshal(raw, &w); err != nil {
 		return Answer{}, fmt.Errorf("fw: decider: answers.%s: %w", id, err)
@@ -322,20 +324,38 @@ func parseAnswer(id string, q Question, raw json.RawMessage) (Answer, error) {
 		}
 		a.Choice, a.Probability, a.Probabilities = *c, p, w.Probabilities
 	case QuestionScore:
-		if len(w.Probabilities) == 0 {
-			return Answer{}, fmt.Errorf("fw: decider: answers.%s.probabilities is missing", id)
+		named := w.Choice
+		if named == nil {
+			named = w.Answer
 		}
-		// The keys are the places of the levels, which the legend names.
+		if len(w.Probabilities) == 0 {
+			// TypeSafe can name the level with its probability alone.
+			if named == nil || w.Probability == nil {
+				return Answer{}, fmt.Errorf("fw: decider: answers.%s.probabilities is missing", id)
+			}
+			a.Choice, a.Probability = *named, *w.Probability
+			break
+		}
+		// Clef keys the probabilities by the place of each level, which the
+		// legend names; TypeSafe keys them by the level.
 		levels, _ := stringList(q.Criteria)
 		a.Probabilities = map[string]float64{}
 		for k, p := range w.Probabilities {
 			level := k
-			if name, ok := w.Legend[k]; ok {
+			if name, ok := w.Legend[k].(string); ok && name != "" {
 				level = name
 			} else if i, err := strconv.Atoi(k); err == nil && i >= 0 && i < len(levels) {
 				level = levels[i]
 			}
 			a.Probabilities[level] = p
+		}
+		if named != nil {
+			p, ok := a.Probabilities[*named]
+			if !ok {
+				return Answer{}, fmt.Errorf("fw: decider: answers.%s.probabilities has no value for %q", id, *named)
+			}
+			a.Choice, a.Probability = *named, p
+			break
 		}
 		for _, level := range slices.Sorted(maps.Keys(a.Probabilities)) {
 			if p := a.Probabilities[level]; a.Choice == "" || p > a.Probability {
