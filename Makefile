@@ -4,7 +4,8 @@ IMAGE   ?= ghcr.io/bdubs00/featherweight-kernel
 # TAGS selects the drivers of the binary: empty for every driver, or lean
 # plus the tags of the drivers that the build needs, for example
 # TAGS=lean,nats,openai,oidc (docs/ARCHITECTURE.md section 15). The tag
-# memory_sqlite adds the SQLite FTS5 index of the memory to either build.
+# propose adds fw routine propose to a lean build. The tag memory_sqlite
+# adds the SQLite FTS5 index of the memory to either build.
 TAGS    ?=
 
 .PHONY: build test vet fmt run image image-toolbox clean

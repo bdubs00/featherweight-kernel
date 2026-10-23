@@ -15,7 +15,9 @@ package main
 // core alone, and each driver comes back with its own tag: nats, redis,
 // anthropic, openai, gemini, spiffe, oidc, metrics, a2a, env, and harness.
 // A worker image for one fleet therefore builds with, for example, -tags
-// lean,nats,openai,oidc (section 15). The tag memory_sqlite adds the
+// lean,nats,openai,oidc (section 15). The tag lean also leaves out fw
+// routine propose, which reads many runs, and the tag propose brings it
+// back (docs/ROUTINES.md section 3.6). The tag memory_sqlite adds the
 // SQLite FTS5 index of the memory to either build; it links no driver of
 // its own (section 7.8.3).
 
