@@ -139,7 +139,7 @@ fw ax events --name reviewer <run-id>                                           
 fw ax down --name reviewer                                                         # delete the Task and its Workspace
 ```
 
-`render` and `up` derive one egress rule for each endpoint of the configuration. Inside a Task, `fw doctor` adds the lines `ax reach`, `ax trust bundle`, `ax tools user`, and `ax durable` (section 21 of the architecture).
+`render` and `up` derive one egress host for each endpoint of the configuration. Inside a Task, `fw doctor` adds the lines `ax reach`, `ax trust bundle`, `ax tools user`, and `ax durable` (section 21 of the architecture).
 
 See section 11 of the architecture for the boot sequence, suspend and resume, `ax ssh`, and the gaps in ax today.
 

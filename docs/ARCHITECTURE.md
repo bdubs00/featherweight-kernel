@@ -2382,7 +2382,7 @@ The line `environment` names:
 - whether `uv` and `pixi` are on PATH, with their versions, for the managers that the block needs;
 - the hosts that the egress policy of the Task must let through, from the URLs in the lock files: `tls pypi.org` for an https host, which needs a rule with tls passthrough, and `http deb.debian.org` for a plain http host. Without a lock file it names the default registry: `pypi.org` and `files.pythonhosted.org` for uv, `conda.anaconda.org` for pixi. Without `python3` on PATH it adds `releases.astral.sh`, where uv downloads a Python. `download.pytorch.org` appears when the lock of uv uses the PyTorch index.
 
-The kernel cannot add an egress rule. A person adds the rules to the Task. A failed state or a missing manager fails the line.
+The kernel cannot add an egress host. A person adds the hosts to the Task. A failed state or a missing manager fails the line.
 
 ### 18.10 `fw env dockerfile`
 
@@ -2721,7 +2721,7 @@ The Workspace holds `.fw/fw.yaml`, which the kernel reads under ax (section 11.3
 
 The Task gets `spec.env` in this order: the static token when `auth.mode` holds `token`, the key of each model provider, the bearer of each MCP server, the credential for the token broker, the OTLP endpoints of the caller (`OTEL_EXPORTER_OTLP_ENDPOINT` and the endpoint of each signal), and the entries of `--env`. A secret takes its value from `--env`, else from the secrets driver of the caller. `render` prints a placeholder for each one, and for each `--env` entry with a secret name, and warns when the caller does not have a value. `up` refuses to start until every value is there.
 
-The egress rules come from the endpoints of the configuration of the Task, so no rule is forgotten: the base URL of each model provider, or the default endpoint of the adapter; each URL of the bus; `tokens.url`; the OTLP endpoints; and the endpoint of each MCP server. A child Task of `spawn.driver: ax`, an A2A peer, and an OIDC issuer need a rule from `--egress`. A plain `http` or `ws` URL gives an `http` rule and an `https`, `wss`, or `rediss` URL a `tls` passthrough rule, each for one host and its port. `--egress` adds more. The same rule appears once. An endpoint that no rule can carry gives a warning instead: a scheme such as `nats://` or `redis://`, because the egress gateway carries only HTTP and TLS, and `localhost` or an IP address, because a rule names a DNS name.
+The hosts of `spec.egress` come from the endpoints of the configuration of the Task, so none is forgotten: the base URL of each model provider, or the default endpoint of the adapter; each URL of the bus; `tokens.url`; the OTLP endpoints; and the endpoint of each MCP server. A child Task of `spawn.driver: ax`, an A2A peer, and an OIDC issuer need a host from `--egress`. A plain `http` or `ws` URL gives an `http://` host, and an `https`, `wss`, or `rediss` URL a plain host, which is TLS that the gateway forwards without decryption, each with its port. `--egress` adds more: an entry as `spec.egress.hosts` takes it, a host for TLS on port 443, `http://host[:port]`, or `https://host[:port]`, or a `ws`, `wss`, or `rediss` URL. The same host appears once. An endpoint that no host can carry gives a warning instead: a scheme such as `nats://` or `redis://`, because the egress gateway carries only HTTP and TLS, and `localhost` or an IP address, because a host is a DNS name.
 
 ### 21.3 up, status, events, and down
 
@@ -2736,15 +2736,15 @@ A sandbox hides facts that the configuration does not show. `cli/doctor_ax.go` a
 | Line | What it checks | Verdict |
 |---|---|---|
 | `ax reach` | Each endpoint of section 21.2, with the MCP servers of the Workspaces. An `http` endpoint gets one GET without a credential, and any answer but the refusal of the egress gateway, a 403 with the body `egress denied`, passes. A `tls` endpoint gets a TLS handshake, which the gateway ends when no rule covers the name. Each probe has five seconds at most, and the probes run at the same time. | FAIL when an endpoint does not answer, with each endpoint and the fix |
-| `ax trust bundle` | The bundle of the egress gateway at `/run/ate/egress-trust-bundle/trust-bundle.pem`, where a SystemInfo volume puts it in `docs/egress-trust-bundle.md` of Agent Substrate. ax mounts no such volume yet, and an `https` rule needs the bundle, because the gateway terminates its TLS. | ok with the limit while the file is absent, because nobody in the Task can change it; ok with the number of certificates; FAIL when the file holds no certificate |
+| `ax trust bundle` | The bundle of the egress gateway at `/run/ate/egress-trust-bundle/trust-bundle.pem`, where a SystemInfo volume puts it in `docs/egress-trust-bundle.md` of Agent Substrate. ax mounts no such volume yet, and an `https://` host needs the bundle, because the gateway terminates its TLS. | ok with the limit while the file is absent, because nobody in the Task can change it; ok with the number of certificates; FAIL when the file holds no certificate |
 | `ax tools user` | The user that runs the tools, as `ax.ApplyToConfig` chooses it, and whether it is a separate user from the one of `fw`. | ok with the reason when no separate user is in effect; FAIL when `tools.user` names a user that root cannot become |
 | `ax durable` | `FW_HOME` is under `/workspace` and writable, `/workspace` is a mount in `/proc/self/mountinfo`, and every binding is under it. | FAIL with each problem |
 
 Example lines for a Task of the lab in gVisor, with one egress rule missing:
 
 ```
-FAIL  ax reach: 1 of 5 endpoints does not answer: mcp github github-mcp.fw-fleet.svc.cluster.local:8082 (the egress gateway denies it); fix the egress of the Task (fw ax render derives a rule for each endpoint); these answer: model openai ax-model.fw-fleet.svc.cluster.local:8080, bus nats.fw-fleet.svc.cluster.local:8080, tokens fw-front.fw-fleet.svc.cluster.local:8080, telemetry opentelemetry-collector.otel-system.svc.cluster.local:4318
-ok    ax trust bundle: absent at /run/ate/egress-trust-bundle/trust-bundle.pem; https egress rules need the SystemInfo volume there, so use http and tls rules
+FAIL  ax reach: 1 of 5 endpoints does not answer: mcp github github-mcp.fw-fleet.svc.cluster.local:8082 (the egress gateway denies it); fix the egress of the Task (fw ax render derives a host for each endpoint); these answer: model openai ax-model.fw-fleet.svc.cluster.local:8080, bus nats.fw-fleet.svc.cluster.local:8080, tokens fw-front.fw-fleet.svc.cluster.local:8080, telemetry opentelemetry-collector.otel-system.svc.cluster.local:4318
+ok    ax trust bundle: absent at /run/ate/egress-trust-bundle/trust-bundle.pem; https:// hosts of spec.egress need the SystemInfo volume there, so use http:// and plain hosts
 ok    ax tools user: the tools run as root (0), the user of fw, because root lacks CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_SETGID, CAP_SETUID in this sandbox; no separate user is in effect, so a tool process can read the files of fw
 ok    ax durable: FW_HOME /workspace/.fw is writable on the volume at /workspace, with 1 binding on it
 ```

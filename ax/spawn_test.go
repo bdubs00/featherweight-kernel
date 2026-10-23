@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -497,25 +498,11 @@ func TestChildTaskInheritsTheEgress(t *testing.T) {
 	ax := newFakeAX(t)
 	router := newFakeRouter(t)
 	s := newSpawnerUnderTest(t, ax, router)
-	base := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img", Egress: &EgressSpec{Rules: []EgressRule{
-		{HTTP: &EgressHosts{Hostnames: []string{"nats.agents.svc"}, Ports: []int32{8080}}},
-		{HTTPS: &EgressHosts{Hostnames: []string{"api.example.com"}}},
-		{TLS: &EgressHosts{Hostnames: []string{"github.com", "*.github.com"}, Ports: []int32{443}}},
-		{},
-	}}}}
+	hosts := []string{"http://nats.agents.svc:8080", "https://api.example.com", "github.com", "*.github.com:443"}
+	base := &Task{Metadata: ObjectMeta{Name: "migrator", Atespace: "team"}, Spec: TaskSpec{Image: "img", Egress: &EgressSpec{Hosts: hosts}}}
 	child := s.childTask(base, "team", "c", &fw.Run{ID: "01P"}, -1)
-	rules := child.Spec.GetEgress().GetRules()
-	if len(rules) != 3 {
-		t.Fatalf("rules = %v, want 3", rules)
-	}
-	if h := rules[0].GetHttp(); h == nil || h.GetHostnames()[0] != "nats.agents.svc" || h.GetPorts()[0] != 8080 {
-		t.Fatalf("http rule = %v", rules[0])
-	}
-	if h := rules[1].GetHttps(); h == nil || h.GetHostnames()[0] != "api.example.com" || len(h.GetPorts()) != 0 {
-		t.Fatalf("https rule = %v", rules[1])
-	}
-	if h := rules[2].GetTls(); h == nil || len(h.GetHostnames()) != 2 || h.GetPorts()[0] != 443 {
-		t.Fatalf("tls rule = %v", rules[2])
+	if got := child.Spec.GetEgress().GetHosts(); !slices.Equal(got, hosts) {
+		t.Fatalf("hosts = %v, want %v", got, hosts)
 	}
 	plain := s.childTask(&Task{Metadata: ObjectMeta{Name: "m", Atespace: "team"}, Spec: TaskSpec{Image: "img"}}, "team", "c", &fw.Run{ID: "01P"}, -1)
 	if plain.Spec.GetEgress() != nil {

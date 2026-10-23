@@ -316,42 +316,14 @@ spec:
     - name: reviewer-ws
       path: /workspace
   egress:
-    rules:
-      - http:
-          hostnames:
-            - ax-model.fw-fleet.svc.cluster.local
-          ports:
-            - 8080
-      - http:
-          hostnames:
-            - nats.fw-fleet.svc.cluster.local
-          ports:
-            - 8080
-      - http:
-          hostnames:
-            - fw-front.fw-fleet.svc.cluster.local
-          ports:
-            - 8080
-      - http:
-          hostnames:
-            - otel.otel-system.svc.cluster.local
-          ports:
-            - 4318
-      - tls:
-          hostnames:
-            - api.githubcopilot.com
-          ports:
-            - 443
-      - http:
-          hostnames:
-            - deb.debian.org
-          ports:
-            - 80
-      - tls:
-          hostnames:
-            - pypi.org
-          ports:
-            - 443
+    hosts:
+      - http://ax-model.fw-fleet.svc.cluster.local:8080
+      - http://nats.fw-fleet.svc.cluster.local:8080
+      - http://fw-front.fw-fleet.svc.cluster.local:8080
+      - http://otel.otel-system.svc.cluster.local:4318
+      - api.githubcopilot.com:443
+      - http://deb.debian.org:80
+      - pypi.org:443
 `
 
 // fw ax render prints the Workspace and the Task in the order of apply,
@@ -359,7 +331,7 @@ spec:
 func TestAXRenderGolden(t *testing.T) {
 	profile := axEnv(t)
 	code, out, errOut := run(t, "", "ax", "render", "-f", profile, "--name", "reviewer", "--image", "registry.example/fw@sha256:0123",
-		"--egress", "deb.debian.org:80", "--egress", "tls:pypi.org", "--egress", "http://ax-model.fw-fleet.svc.cluster.local:8080",
+		"--egress", "http://deb.debian.org:80", "--egress", "pypi.org", "--egress", "http://ax-model.fw-fleet.svc.cluster.local:8080",
 		"--env", "FW_TOOLS_USER=none", "--env", "DEPLOY_TOKEN=deploy-secret-value", "--workspace-file", "notes/README.md=readme.txt")
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, errOut)
@@ -374,7 +346,7 @@ func TestAXRenderGolden(t *testing.T) {
 	}
 	// The same input gives the same output.
 	if _, again, _ := run(t, "", "ax", "render", "-f", profile, "--name", "reviewer", "--image", "registry.example/fw@sha256:0123",
-		"--egress", "deb.debian.org:80", "--egress", "tls:pypi.org", "--egress", "http://ax-model.fw-fleet.svc.cluster.local:8080",
+		"--egress", "http://deb.debian.org:80", "--egress", "pypi.org", "--egress", "http://ax-model.fw-fleet.svc.cluster.local:8080",
 		"--env", "FW_TOOLS_USER=none", "--env", "DEPLOY_TOKEN=deploy-secret-value", "--workspace-file", "notes/README.md=readme.txt"); again != out {
 		t.Errorf("a second render differs:\n%s", again)
 	}
@@ -436,8 +408,9 @@ func TestAXRenderDropsHeaders(t *testing.T) {
 }
 
 // Each configured endpoint gets one egress rule: http for a plain URL and
-// tls for an https URL, with its port. One that no rule can carry gets a
-// warning instead.
+// tls for an https URL, with its port. --egress takes an entry of
+// spec.egress.hosts or a URL. One that no rule can carry gets a warning
+// instead.
 func TestAXRules(t *testing.T) {
 	cfg := fw.DefaultConfig()
 	cfg.Model = "anthropic/claude-opus-5-5"
@@ -448,7 +421,7 @@ func TestAXRules(t *testing.T) {
 	cfg.Tools.MCP = []fw.MCPServerConfig{{Name: "git", Endpoint: "http://localhost:9000/mcp"}, {Name: "docs", Endpoint: "wss://docs.example"}, {Name: "local", Command: "mcp-local"}}
 	env := map[string]string{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://10.0.0.5:4318"}
 	r := &axRendered{}
-	rules, err := axRules(cfg, []string{"https:registry.npmjs.org", "tls:pypi.org:8443", "front:8080"}, func(n string) string { return env[n] }, r)
+	rules, err := axRules(cfg, []string{"https://registry.npmjs.org", "pypi.org:8443", "http://front:8080"}, func(n string) string { return env[n] }, r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,8 +494,8 @@ func TestAXUpStatusEventsDown(t *testing.T) {
 	if env["FW_API_TOKEN"] != "fleet-token-123456" || env["OPENAI_API_KEY"] != "sk-test-model-key" || env["GITHUB_MCP_TOKEN"] != "gh-token-abcdef" || env["EXTRA"] != "1" {
 		t.Errorf("the Task env is %v", env)
 	}
-	if n := len(task.GetSpec().GetEgress().GetRules()); n != 5 {
-		t.Errorf("%d egress rules, want 5", n)
+	if n := len(task.GetSpec().GetEgress().GetHosts()); n != 5 {
+		t.Errorf("%d egress hosts, want 5", n)
 	}
 	if api.resumed != 1 {
 		t.Errorf("%d resumes, want 1", api.resumed)

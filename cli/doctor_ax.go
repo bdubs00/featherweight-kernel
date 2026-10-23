@@ -152,7 +152,7 @@ func doctorAXReach(ctx context.Context, cfg *fw.Config, _ fw.Secrets, timeout ti
 	if len(bad) == 0 {
 		return true, fmt.Sprintf("ax reach: %d %s through the egress gateway: %s", len(good), plural(len(good), "endpoint answers", "endpoints answer"), strings.Join(good, ", "))
 	}
-	line := fmt.Sprintf("ax reach: %d of %d endpoints %s not answer: %s; fix the egress of the Task (fw ax render derives a rule for each endpoint)",
+	line := fmt.Sprintf("ax reach: %d of %d endpoints %s not answer: %s; fix the egress of the Task (fw ax render derives a host for each endpoint)",
 		len(bad), len(eps), plural(len(bad), "does", "do"), strings.Join(bad, ", "))
 	if len(good) > 0 {
 		line += "; these answer: " + strings.Join(good, ", ")
@@ -234,14 +234,14 @@ func shortErr(err error) string {
 }
 
 // doctorAXTrust reports the trust bundle of the egress gateway, which an
-// https egress rule needs, because the gateway terminates its TLS. An
+// https:// host of spec.egress needs, because the gateway terminates its TLS. An
 // absent bundle is a fact of the platform that nobody in the Task can
 // change, so only a bundle without a certificate fails.
 func doctorAXTrust(context.Context, *fw.Config, fw.Secrets, time.Duration) (bool, string) {
 	data, err := os.ReadFile(axTrustBundle)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return true, fmt.Sprintf("ax trust bundle: absent at %s; https egress rules need the SystemInfo volume there, so use http and tls rules", axTrustBundle)
+		return true, fmt.Sprintf("ax trust bundle: absent at %s; https:// hosts of spec.egress need the SystemInfo volume there, so use http:// and plain hosts", axTrustBundle)
 	case err != nil:
 		return false, fmt.Sprintf("ax trust bundle: %s does not read: %v", axTrustBundle, err)
 	}
@@ -258,7 +258,7 @@ func doctorAXTrust(context.Context, *fw.Config, fw.Secrets, time.Duration) (bool
 	if n == 0 {
 		return false, fmt.Sprintf("ax trust bundle: %s holds no certificate; the SystemInfo volume of the Task names no trust bundle", axTrustBundle)
 	}
-	return true, fmt.Sprintf("ax trust bundle: present at %s with %d %s; https egress rules can work", axTrustBundle, n, plural(n, "certificate", "certificates"))
+	return true, fmt.Sprintf("ax trust bundle: present at %s with %d %s; https:// hosts of spec.egress can work", axTrustBundle, n, plural(n, "certificate", "certificates"))
 }
 
 // doctorAXToolUser reports the user that runs the processes of tools, as
