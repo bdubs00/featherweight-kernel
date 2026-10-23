@@ -9,16 +9,14 @@ import (
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
-// Bands are the lower bounds of the bands of the reliability table: the
+// bands are the lower bounds of the bands of the reliability table: the
 // probability of the answer that the decider chose falls in one of them.
-var Bands = []float64{0, 0.5, 0.7, 0.85, 0.95}
+var bands = [...]float64{0, 0.5, 0.7, 0.85, 0.95}
 
 // ReplayOptions are the options of Replay. Decider, when set, answers the
-// questions of the routine on the input of each run, and Context bounds
-// those calls; nil is context.Background.
+// questions of the routine on the input of each run.
 type ReplayOptions struct {
 	Decider fw.Decider
-	Context context.Context
 }
 
 // ReplayResult is what Replay found. Matched lists the runs whose every
@@ -86,18 +84,14 @@ type Band struct {
 // that tool, as canonical JSON. A check afterward matches when its input
 // matches the next call of its tool and the recorded result holds every
 // contains and no lacks. A run matches when every step and every check
-// matches.
-func Replay(r fw.Routine, runs [][]fw.Event, opts ReplayOptions) ReplayResult {
-	ctx := opts.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// matches. ctx bounds the calls to the decider.
+func Replay(ctx context.Context, r fw.Routine, runs [][]fw.Event, opts ReplayOptions) ReplayResult {
 	res := ReplayResult{Routine: r.Name, Version: r.Version, Runs: len(runs), Matched: []string{}}
 	if opts.Decider != nil {
 		res.Questions = map[string]*QuestionScore{}
 		for _, name := range r.QuestionNames() {
 			s := &QuestionScore{}
-			for _, from := range Bands {
+			for _, from := range bands {
 				s.Bands = append(s.Bands, Band{From: from})
 			}
 			res.Questions[name] = s

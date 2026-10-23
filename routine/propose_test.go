@@ -1,6 +1,7 @@
 package routine
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -78,7 +79,7 @@ func TestPropose(t *testing.T) {
 		t.Errorf("holes = %+v", prop.Holes)
 	}
 	// The proposal replays the runs that it came from.
-	res := Replay(r, runs[:12], ReplayOptions{})
+	res := Replay(context.Background(), r, runs[:12], ReplayOptions{})
 	if len(res.Matched) != 12 {
 		t.Fatalf("replay = %+v", res)
 	}
@@ -124,7 +125,7 @@ func TestProposeProblems(t *testing.T) {
 	if r.Decider != "" || len(r.Questions) == 0 || len(prop.Problems) != 0 || !prop.Complete {
 		t.Fatalf("without a decider: %+v, problems %v", prop, prop.Problems)
 	}
-	if res := Replay(r, runs[:12], ReplayOptions{}); len(res.Matched) != 12 {
+	if res := Replay(context.Background(), r, runs[:12], ReplayOptions{}); len(res.Matched) != 12 {
 		t.Fatalf("replay of a proposal without a decider = %+v", res)
 	}
 	_, prop = Propose(runs, ProposeOptions{Name: "Triage Desk"})

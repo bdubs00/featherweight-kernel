@@ -29,7 +29,7 @@ func TestReplay(t *testing.T) {
 		{number: 3, kind: "bug", comment: "Thanks, we are on it."},
 		{number: 4, kind: "access", noReply: true},
 	})
-	res := Replay(triage(), runs, ReplayOptions{})
+	res := Replay(context.Background(), triage(), runs, ReplayOptions{})
 	if res.Runs != 4 || len(res.Matched) != 2 || len(res.Diverged) != 1 || len(res.Unreadable) != 1 {
 		t.Fatalf("result = %+v", res)
 	}
@@ -49,13 +49,13 @@ func TestReplay(t *testing.T) {
 	checked := triage()
 	checked.After = []fw.RoutineCheck{{Tool: "gitea.issue_read", Input: `{"method": "get", "owner": "lab", "repo": "helpdesk", "issue_number": {{ find .input "#(\\d+)" }}}`, Contains: []string{"status/triaged"}}}
 	more := recordRuns(t, t.TempDir(), []ticket{{number: 5, kind: "bug", extra: true}, {number: 6, kind: "bug"}})
-	res = Replay(checked, more, ReplayOptions{})
+	res = Replay(context.Background(), checked, more, ReplayOptions{})
 	if len(res.Matched) != 1 || res.Matched[0] != more[0][0].Subject || len(res.Diverged) != 1 ||
 		res.Diverged[0].Step != 4 || !strings.Contains(res.Diverged[0].Reason, "made 0 calls of gitea.issue_read") {
 		t.Fatalf("checked = %+v", res)
 	}
 	checked.After[0].Contains = []string{"status/closed"}
-	if res = Replay(checked, more[:1], ReplayOptions{}); len(res.Diverged) != 1 || res.Diverged[0].Reason != `the result lacks "status/closed"` {
+	if res = Replay(context.Background(), checked, more[:1], ReplayOptions{}); len(res.Diverged) != 1 || res.Diverged[0].Reason != `the result lacks "status/closed"` {
 		t.Fatalf("lacks = %+v", res)
 	}
 }
@@ -69,7 +69,7 @@ func TestReplayDecide(t *testing.T) {
 		tickets[2].input(): {Type: fw.QuestionChoice, Choice: "bug", Probability: 0.97, Probabilities: map[string]float64{"bug": 0.97, "outage": 0.03}},
 		tickets[3].input(): {Type: fw.QuestionChoice, Choice: "access", Probability: 0.99, Probabilities: map[string]float64{"access": 0.99}},
 	}
-	res := Replay(triage(), runs, ReplayOptions{Decider: d})
+	res := Replay(context.Background(), triage(), runs, ReplayOptions{Decider: d})
 	s := res.Questions["type"]
 	if s == nil || s.Compared != 3 || s.Agreed != 2 {
 		t.Fatalf("score = %+v", s)

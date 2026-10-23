@@ -334,7 +334,7 @@ func (a *Agent) runGrader(ctx context.Context, rs *runState, c *cursor, o *Outco
 		d.Reason = `the last line of the answer of the grader is not one JSON object {"verdict": "satisfied" or "needs_revision", "notes": "..."}`
 		return nil
 	}
-	d.Verdict, d.Notes = verdict, clipText(notes, graderNotesBytes, "the notes")
+	d.Verdict, d.Notes = verdict, ClipText(notes, graderNotesBytes, "the notes")
 	return nil
 }
 
@@ -431,9 +431,9 @@ func (a *Agent) graderInput(rs *runState, evs []Event, o *Outcome, answer string
 		task += "\n\n## Follow-up messages, in order\n\n" + strings.Join(follow, "\n\n---\n\n")
 	}
 	b.WriteString("\n\n# Task of the run\n\n")
-	b.WriteString(clipText(strings.TrimSpace(task), graderTaskBytes, "the task"))
+	b.WriteString(ClipText(strings.TrimSpace(task), graderTaskBytes, "the task"))
 	fmt.Fprintf(&b, "\n\n# Final answer of the run\n\nThis is pass %d of at most %d.\n\n", iteration, o.passes())
-	b.WriteString(clipText(strings.TrimSpace(answer), graderAnswerBytes, "the answer"))
+	b.WriteString(ClipText(strings.TrimSpace(answer), graderAnswerBytes, "the answer"))
 	if len(passes) > 0 {
 		b.WriteString("\n\n# Your notes of the earlier passes\n")
 		for _, p := range passes {
@@ -556,9 +556,10 @@ func longestRun(s string, r rune) int {
 	return best
 }
 
-// clipText cuts s to at most n bytes at the end of a whole character, and
-// says so after the text.
-func clipText(s string, n int, what string) string {
+// ClipText cuts s to at most n bytes at the end of a whole character, and
+// says so after the text, naming it what. Package routine bounds the
+// inputs of a divergence with it.
+func ClipText(s string, n int, what string) string {
 	if len(s) <= n {
 		return s
 	}

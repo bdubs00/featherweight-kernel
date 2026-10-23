@@ -125,16 +125,16 @@ func TestRoutineProblems(t *testing.T) {
 		{"bad standing", func(r *Routine, _ *Config) { r.Standing = "rehearsing" }, `standing "rehearsing"`},
 		{"bad version", func(r *Routine, _ *Config) { r.Version = 0 }, "version 0"},
 		{"too many steps", func(r *Routine, _ *Config) {
-			for len(r.Steps) <= MaxRoutineSteps {
+			for len(r.Steps) <= maxRoutineSteps {
 				r.Steps = append(r.Steps, RoutineStep{Tool: "x", Input: "{}"})
 			}
 		}, "the limit is 16"},
 		{"too many questions", func(r *Routine, _ *Config) {
-			for i := 0; len(r.Questions) <= MaxRoutineQuestions; i++ {
+			for i := 0; len(r.Questions) <= maxRoutineQuestions; i++ {
 				r.Questions["q"+string(rune('a'+i))] = RoutineQuestion{Question: Question{Type: QuestionNoul}}
 			}
 		}, "the limit is 16"},
-		{"large template", func(r *Routine, _ *Config) { r.Answer = strings.Repeat("x", MaxRoutineTemplate+1) }, "the limit is 4096"},
+		{"large template", func(r *Routine, _ *Config) { r.Answer = strings.Repeat("x", maxRoutineTemplate+1) }, "the limit is 4096"},
 		{"template parse error", func(r *Routine, _ *Config) { r.Steps[1].Input = `{"n": {{ find .input }` }, "routines[0] (acknowledge-a-new-ticket).steps[1].input: template:"},
 		{"expect not an option", func(r *Routine, _ *Config) {
 			q := r.Questions["type"]
@@ -191,17 +191,17 @@ func TestCanaryPick(t *testing.T) {
 	picked := 0
 	for i := 0; i < 4000; i++ {
 		id := NewID()
-		if CanaryPick(id, 0.05) != CanaryPick(id, 0.05) {
+		if canaryPick(id, 0.05) != canaryPick(id, 0.05) {
 			t.Fatal("the pick is not stable")
 		}
-		if CanaryPick(id, 0.05) {
+		if canaryPick(id, 0.05) {
 			picked++
 		}
 	}
 	if picked < 120 || picked > 290 {
 		t.Errorf("picked %d of 4000 at 0.05", picked)
 	}
-	if CanaryPick("01ABC", 0) || !CanaryPick("01ABC", 1) {
+	if canaryPick("01ABC", 0) || !canaryPick("01ABC", 1) {
 		t.Error("share 0 picks none and share 1 picks every run")
 	}
 }
@@ -249,22 +249,22 @@ func TestRoutineApplies(t *testing.T) {
 		"pickup":   {Type: QuestionChoice, Choice: "soon", Probability: 0.6},
 		"beyond":   {Type: QuestionNoul, Probability: 0.02},
 	}
-	if ok, why := RoutineApplies(r, answers); !ok {
+	if ok, why := routineApplies(r, answers); !ok {
 		t.Fatalf("applies: %s", why)
 	}
 	low := maps2(answers)
 	low["type"] = Answer{Type: QuestionChoice, Choice: "bug", Probability: 0.61, Probabilities: map[string]float64{"bug": 0.61}}
-	if ok, why := RoutineApplies(r, low); ok || why != "type below act: 0.61" {
+	if ok, why := routineApplies(r, low); ok || why != "type below act: 0.61" {
 		t.Errorf("below act: %v %q", ok, why)
 	}
 	other := maps2(answers)
 	other["type"] = Answer{Type: QuestionChoice, Choice: "other", Probability: 0.97}
-	if ok, why := RoutineApplies(r, other); ok || why != "type other not expected" {
+	if ok, why := routineApplies(r, other); ok || why != "type other not expected" {
 		t.Errorf("expect: %v %q", ok, why)
 	}
 	beyond := maps2(answers)
 	beyond["beyond"] = Answer{Type: QuestionNoul, Probability: 0.12}
-	if ok, why := RoutineApplies(r, beyond); ok || why != "beyond expected no: 0.12" {
+	if ok, why := routineApplies(r, beyond); ok || why != "beyond expected no: 0.12" {
 		t.Errorf("noul expect no: %v %q", ok, why)
 	}
 	if SaidOf(r.Questions["beyond"], beyond["beyond"]) != "no" || SaidOf(r.Questions["type"], answers["type"]) != "bug" {

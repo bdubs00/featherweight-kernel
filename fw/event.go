@@ -521,7 +521,8 @@ type ChildReportedData struct {
 // records one per routine of the run with standing shadow or live, in the
 // order of the profile, after fw.run.started and before the first model
 // turn. Mode is RoutineShadow, RoutineLive, or RoutineCanary for a live
-// routine on a run that the canary share picked (CanaryPick). Applies is
+// routine on a run that the canary share picked, by a stable hash of the
+// run id. Applies is
 // true when every question passed its band and its expected answers.
 // Reason says why not, such as "type below act: 0.61", "beyond expected
 // no: 0.12", or "decider: <error>". Answers are the answers of the decider,

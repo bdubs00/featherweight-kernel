@@ -7,13 +7,15 @@ package routine
 
 import (
 	"encoding/json"
-	"unicode/utf8"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
 // maxShown bounds an input that a result shows.
 const maxShown = 200
+
+// bound cuts a text that a result shows (fw.ClipText).
+func bound(s string) string { return fw.ClipText(s, maxShown, "the text") }
 
 // record is what Replay and Propose read from the events of one run.
 type record struct {
@@ -93,16 +95,4 @@ func (r record) callsOf(tool string) []call {
 		}
 	}
 	return out
-}
-
-// bound cuts a text to maxShown bytes at a rune boundary.
-func bound(s string) string {
-	if len(s) <= maxShown {
-		return s
-	}
-	n := maxShown
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n] + "..."
 }

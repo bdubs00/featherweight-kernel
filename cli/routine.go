@@ -77,7 +77,7 @@ func cmdRoutineReplay(ctx context.Context, g *globals, args []string) int {
 	if p := fw.RoutineProblems(check, []fw.Routine{r}); len(p) > 0 {
 		return g.fail("routine replay", fmt.Errorf("%s: %s", *file, strings.Join(p, "; ")))
 	}
-	opts := routine.ReplayOptions{Context: ctx}
+	var opts routine.ReplayOptions
 	if *decide {
 		if len(r.Questions) == 0 {
 			return g.fail("routine replay", fmt.Errorf("%s: the routine has no question to decide", *file))
@@ -94,7 +94,7 @@ func cmdRoutineReplay(ctx context.Context, g *globals, args []string) int {
 	if err != nil {
 		return g.fail("routine replay", err)
 	}
-	res := routine.Replay(r, runs, opts)
+	res := routine.Replay(ctx, r, runs, opts)
 	if *asJSON {
 		enc := json.NewEncoder(g.stdout)
 		enc.SetIndent("", "  ")

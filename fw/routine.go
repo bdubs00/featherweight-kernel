@@ -32,16 +32,16 @@ const (
 	RoutineCanary = "canary"
 )
 
-// DefaultCanary is the canary share of a live routine that sets none.
-const DefaultCanary = 0.05
+// defaultCanary is the canary share of a live routine that sets none.
+const defaultCanary = 0.05
 
 // Bounds of the routines of a profile. The kernel refuses a profile past
 // them when it loads the profile.
 const (
 	MaxRoutines         = 64
-	MaxRoutineSteps     = 16
-	MaxRoutineQuestions = 16
-	MaxRoutineTemplate  = 4 << 10
+	maxRoutineSteps     = 16
+	maxRoutineQuestions = 16
+	maxRoutineTemplate  = 4 << 10
 )
 
 // Routine is a vetted sequence of tool calls that the kernel can run in
@@ -52,7 +52,7 @@ const (
 // workbench bumps on every change. Standing is RoutineShadow or
 // RoutineLive. Canary is the share of the runs of a live routine that the
 // agent handles anyway, with the routine in shadow; nil means
-// DefaultCanary. Decider names a key of Config.Deciders, and a routine
+// 0.05. Decider names a key of Config.Deciders, and a routine
 // with questions needs one. Questions are answered in one decider call per
 // run. Steps are tool calls in order, After the checks afterward, and
 // Answer the output of the run when the routine completes. Every input,
@@ -158,10 +158,10 @@ type RoutineCheck struct {
 }
 
 // CanaryShare returns the canary share of the routine: Canary, or
-// DefaultCanary when it is nil.
+// 0.05 when it is nil.
 func (r Routine) CanaryShare() float64 {
 	if r.Canary == nil {
-		return DefaultCanary
+		return defaultCanary
 	}
 	return *r.Canary
 }
@@ -169,10 +169,10 @@ func (r Routine) CanaryShare() float64 {
 // QuestionNames returns the names of the questions in sorted order.
 func (r Routine) QuestionNames() []string { return slices.Sorted(maps.Keys(r.Questions)) }
 
-// CanaryPick reports whether the canary share picks a run: a stable hash of
+// canaryPick reports whether the canary share picks a run: a stable hash of
 // the run id, as a number in [0, 1), is below share. The same run id and
 // share give the same pick on every process.
-func CanaryPick(runID string, share float64) bool {
+func canaryPick(runID string, share float64) bool {
 	if share <= 0 {
 		return false
 	}
@@ -214,8 +214,8 @@ func CheckRoutines(cfg *Config, rs []Routine) error {
 
 // RoutineProblems lists every problem of the routines of a profile, each
 // keyed from routines, such as "routines[0].steps[1].input: ...". It checks
-// the bounds (MaxRoutines, MaxRoutineSteps, MaxRoutineQuestions,
-// MaxRoutineTemplate), the names, the questions, the decider, the regular
+// the bounds (MaxRoutines routines, 16 steps, 16 checks, 16 questions, and
+// 4 KiB a text), the names, the questions, the decider, the regular
 // expressions, and that every template parses.
 func RoutineProblems(cfg *Config, rs []Routine) []string {
 	var p []string
@@ -250,14 +250,14 @@ func routineProblems(cfg *Config, key string, r Routine) []string {
 	if r.Canary != nil && (*r.Canary < 0 || *r.Canary > 1) {
 		p = append(p, fmt.Sprintf("%s.canary %g is not from 0 to 1", key, *r.Canary))
 	}
-	if len(r.Questions) > MaxRoutineQuestions {
-		p = append(p, fmt.Sprintf("%s.questions has %d questions; the limit is %d", key, len(r.Questions), MaxRoutineQuestions))
+	if len(r.Questions) > maxRoutineQuestions {
+		p = append(p, fmt.Sprintf("%s.questions has %d questions; the limit is %d", key, len(r.Questions), maxRoutineQuestions))
 	}
-	if len(r.Steps) > MaxRoutineSteps {
-		p = append(p, fmt.Sprintf("%s.steps has %d steps; the limit is %d", key, len(r.Steps), MaxRoutineSteps))
+	if len(r.Steps) > maxRoutineSteps {
+		p = append(p, fmt.Sprintf("%s.steps has %d steps; the limit is %d", key, len(r.Steps), maxRoutineSteps))
 	}
-	if len(r.After) > MaxRoutineSteps {
-		p = append(p, fmt.Sprintf("%s.after has %d checks; the limit is %d", key, len(r.After), MaxRoutineSteps))
+	if len(r.After) > maxRoutineSteps {
+		p = append(p, fmt.Sprintf("%s.after has %d checks; the limit is %d", key, len(r.After), maxRoutineSteps))
 	}
 	switch {
 	case len(r.Questions) > 0 && r.Decider == "" && cfg != nil:
@@ -436,8 +436,8 @@ func stringList(v any) ([]string, bool) {
 
 // templateProblems checks the size of one template and parses it.
 func templateProblems(key, text string) []string {
-	if len(text) > MaxRoutineTemplate {
-		return []string{fmt.Sprintf("%s is %d bytes; the limit is %d", key, len(text), MaxRoutineTemplate)}
+	if len(text) > maxRoutineTemplate {
+		return []string{fmt.Sprintf("%s is %d bytes; the limit is %d", key, len(text), maxRoutineTemplate)}
 	}
 	if _, err := parseRoutine(text); err != nil {
 		return []string{fmt.Sprintf("%s: %v", key, err)}
@@ -620,12 +620,12 @@ func SaidOf(q RoutineQuestion, a Answer) string {
 	return a.Choice
 }
 
-// RoutineApplies decides whether a routine applies from the answers of the
+// routineApplies decides whether a routine applies from the answers of the
 // decider, keyed by question name: every question passes its band and its
 // expected answers. It returns the reason when the routine does not apply,
 // one clause per question that fails, such as "type below act: 0.61" or
 // "beyond expected no: 0.12".
-func RoutineApplies(r Routine, answers map[string]Answer) (bool, string) {
+func routineApplies(r Routine, answers map[string]Answer) (bool, string) {
 	var why []string
 	for _, name := range r.QuestionNames() {
 		q := r.Questions[name]

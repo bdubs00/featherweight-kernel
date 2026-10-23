@@ -376,7 +376,7 @@ func TestRoutineCanaryPick(t *testing.T) {
 	var picked, passed string
 	for i := 0; picked == "" || passed == ""; i++ {
 		id := fmt.Sprintf("run-canary-%d", i)
-		if CanaryPick(id, 0.5) {
+		if canaryPick(id, 0.5) {
 			picked = id
 		} else {
 			passed = id

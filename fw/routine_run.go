@@ -195,9 +195,9 @@ func (r *routineCursor) block() string {
 			status := "no result"
 			switch {
 			case c.responded && c.isError:
-				status = "error: " + clipLine(c.result, 300)
+				status = "error: " + ClipText(c.result, 300, "the result")
 			case c.responded:
-				status = "ok: " + clipLine(c.result, 300)
+				status = "ok: " + ClipText(c.result, 300, "the result")
 			}
 			fmt.Fprintf(&b, "\n%d. %s, %s", i+1, c.tool, status)
 		}
@@ -208,7 +208,7 @@ func (r *routineCursor) block() string {
 	case r.live != "" && !r.applied:
 		b.WriteString("\nIt stopped: " + routineInterrupted + ".")
 	case r.ok:
-		b.WriteString("\nIts answer: " + clipLine(r.answer, 1000))
+		b.WriteString("\nIts answer: " + ClipText(r.answer, 1000, "the answer"))
 	}
 	return ContextBlock(routineContext, b.String())
 }
@@ -227,18 +227,6 @@ func answersText(answers map[string]Answer) string {
 		parts = append(parts, fmt.Sprintf("%s: %s with probability %.2f", name, a.Choice, a.Probability))
 	}
 	return strings.Join(parts, "; ")
-}
-
-// clipLine cuts a text to n bytes at a rune boundary, on one line.
-func clipLine(s string, n int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= n {
-		return s
-	}
-	for n > 0 && n < len(s) && s[n]&0xC0 == 0x80 {
-		n--
-	}
-	return s[:n] + "..."
 }
 
 // routineDue reports whether the runner acts now: the run started, did not
@@ -381,7 +369,7 @@ func (rr *routineRun) decide(ctx context.Context, routines []Routine, input stri
 	members := map[string][]int{}
 	for i, r := range routines {
 		mode := r.Standing
-		if r.Standing == RoutineLive && CanaryPick(rr.rs.id, r.CanaryShare()) {
+		if r.Standing == RoutineLive && canaryPick(rr.rs.id, r.CanaryShare()) {
 			mode = RoutineCanary
 		}
 		out[i] = routineVerdict{
@@ -425,7 +413,7 @@ func (rr *routineRun) decide(ctx context.Context, routines []Routine, input stri
 				}
 			}
 			d.Answers = own
-			d.Applies, d.Reason = RoutineApplies(r, own)
+			d.Applies, d.Reason = routineApplies(r, own)
 			for name, q := range r.Questions {
 				if a, ok := own[name]; ok {
 					out[i].said[name] = SaidOf(q, a)
@@ -462,7 +450,7 @@ func (rr *routineRun) ask(ctx context.Context, decider, routines, input string, 
 		}
 		text := TextOf(res.Content)
 		if res.IsError {
-			return nil, "", 0, clipLine(strings.TrimPrefix(text, "decide: "), 300), nil
+			return nil, "", 0, ClipText(strings.TrimPrefix(text, "decide: "), 300, "the error"), nil
 		}
 		var d DecideResult
 		if err := json.Unmarshal([]byte(text), &d); err != nil {
@@ -507,7 +495,7 @@ func (rr *routineRun) apply(ctx context.Context, r Routine, q RunQueuedData, sai
 		case why != "":
 			return "", label + ": " + why, nil
 		case res.IsError:
-			return "", label + ": error: " + clipLine(TextOf(res.Content), 200), nil
+			return "", label + ": error: " + ClipText(TextOf(res.Content), 200, "the result"), nil
 		}
 		return TextOf(res.Content), "", nil
 	}

@@ -75,7 +75,7 @@ type DecideResult struct {
 // token, resolved through Secrets as a provider resolves its key; empty
 // sends no token. Model is the model name that the client sends. It has no
 // default, because a decider costs money or a GPU. Timeout bounds one call;
-// zero means DefaultDeciderTimeout.
+// zero means 30 seconds.
 type DeciderConfig struct {
 	BaseURL   string        `yaml:"baseUrl" json:"baseUrl"`
 	APIKeyEnv string        `yaml:"apiKeyEnv,omitempty" json:"apiKeyEnv,omitempty"`
@@ -83,8 +83,8 @@ type DeciderConfig struct {
 	Timeout   time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
-// DefaultDeciderTimeout bounds a call to a decider that sets no timeout.
-const DefaultDeciderTimeout = 30 * time.Second
+// defaultDeciderTimeout bounds a call to a decider that sets no timeout.
+const defaultDeciderTimeout = 30 * time.Second
 
 // maxDeciderQuestions is the most questions of one call to a decider. The
 // runner splits a larger set into several calls of the same decider.
@@ -137,7 +137,7 @@ func NewDecider(ctx context.Context, cfg *Config, secrets Secrets, name string) 
 		}
 		token = strings.TrimSpace(v)
 	}
-	return NewSystemOne(dc, token), nil
+	return newSystemOne(dc, token), nil
 }
 
 // maxDeciderResponse bounds the body of a response of a System One server.
@@ -153,13 +153,13 @@ type systemOne struct {
 	client *http.Client
 }
 
-// NewSystemOne returns the System One client of a decider. token is the
+// newSystemOne returns the System One client of a decider. token is the
 // bearer token, or "" for none. The client sends the token only in the
 // Authorization header, and never logs the token or the state.
-func NewSystemOne(cfg DeciderConfig, token string) Decider {
+func newSystemOne(cfg DeciderConfig, token string) Decider {
 	timeout := cfg.Timeout
 	if timeout <= 0 {
-		timeout = DefaultDeciderTimeout
+		timeout = defaultDeciderTimeout
 	}
 	return &systemOne{
 		url:    strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/") + "/v1/systemone",
@@ -207,7 +207,7 @@ func (s *systemOne) Decide(ctx context.Context, state string, questions map[stri
 	if resp.StatusCode/100 != 2 {
 		return DecideResult{}, fmt.Errorf("fw: decider: the server answered %d: %s", resp.StatusCode, serverMessage(raw))
 	}
-	out, err := ParseSystemOne(raw, questions)
+	out, err := parseSystemOne(raw, questions)
 	if err != nil {
 		return DecideResult{}, err
 	}
@@ -235,10 +235,10 @@ func serverMessage(raw []byte) string {
 			msg = s
 		}
 	}
-	return clipText(msg, 300, "the message")
+	return ClipText(msg, 300, "the message")
 }
 
-// ParseSystemOne reads the response body of a System One server for the
+// parseSystemOne reads the response body of a System One server for the
 // questions that the call asked, in both spellings of the answers. Clef
 // and Workers AI send a choice as choice, probabilities, and confidence, a
 // noul as noul, and a score as score, legend, and probabilities keyed by
@@ -246,7 +246,7 @@ func serverMessage(raw []byte) string {
 // probability in place of noul, and a score as answer and probabilities
 // keyed by level. A missing answer or a field of another shape is an error
 // that names the field.
-func ParseSystemOne(raw []byte, questions map[string]Question) (DecideResult, error) {
+func parseSystemOne(raw []byte, questions map[string]Question) (DecideResult, error) {
 	var w struct {
 		Model   string                     `json:"model"`
 		Answers map[string]json.RawMessage `json:"answers"`

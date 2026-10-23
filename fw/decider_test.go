@@ -44,7 +44,7 @@ func TestSystemOneClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv, req, body := systemOneServer(t, 200, recorded)
-	d := NewSystemOne(DeciderConfig{BaseURL: srv.URL + "/", Model: "clef"}, "s3cret-token-value")
+	d := newSystemOne(DeciderConfig{BaseURL: srv.URL + "/", Model: "clef"}, "s3cret-token-value")
 	res, err := d.Decide(context.Background(), "Our checkout started returning errors and orders are blocked.", readmeQuestions)
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +77,7 @@ func TestSystemOneClient(t *testing.T) {
 	}
 
 	// No token sends no Authorization header.
-	none := NewSystemOne(DeciderConfig{BaseURL: srv.URL, Model: "clef"}, "")
+	none := newSystemOne(DeciderConfig{BaseURL: srv.URL, Model: "clef"}, "")
 	if _, err := none.Decide(context.Background(), "x", readmeQuestions); err != nil || req.Header.Get("Authorization") != "" {
 		t.Errorf("without a token: %v, %q", err, req.Header.Get("Authorization"))
 	}
@@ -102,7 +102,7 @@ func TestSystemOneErrors(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			srv, _, _ := systemOneServer(t, c.status, []byte(c.body))
-			_, err := NewSystemOne(DeciderConfig{BaseURL: srv.URL, Model: "clef"}, "tok-12345678").Decide(context.Background(), "x", q)
+			_, err := newSystemOne(DeciderConfig{BaseURL: srv.URL, Model: "clef"}, "tok-12345678").Decide(context.Background(), "x", q)
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("error = %v; want %q", err, c.want)
 			}
@@ -113,7 +113,7 @@ func TestSystemOneErrors(t *testing.T) {
 	}
 	// A choice names its probability.
 	choice := map[string]Question{"team": {Type: QuestionChoice, Criteria: map[string]any{"a": "A", "b": "B"}}}
-	if _, err := ParseSystemOne([]byte(`{"answers": {"team": {"type": "choice", "choice": "c", "probabilities": {"a": 0.5, "b": 0.5}}}}`), choice); err == nil || !strings.Contains(err.Error(), `no value for "c"`) {
+	if _, err := parseSystemOne([]byte(`{"answers": {"team": {"type": "choice", "choice": "c", "probabilities": {"a": 0.5, "b": 0.5}}}}`), choice); err == nil || !strings.Contains(err.Error(), `no value for "c"`) {
 		t.Errorf("choice: %v", err)
 	}
 	// The timeout bounds a call.
@@ -125,7 +125,7 @@ func TestSystemOneErrors(t *testing.T) {
 	}))
 	defer slow.Close()
 	start := time.Now()
-	if _, err := NewSystemOne(DeciderConfig{BaseURL: slow.URL, Model: "clef", Timeout: 50 * time.Millisecond}, "").Decide(context.Background(), "x", q); err == nil || time.Since(start) > 400*time.Millisecond {
+	if _, err := newSystemOne(DeciderConfig{BaseURL: slow.URL, Model: "clef", Timeout: 50 * time.Millisecond}, "").Decide(context.Background(), "x", q); err == nil || time.Since(start) > 400*time.Millisecond {
 		t.Errorf("timeout: %v after %s", err, time.Since(start))
 	}
 }
@@ -199,7 +199,7 @@ func TestSystemOneSpellings(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			res, err := ParseSystemOne([]byte(c.body), qs)
+			res, err := parseSystemOne([]byte(c.body), qs)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -225,7 +225,7 @@ func TestSystemOneNumericLevels(t *testing.T) {
 		"clef":     `{"answers": {"severity": {"type": "score", "score": 1.6, "legend": {"0": "1", "1": "2", "2": "3"}, "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}}}`,
 		"places":   `{"answers": {"severity": {"type": "score", "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}}}`,
 	} {
-		res, err := ParseSystemOne([]byte(body), qs)
+		res, err := parseSystemOne([]byte(body), qs)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
