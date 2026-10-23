@@ -529,3 +529,86 @@ func TestCutCheck(t *testing.T) {
 		t.Fatalf("short = %v, %+v", cut, res)
 	}
 }
+
+// A run request with a check comes over the bus intake as the front of a
+// fleet sends it, with the timeout as a duration string and an empty
+// input, and starts a check run.
+func TestCheckRunFromTheIntake(t *testing.T) {
+	ctx := testCtx(t)
+	const queue = "fw.jobs.check"
+	qb := newQueueBus(queue)
+	s := newScript()
+	q := &fakeQueue{}
+	a := newTestAgent(t, s.Model(), WithConfig(intakeConfig(queue)), WithBus(qb), WithTools(q.tool("queue.read", TextResult(`{"records": []}`), nil)))
+	body := json.RawMessage(`{"agent": "default", "input": "", "metadata": {"fw.title": "duty: queue"},
+		"check": {"steps": [{"tool": "queue.read", "input": {"query": "open"}}], "timeout": "5s", "maxBytes": 4096}}`)
+	e := MustEvent("", EvRunRequest, body)
+	if err := qb.Publish(ctx, queue, e); err != nil {
+		t.Fatal(err)
+	}
+	var r *Run
+	waitUntil(t, "the check run", func() bool {
+		runs, _ := a.List(ctx)
+		if len(runs) == 1 && runs[0].State.Terminal() {
+			r = runs[0]
+		}
+		return r != nil
+	})
+	mustState(t, r, nil, StateCompleted)
+	if r.Output != `{"results":[{"tool":"queue.read","output":{"records":[]},"isError":false}]}` || len(s.requests()) != 0 {
+		t.Fatalf("output %s, model calls %d", r.Output, len(s.requests()))
+	}
+	if r.Kind() != RunKindCheck || r.Metadata[MetaIntakeQueue] != queue || r.Origin != OriginBus || r.Title != "duty: queue" {
+		t.Fatalf("run = %+v", r)
+	}
+	var queued RunQueuedData
+	firstOf(t, ledgerEvents(t, a.Ledger(), r.ID), EvRunQueued, &queued)
+	if c := queued.Check; c == nil || c.Timeout != 5*time.Second || c.MaxBytes != 4096 || !sameJSON(string(c.Steps[0].Input), `{"query":"open"}`) {
+		t.Fatalf("queued check = %+v", queued.Check)
+	}
+	if !qb.isAcked(e.ID) {
+		t.Fatal("the job is not acknowledged")
+	}
+}
+
+// A failed check run of the intake goes on the queue again as a check
+// run: the retry carries the check, and the kernel sets the kind again.
+// The dead-letter record holds the check too.
+func TestCheckRunIntakeRetry(t *testing.T) {
+	ctx := testCtx(t)
+	const queue = "fw.jobs.check-retry"
+	qb := newQueueBus(queue)
+	dead := deadRecords(t, qb, queue)
+	cfg := intakeConfig(queue)
+	cfg.Bus.IntakeRetries = 1
+	cfg.Agents = map[string]AgentProfile{"default": {Policy: &Rules{Deny: []string{"queue.read"}}}}
+	q := &fakeQueue{}
+	a := newTestAgent(t, newScript().Model(), WithConfig(cfg), WithBus(qb), WithTools(q.tool("queue.read", TextResult("{}"), nil)))
+	e := job(t, RunRequest{Check: &Check{Steps: []CheckStep{step("queue.read", "")}, Timeout: 10 * time.Second}})
+	if err := qb.Publish(ctx, queue, e); err != nil {
+		t.Fatal(err)
+	}
+	_, d := nextRecord(t, dead)
+	runs, _ := a.List(ctx)
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	for _, r := range runs {
+		if r.State != StateFailed || r.Kind() != RunKindCheck || !strings.Contains(r.Error, "denied by policy") {
+			t.Fatalf("run = %+v", r)
+		}
+	}
+	if runs[0].Metadata[MetaIntakeRetryOf] != runs[1].ID {
+		t.Fatalf("the second run is not the retry of the first: %v", runs[0].Metadata)
+	}
+	var req RunRequest
+	if err := json.Unmarshal(d.Request, &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Check == nil || req.Check.Timeout != 10*time.Second || req.Check.Steps[0].Tool != "queue.read" || req.Metadata[MetaKind] != "" {
+		t.Fatalf("record request = %s", d.Request)
+	}
+	if len(q.calls()) != 0 {
+		t.Fatalf("calls = %q", q.calls())
+	}
+}

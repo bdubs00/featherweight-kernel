@@ -617,7 +617,8 @@ func (a *Agent) markJob(rs *runState, outcome string) {
 
 // requestOf returns the request of a run as fw.run.queued recorded it,
 // without the metadata that the kernel set for itself: the idempotency key
-// goes back to its field, and the queue goes. The attempt and the failed
+// goes back to its field, and the queue and the kind go. The check stays,
+// so the kernel sets the kind of a retry again. The attempt and the failed
 // run stay, so a record shows the history of the job. The files are
 // references.
 func requestOf(q RunQueuedData) RunRequest {
@@ -642,6 +643,7 @@ func requestOf(q RunQueuedData) RunRequest {
 		PrincipalKind:  q.PrincipalKind,
 		IdempotencyKey: key,
 		Files:          q.Files,
+		Check:          q.Check,
 	}
 }
 
