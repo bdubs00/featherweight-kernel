@@ -103,6 +103,7 @@ func (b *cursorBuilder) snapshot() *cursor {
 func (b *cursorBuilder) apply(e Event) {
 	c := &b.c
 	c.lastSeq = e.Seq
+	c.applyRoutine(e)
 	switch e.Type {
 	case EvRunQueued:
 		_ = e.Decode(&c.queued)

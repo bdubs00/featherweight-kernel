@@ -65,3 +65,64 @@ func TestDecide(t *testing.T) {
 		t.Error("description")
 	}
 }
+
+// The routine runner asks the decider through this tool, so a shadow
+// routine records the answers of the server in fw.routine.decided.
+func TestDecideServesTheRoutineRunner(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Questions map[string]json.RawMessage `json:"questions"`
+		}
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &in)
+		answers := map[string]any{}
+		for id := range in.Questions {
+			answers[id] = map[string]any{"type": "noul", "noul": 0.8963}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"model": "clef-exl3-4.0bpw", "answers": answers, "usage": map[string]int{"input_tokens": 303}})
+	}))
+	defer srv.Close()
+	cfg := fw.DefaultConfig()
+	cfg.Model = "anthropic/claude-opus-5-5"
+	cfg.Deciders = map[string]fw.DeciderConfig{"clef": {BaseURL: srv.URL, Model: "clef"}}
+	decide, err := fw.NewBuiltinTool("decide", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routine := fw.Routine{Name: "outage", Version: 1, Standing: fw.RoutineShadow, Decider: "clef",
+		Questions: map[string]fw.RoutineQuestion{"down": {Question: fw.Question{Type: fw.QuestionNoul, Instructions: "Is a service down?"}, Act: 0.8, Expect: fw.Expect{"yes"},
+			Observe: &fw.Observe{Answer: `(?i)\bdown\b`}}},
+		Answer: "down"}
+	model := fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
+		return &fw.Response{Content: []fw.Block{fw.Text("The checkout is down.")}, StopReason: fw.StopEndTurn}, nil
+	}}
+	a, err := fw.New(fw.WithoutDefaults(), fw.WithConfig(cfg), fw.WithLedger(fw.NewMemLedger()), fw.WithBus(fw.NewMemBus()), fw.WithAuthn(fw.NoAuthn{}),
+		fw.WithModel(model), fw.WithTools(decide), fw.WithProfile(fw.AgentProfile{Name: "ops", Routines: []fw.Routine{routine}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close(context.Background()) })
+	r, err := a.Run(context.Background(), "Our checkout started returning errors.", fw.AsAgent("ops"))
+	if err != nil || r.State != fw.StateCompleted {
+		t.Fatalf("run = %+v, %v", r, err)
+	}
+	var decided fw.RoutineDecidedData
+	var compared fw.RoutineComparedData
+	for e, err := range a.Ledger().Read(context.Background(), r.ID, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch e.Type {
+		case fw.EvRoutineDecided:
+			_ = e.Decode(&decided)
+		case fw.EvRoutineCompared:
+			_ = e.Decode(&compared)
+		}
+	}
+	if !decided.Applies || decided.Model != "clef-exl3-4.0bpw" || decided.Answers["down"].Probability != 0.8963 {
+		t.Fatalf("decided = %+v", decided)
+	}
+	if compared.Said != "yes" || compared.Observed != "yes" || !compared.Agree || compared.Mode != fw.RoutineShadow {
+		t.Fatalf("compared = %+v", compared)
+	}
+}

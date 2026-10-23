@@ -111,6 +111,8 @@ type cursor struct {
 
 	loop       loopSuffix // exact repeat counts with a bounded fingerprint suffix
 	priorCount int        // repeat count before the latest response
+
+	routine routineCursor // the routine runner of the run (routine_run.go)
 }
 
 // analyze is the cold full-history reference. The turn loop uses the
@@ -142,6 +144,7 @@ func analyze(events []Event) *cursor {
 	var open []string
 	for i, e := range events {
 		c.lastSeq = e.Seq
+		c.applyRoutine(e)
 		switch e.Type {
 		case EvRunQueued:
 			_ = e.Decode(&c.queued)
@@ -422,6 +425,13 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 			continue
 		case !c.started:
 			err = a.stepStart(ctx, rs, c)
+		case a.routineDue(rs, c):
+			// The routine runner acts once, before the first model turn.
+			err = a.stepRoutine(ctx, rs, c, n)
+		case c.routine.open():
+			err = a.closeRoutine(ctx, rs, c)
+		case routineFinishDue(c):
+			err = a.finishRoutine(ctx, rs, c, n)
 		case c.rep != nil:
 			// The run reached a limit and makes its final report.
 			err = a.stepReport(ctx, rs, c, n)
@@ -805,7 +815,11 @@ func (a *Agent) endTurn(ctx context.Context, rs *runState, c *cursor, n int) err
 	if fresh {
 		return nil
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: TextOf(c.resp.Content)})
+	output := TextOf(c.resp.Content)
+	if err := a.compareLocked(ctx, rs, output); err != nil {
+		return err
+	}
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: output})
 	return err
 }
 
