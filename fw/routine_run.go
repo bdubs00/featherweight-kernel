@@ -42,10 +42,15 @@ type routineCursor struct {
 	reason  string // why it stopped
 	done    bool   // a fw.run.finished after fw.routine.applied
 	base    string // the context of fw.run.started
-	// decided holds the decisions in mode live, and calls the calls of the
-	// routine that ran, for the context block. Both only grow; a result
-	// replaces calls with a copy, so a snapshot of the cursor keeps its own.
+	// compared is true when the run holds a comparison of its own.
+	compared bool
+	// decided holds every decision of the run, for the context block and
+	// the comparison, and kept counts those at its start that a branch
+	// kept from its source. calls holds the calls of the routine that ran.
+	// Both lists only grow; a result replaces calls with a copy, so a
+	// snapshot of the cursor keeps its own.
 	decided []RoutineDecidedData
+	kept    int
 	calls   []routineCall
 }
 
@@ -80,10 +85,13 @@ func (c *cursor) applyRoutine(e Event) {
 			return
 		}
 		r.seen = true
+		r.decided = append(r.decided, d)
+		if e.Seq <= c.queued.Kept {
+			r.kept++
+		}
 		if d.Mode != RoutineLive {
 			return
 		}
-		r.decided = append(r.decided, d)
 		if d.Applies && r.live == "" {
 			r.live, r.version = d.Routine, d.Version
 		}
@@ -123,6 +131,9 @@ func (c *cursor) applyRoutine(e Event) {
 			return
 		}
 		r.applied, r.ok, r.answer, r.reason = true, d.OK, d.Answer, d.Reason
+	case EvRoutineCompared:
+		r.compared = r.compared || e.Seq > c.queued.Kept
+		return
 	case EvRunFinished:
 		if !r.applied || r.done {
 			return
@@ -152,7 +163,13 @@ func joinContext(base, block string) string {
 // decision in mode live gets none, because the model of a rehearsal or a
 // canary run must not see the answers of the routine.
 func (r *routineCursor) block() string {
-	if len(r.decided) == 0 {
+	var live []RoutineDecidedData
+	for _, d := range r.decided {
+		if d.Mode == RoutineLive {
+			live = append(live, d)
+		}
+	}
+	if len(live) == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -162,7 +179,7 @@ func (r *routineCursor) block() string {
 	default:
 		b.WriteString("A routine of this agent looked at this run before you and did not complete it, so the run is yours. What it decided and did:")
 	}
-	for _, d := range r.decided {
+	for _, d := range live {
 		state := "applies"
 		if !d.Applies {
 			state = "does not apply: " + d.Reason
@@ -605,13 +622,12 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 // live without completing, at the end of a run that the model completed.
 // It runs once per run. The caller holds rs.emitMu and appends
 // fw.run.finished next.
-func (a *Agent) compareLocked(ctx context.Context, rs *runState, output string) error {
-	q := rs.queuedData()
-	routines := a.profileOf(q).Routines
-	if len(routines) == 0 {
+func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, output string) error {
+	routines := a.profileOf(c.queued).Routines
+	if len(routines) == 0 || !c.answered {
 		return nil
 	}
-	for _, d := range RoutineComparisons(routines, rs.events, q.Kept, output) {
+	for _, d := range routineComparisons(routines, c.routine, rs.events, output) {
 		if _, err := a.emitLocked(ctx, rs, EvRoutineCompared, d); err != nil {
 			return err
 		}
@@ -619,54 +635,28 @@ func (a *Agent) compareLocked(ctx context.Context, rs *runState, output string) 
 	return nil
 }
 
-// RoutineComparisons returns the comparisons of a run: for each routine
-// that the events decided in mode shadow or canary, or in mode live
-// without completing, and each of its questions with observe, what the
-// routine said against what the agent did. It returns none when the model
-// made no call or when the events hold a comparison already. A branch
-// skips the events that it kept from its source (kept), so it never
-// compares the decisions of its source again. output is the output text
-// of the run.
-func RoutineComparisons(routines []Routine, events []Event, kept uint64, output string) []RoutineComparedData {
-	var decided []RoutineDecidedData
-	completed := map[string]bool{}
-	acted := false
-	for _, e := range events {
-		if e.Seq <= kept {
-			continue
-		}
-		switch e.Type {
-		case EvRoutineCompared:
-			return nil
-		case EvModelResponded:
-			acted = true
-		case EvRoutineDecided:
-			var d RoutineDecidedData
-			if e.Decode(&d) == nil {
-				decided = append(decided, d)
-			}
-		case EvRoutineApplied:
-			var d RoutineAppliedData
-			if e.Decode(&d) == nil && d.OK {
-				completed[d.Routine] = true
-			}
-		}
-	}
-	if !acted {
+// routineComparisons returns the comparisons of a run from its cursor: for
+// each routine that the run decided in mode shadow or canary, or in mode
+// live without completing, and each of its questions with observe, what
+// the routine said against what the agent did. A run compares once, and a
+// branch never compares the decisions that it kept from its source.
+// output is the output text of the run.
+func routineComparisons(routines []Routine, r routineCursor, events []Event, output string) []RoutineComparedData {
+	if r.compared {
 		return nil
 	}
 	var out []RoutineComparedData
-	for _, d := range decided {
-		if d.Mode == RoutineLive && completed[d.Routine] {
+	for _, d := range r.decided[r.kept:] {
+		if d.Mode == RoutineLive && r.ok && d.Routine == r.live {
 			continue
 		}
-		i := slices.IndexFunc(routines, func(r Routine) bool { return r.Name == d.Routine && r.Version == d.Version })
+		i := slices.IndexFunc(routines, func(x Routine) bool { return x.Name == d.Routine && x.Version == d.Version })
 		if i < 0 {
 			continue
 		}
-		r := routines[i]
-		for _, name := range r.QuestionNames() {
-			q := r.Questions[name]
+		rt := routines[i]
+		for _, name := range rt.QuestionNames() {
+			q := rt.Questions[name]
 			ans, ok := d.Answers[name]
 			if !ok {
 				continue
@@ -677,7 +667,7 @@ func RoutineComparisons(routines []Routine, events []Event, kept uint64, output 
 			}
 			said := SaidOf(q, ans)
 			out = append(out, RoutineComparedData{
-				Routine: r.Name, Version: r.Version, Mode: d.Mode, Question: name,
+				Routine: rt.Name, Version: rt.Version, Mode: d.Mode, Question: name,
 				Said: said, Observed: observed,
 				Agree: strings.EqualFold(strings.TrimSpace(said), strings.TrimSpace(observed)),
 			})

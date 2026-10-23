@@ -818,7 +818,7 @@ func (a *Agent) endTurn(ctx context.Context, rs *runState, c *cursor, n int) err
 		return nil
 	}
 	output := TextOf(c.resp.Content)
-	if err := a.compareLocked(ctx, rs, output); err != nil {
+	if err := a.compareLocked(ctx, rs, c, output); err != nil {
 		return err
 	}
 	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: output})
