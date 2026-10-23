@@ -2,6 +2,7 @@ package fw
 
 import (
 	"encoding/json"
+	"maps"
 	"errors"
 	"os"
 	"strings"
@@ -252,17 +253,17 @@ func TestRoutineApplies(t *testing.T) {
 	if ok, why := routineApplies(r, answers); !ok {
 		t.Fatalf("applies: %s", why)
 	}
-	low := maps2(answers)
+	low := maps.Clone(answers)
 	low["type"] = Answer{Type: QuestionChoice, Choice: "bug", Probability: 0.61, Probabilities: map[string]float64{"bug": 0.61}}
 	if ok, why := routineApplies(r, low); ok || why != "type below act: 0.61" {
 		t.Errorf("below act: %v %q", ok, why)
 	}
-	other := maps2(answers)
+	other := maps.Clone(answers)
 	other["type"] = Answer{Type: QuestionChoice, Choice: "other", Probability: 0.97}
 	if ok, why := routineApplies(r, other); ok || why != "type other not expected" {
 		t.Errorf("expect: %v %q", ok, why)
 	}
-	beyond := maps2(answers)
+	beyond := maps.Clone(answers)
 	beyond["beyond"] = Answer{Type: QuestionNoul, Probability: 0.12}
 	if ok, why := routineApplies(r, beyond); ok || why != "beyond expected no: 0.12" {
 		t.Errorf("noul expect no: %v %q", ok, why)
@@ -272,13 +273,6 @@ func TestRoutineApplies(t *testing.T) {
 	}
 }
 
-func maps2(m map[string]Answer) map[string]Answer {
-	out := map[string]Answer{}
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
 
 func TestObserveAnswer(t *testing.T) {
 	q := RoutineQuestion{Question: Question{Type: QuestionChoice}, Observe: &Observe{Answer: `"type": "type/([a-z-]+)"`}}

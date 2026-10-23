@@ -249,16 +249,6 @@ func TestRoutineFallsThrough(t *testing.T) {
 			m["type"] = Answer{Choice: "bug", Probability: 0.61, Probabilities: map[string]float64{"bug": 0.61}}
 			return m
 		}, reason: "type below act: 0.61"},
-		{name: "not expected", answers: func() map[string]Answer {
-			m := confident()
-			m["type"] = Answer{Choice: "other", Probability: 0.97}
-			return m
-		}, reason: "type other not expected"},
-		{name: "beyond", answers: func() map[string]Answer {
-			m := confident()
-			m["beyond"] = Answer{Probability: 0.12}
-			return m
-		}, reason: "beyond expected no: 0.12"},
 		{name: "step failure", answers: confident, failOn: "add_comment", applied: true, failed: 3, steps: 3,
 			reason: "step 3 gitea.issue_write: error: gitea: 503 Service Unavailable"},
 		{name: "check failure", answers: confident, read: `{"labels": "type/bug,status/new"}`, applied: true, failed: 4, steps: 4,
@@ -718,4 +708,87 @@ func TestRoutineSkipsReplaysAndBranches(t *testing.T) {
 			t.Fatalf("a branch compared the decision of its source: %v", eventTypes(evs))
 		}
 	})
+}
+
+// A message that arrives while a live routine works goes to the model,
+// which starts with the block, also after a routine that completed.
+func TestRoutineFollowUpDuringTheRoutine(t *testing.T) {
+	ctx := testCtx(t)
+	s := newScript(endTurn("answered the follow-up"))
+	h := &helpdesk{}
+	started, release := make(chan struct{}), make(chan struct{})
+	slow := NewTool(ToolSpec{Name: "gitea.label_read", ReadOnly: true}, func(context.Context, json.RawMessage) (ToolResult, error) {
+		close(started)
+		<-release
+		return TextResult(`[{"id":11,"name":"type/bug"},{"id":22,"name":"status/triaged"}]`), nil
+	})
+	tools := append([]Tool{slow}, h.tools()[1:]...)
+	a := newTestAgent(t, s.Model(), withDeciders, WithDecider("clef", &fakeDecider{answers: confident()}), WithTools(tools...),
+		WithProfile(AgentProfile{Name: "triage", Routines: []Routine{ackRoutine(RoutineLive)}}))
+	r, err := a.Start(ctx, "Ticket #42: the printer is broken", AsAgent("triage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := a.Send(ctx, r.ID, Message{Role: RoleUser, Content: []Block{Text("Is it fixed?")}}, OriginCLI); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	r = waitTerminal(t, a, r.ID)
+	mustState(t, r, nil, StateCompleted)
+	if r.Output != "answered the follow-up" || len(s.requests()) != 1 {
+		t.Fatalf("output %q, model calls %d", r.Output, len(s.requests()))
+	}
+	evs := ledgerEvents(t, a.Ledger(), r.ID)
+	var app RoutineAppliedData
+	firstOf(t, evs, EvRoutineApplied, &app)
+	if !app.OK || countType(evs, EvRunFinished) != 1 {
+		t.Fatalf("applied = %+v, events %v", app, eventTypes(evs))
+	}
+	if first := firstMessage(s.requests()[0]); !strings.Contains(first, "a message came after it") || !strings.Contains(first, "Its answer: TRIAGE") {
+		t.Fatalf("first message =\n%s", first)
+	}
+	checkCursorPrefixes(t, evs)
+}
+
+// A restart between fw.routine.applied and fw.run.finished finishes the
+// run with the answer of the routine, and no model call.
+func TestRoutineRestartAfterApplied(t *testing.T) {
+	l := NewMemLedger()
+	id := "run-routine-applied"
+	routine := ackRoutine(RoutineLive)
+	seed(t, l, id,
+		MustEvent(id, EvRunQueued, RunQueuedData{Agent: "triage", Input: "Ticket #42", Origin: OriginCLI,
+			Resolved: &ResolvedProfile{Model: "anthropic/claude-opus-5-5", Routines: []Routine{routine}}}),
+		MustEvent(id, EvRunStarted, RunStartedData{Model: "anthropic/claude-opus-5-5"}),
+		MustEvent(id, EvRoutineDecided, RoutineDecidedData{Routine: "ack", Version: 2, Standing: RoutineLive, Mode: RoutineLive, Applies: true}),
+		MustEvent(id, EvRoutineApplied, RoutineAppliedData{Routine: "ack", Version: 2, OK: true, Steps: 4, Answer: "TRIAGE done"}),
+	)
+	s := newScript()
+	a := routineAgent(t, s.Model(), &fakeDecider{answers: confident()}, &helpdesk{}, []Routine{routine}, WithLedger(l))
+	r := waitTerminal(t, a, id)
+	mustState(t, r, nil, StateCompleted)
+	if r.Output != "TRIAGE done" || len(s.requests()) != 0 {
+		t.Fatalf("output %q, model calls %d", r.Output, len(s.requests()))
+	}
+}
+
+// The calls of the runner count against budget.maxToolCalls: a routine
+// that reaches the limit stops at the step, and the run stops at its
+// limit as any run does.
+func TestRoutineReachesMaxToolCalls(t *testing.T) {
+	ctx := testCtx(t)
+	s := newScript(endTurn("handled"))
+	h := &helpdesk{}
+	a := routineAgent(t, s.Model(), &fakeDecider{answers: confident()}, h, []Routine{ackRoutine(RoutineLive)})
+	r, err := a.Run(ctx, "Ticket #42: the printer is broken", AsAgent("triage"), WithRunBudget(Budget{MaxToolCalls: 2}))
+	mustState(t, r, err, StateFailed)
+	if !strings.Contains(r.Error, "maxToolCalls") || r.Usage.ToolCalls != 2 {
+		t.Fatalf("run = %+v", r)
+	}
+	var app RoutineAppliedData
+	firstOf(t, ledgerEvents(t, a.Ledger(), r.ID), EvRoutineApplied, &app)
+	if app.OK || app.FailedStep != 2 || !strings.Contains(app.Reason, "budget.maxToolCalls") || len(h.writes) != 0 {
+		t.Fatalf("applied = %+v, writes %v", app, h.writes)
+	}
 }

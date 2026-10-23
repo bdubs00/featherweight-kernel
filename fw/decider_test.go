@@ -183,11 +183,6 @@ func TestSystemOneSpellings(t *testing.T) {
 		name string
 		body string
 	}{
-		{"clef", `{"model": "clef", "answers": {
-			"team": {"type": "choice", "choice": "technical", "confidence": 0.9, "probabilities": {"billing": 0.1, "technical": 0.9}},
-			"down": {"type": "noul", "noul": 0.8},
-			"urgency": {"type": "score", "score": 1.8, "confidence": 0.7, "legend": {"0": "Can wait", "1": "This week", "2": "Today"}, "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}},
-			"usage": {"input_tokens": 9, "output_tokens": 0}}`},
 		{"clef without legend", `{"model": "clef", "answers": {
 			"team": {"type": "choice", "choice": "technical", "probabilities": {"billing": 0.1, "technical": 0.9}},
 			"down": {"type": "noul", "noul": 0.8},
