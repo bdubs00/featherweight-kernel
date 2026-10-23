@@ -172,6 +172,9 @@ type RunQueuedData struct {
 	// Outcome is the outcome of the run that the kernel resolved when it
 	// queued the run, or nil for a run without a rubric (see Outcome).
 	Outcome *Outcome `json:"outcome,omitempty"`
+	// Check is the check of a check run, with its defaults (Check.Resolved),
+	// or nil for a run that calls a model.
+	Check *Check `json:"check,omitempty"`
 }
 
 // ResolvedProfile is the configuration of a run that the kernel resolves

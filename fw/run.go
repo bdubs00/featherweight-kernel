@@ -478,6 +478,12 @@ type RunActivity struct {
 // The kernel keeps both in fw.run.queued, so a resume and a replay see them.
 // Outcome asks for a grade of the answer of the run, and replaces the
 // outcome of the profile (see Outcome).
+//
+// Check makes the run a check run: the kernel makes the tool calls of the
+// check with the policy of the agent, calls no model, and finishes the run
+// with their results (see Check). A check run can have an empty input. It
+// gets the metadata MetaKind with RunKindCheck, takes no follow-up and no
+// branch, and has no outcome.
 type RunRequest struct {
 	ID             string            `json:"id,omitempty"` // set by the kernel when empty
 	Agent          string            `json:"agent,omitempty"`
@@ -493,6 +499,7 @@ type RunRequest struct {
 	IdempotencyKey string            `json:"idempotencyKey,omitempty"`
 	Files          []Block           `json:"files,omitempty"` // attachments of the first message; see Attachment
 	Outcome        *Outcome          `json:"outcome,omitempty"`
+	Check          *Check            `json:"check,omitempty"`
 	// FilesRoot keeps the tools of the run in the root of the files tool
 	// when tools.files.perRun gives every other run a directory of its
 	// own, as the bootstrap of an ax workspace needs. Only a Go caller sets
@@ -527,6 +534,9 @@ func WithParent(id string) RunOption { return func(r *RunRequest) { r.Parent = i
 // InFilesRoot keeps the tools of the run in the root of the files tool,
 // also with tools.files.perRun (RunRequest.FilesRoot).
 func InFilesRoot() RunOption { return func(r *RunRequest) { r.FilesRoot = true } }
+
+// WithCheck makes the run a check run (RunRequest.Check).
+func WithCheck(c Check) RunOption { return func(r *RunRequest) { r.Check = &c } }
 
 // MetaTitle is the metadata key that sets the title of a run. A surface
 // that takes a title from a person puts it here.
@@ -588,13 +598,13 @@ const (
 )
 
 // kernelMetadata lists the metadata keys that only the kernel sets: the
-// idempotency key and the keys of a change of the text of a run
-// (MetaDriftSystem, MetaDriftInstructions). A request and an annotation
-// cannot set them. They do not count against MaxMetadataEntries, and
+// idempotency key, the keys of a change of the text of a run
+// (MetaDriftSystem, MetaDriftInstructions), and the kind of a run
+// (MetaKind). A request and an annotation cannot set them. They do not count against MaxMetadataEntries, and
 // neither do the keys that the kernel sets on a branch, MetaForkOf and
 // MetaForkSeq, nor the keys of the bus intake (intake.go), which a retry
 // carries in its request.
-var kernelMetadata = []string{"idempotencyKey", MetaDriftSystem, MetaDriftInstructions}
+var kernelMetadata = []string{"idempotencyKey", MetaDriftSystem, MetaDriftInstructions, MetaKind}
 
 // kernelMeta reports whether only the kernel sets the metadata key k.
 func kernelMeta(k string) bool { return slices.Contains(kernelMetadata, k) }
@@ -611,8 +621,8 @@ func boundless(k string) bool {
 
 // CheckMetadata bounds the metadata of a request with ErrInvalidRequest.
 // The keys that the kernel sets are reserved: idempotencyKey holds the
-// idempotency key, and MetaDriftSystem and MetaDriftInstructions record a
-// change of the text of a run.
+// idempotency key, MetaDriftSystem and MetaDriftInstructions record a
+// change of the text of a run, and MetaKind names the kind of a run.
 func CheckMetadata(m map[string]string) error {
 	for k := range m {
 		switch {

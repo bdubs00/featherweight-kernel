@@ -96,6 +96,9 @@ func (a *Agent) Fork(ctx context.Context, src string, req ForkRequest) (*Run, er
 	if err := rs.drivable(); err != nil {
 		return nil, err
 	}
+	if rs.queuedData().Check != nil {
+		return nil, fmt.Errorf("%w: run %s is a check run, which has no conversation to branch", ErrInvalidRequest, src)
+	}
 	evs, err := readAll(ctx, a.ledger, src)
 	if err != nil {
 		return nil, err

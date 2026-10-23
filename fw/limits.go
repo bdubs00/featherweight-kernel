@@ -37,7 +37,9 @@ const KeptResultsDir = ".fw-tool"
 // workspace of the run, with every secret replaced as in the ledger, and
 // the note names the file, so the model reads the rest with a tool. An image or a document in a result counts with its size and is
 // dropped with a note when it does not fit. A call that outlives the
-// timeout gets an error result, and the tool sees its context end.
+// timeout gets an error result, and the tool sees its context end. The
+// output limit does not cut the result of a step of a check run, which
+// bounds the result itself (check.go).
 //
 // A tool that can continue a resumed call (see Continuer) keeps the same
 // limits in its continuation. The middleware forwards the Continuer of the
@@ -85,13 +87,29 @@ func (t *limitedTool) Call(ctx context.Context, input json.RawMessage) (ToolResu
 	if err != nil {
 		return res, err
 	}
-	if n := t.limit.MaxOutputBytes; n > 0 {
+	if n := t.limit.MaxOutputBytes; n > 0 && !wholeOutput(ctx) {
 		res = boundResult(res, n, keepFull(ctx))
 	}
 	return res, nil
 }
 
 var errToolTimeout = fmt.Errorf("fw: tool call timed out")
+
+// wholeOutputKey marks the call of a caller that bounds the result itself,
+// such as a step of a check run (check.go), which no model reads: the
+// output limit does not cut the result of such a call.
+type wholeOutputKey struct{}
+
+// withWholeOutput returns ctx with the mark of wholeOutputKey.
+func withWholeOutput(ctx context.Context) context.Context {
+	return context.WithValue(ctx, wholeOutputKey{}, true)
+}
+
+// wholeOutput reports whether ctx holds the mark of wholeOutputKey.
+func wholeOutput(ctx context.Context) bool {
+	v, _ := ctx.Value(wholeOutputKey{}).(bool)
+	return v
+}
 
 // Unwrap returns the wrapped tool, so a caller can find the tool behind the
 // limits with a type assertion on the result.

@@ -230,12 +230,12 @@ func answersText(answers map[string]Answer) string {
 }
 
 // routineDue reports whether the runner acts now: the run started, did not
-// finish, has made no model turn, is no replay and no branch, and its
-// profile has a routine to act on. The runner acts once: any routine
-// event or call of the runner in the log means that it acted, also before
-// a restart.
+// finish, has made no model turn, is no replay, no branch, and no check
+// run, and its profile has a routine to act on. The runner acts once: any
+// routine event or call of the runner in the log means that it acted, also
+// before a restart.
 func (a *Agent) routineDue(rs *runState, c *cursor) bool {
-	if !c.started || c.routine.seen || c.terminal || c.turns > 0 || c.answered || c.rep != nil || c.queued.Kept > 0 {
+	if !c.started || c.routine.seen || c.terminal || c.turns > 0 || c.answered || c.rep != nil || c.queued.Kept > 0 || c.queued.Check != nil {
 		return false
 	}
 	// A replay keeps the mark of its source in its metadata, also after
@@ -246,14 +246,19 @@ func (a *Agent) routineDue(rs *runState, c *cursor) bool {
 	return len(a.profileOf(c.queued).Routines) > 0
 }
 
-// routineRun is the work of the runner on one run.
+// routineRun is the work of the runner on one run. A check run makes its
+// calls through it too (check.go).
 type routineRun struct {
 	a      *Agent
 	rs     *runState
 	prof   AgentProfile
 	tools  map[string]Tool
 	policy Policy
-	calls  int // the tool calls of the run, for budget.maxToolCalls
+	calls  int    // the tool calls of the run, for budget.maxToolCalls
+	prefix string // starts the call id of each call: routineCallPrefix or checkCallPrefix
+	// check is true for the calls of a check run: a call that the policy
+	// asks for does not run, because nobody answers a check.
+	check bool
 }
 
 // routineVerdict is the decision on one routine.
@@ -270,7 +275,7 @@ func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor) error 
 	prof := a.profileOf(c.queued)
 	routines := prof.Routines
 	_, tools := a.runTools(ctx, rs, prof)
-	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), calls: c.toolCalls - c.keptCalls}
+	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), calls: c.toolCalls - c.keptCalls, prefix: routineCallPrefix}
 	verdicts, err := rr.decide(ctx, routines, c.queued.Input)
 	if err != nil {
 		return err
@@ -553,9 +558,10 @@ func (rr *routineRun) apply(ctx context.Context, r Routine, q RunQueuedData, sai
 // call makes one tool call of the runner through the path of a call of the
 // model: the budget of the run and of its tree, the policy with its
 // approval flow, the limits of the tool, and the events fw.tool.requested,
-// with routine set, and fw.tool.responded. It returns the result, or why
-// the call did not run. An error means that the run stopped or the ledger
-// failed.
+// with routine set, and fw.tool.responded. A call of a check run has no
+// approval flow: a call that the policy asks for does not run. It returns
+// the result, or why the call did not run. An error means that the run
+// stopped or the ledger failed.
 func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input json.RawMessage) (ToolResult, string, error) {
 	a, rs := rr.a, rr.rs
 	spec := t.Spec()
@@ -571,13 +577,20 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 	if calls := a.roomOf(rs).calls; calls.set && calls.left <= 0 {
 		return ToolResult{}, fmt.Sprintf("not run: the runs of this tree used the %d tool calls of the budget of run %s (budget.maxToolCalls)", int(calls.max), calls.owner.id), nil
 	}
-	callID := routineCallPrefix + NewID()
+	callID := rr.prefix + NewID()
 	use := Block{Type: BlockToolUse, ID: callID, Name: spec.Name, Input: input}
 	pctx := a.policyCtx(ctx, rs, callID)
 	d := rr.policy.Decide(pctx, ResolveCall(pctx, t, ToolCall{RunID: rs.id, Agent: rs.agent, CallID: callID, Spec: spec, Input: input}))
 	switch d.Verdict {
 	case VerdictAllow:
 	case VerdictAsk:
+		if rr.check {
+			why := "the policy asks before this tool"
+			if d.Reason != "" {
+				why += " (" + d.Reason + ")"
+			}
+			return ToolResult{}, why + ", and a check runs only tools that the policy allows without a question", nil
+		}
 		var aborted atomic.Bool
 		dec, err := a.waitDecision(ctx, ctx, rs, ApprovalRequestedData{Tool: spec.Name, CallID: callID, Input: input, Reason: d.Reason}, &aborted)
 		if err != nil {

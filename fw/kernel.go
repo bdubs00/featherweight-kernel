@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -474,7 +475,9 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 	if err := k.writeError(); err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(req.Input) == "" && len(req.Files) == 0 {
+	// A check run reads its work from its check, so its input can be
+	// empty.
+	if strings.TrimSpace(req.Input) == "" && len(req.Files) == 0 && req.Check == nil {
 		return nil, fmt.Errorf("%w: run input is empty", ErrInvalidRequest)
 	}
 	// Only the kernel records a change of the text of a run. The
@@ -519,7 +522,14 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 	if err := a.checkProfile(req.Profile); err != nil {
 		return nil, err
 	}
-	if err := a.checkModelOf(named, req.Profile); err != nil {
+	// A check run calls no model, so a process without a model takes it.
+	if req.Check != nil {
+		c, err := req.Check.Resolved()
+		if err != nil {
+			return nil, err
+		}
+		req.Check = &c
+	} else if err := a.checkModelOf(named, req.Profile); err != nil {
 		return nil, err
 	}
 	if err := CheckOutcome(a.cfg, req.Outcome); err != nil {
@@ -598,6 +608,17 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 		}
 		meta["idempotencyKey"] = req.IdempotencyKey
 	}
+	// The kind of a check run comes after the annotators, which cannot
+	// set a key of the kernel.
+	outcome := a.resolveOutcome(req, named, parent)
+	if req.Check != nil {
+		meta = maps.Clone(meta)
+		if meta == nil {
+			meta = map[string]string{}
+		}
+		meta[MetaKind] = RunKindCheck
+		outcome = nil // nothing grades a check, which has no answer of a model
+	}
 	queued := RunQueuedData{
 		Agent:         req.Agent,
 		Input:         req.Input,
@@ -614,7 +635,8 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 		ExtraTools:    extra,
 		Resolved:      resolved,
 		FilesRoot:     req.FilesRoot,
-		Outcome:       a.resolveOutcome(req, named, parent),
+		Outcome:       outcome,
+		Check:         req.Check,
 	}
 	text := a.pinText(named, &queued)
 	ev, err := NewEvent(req.ID, EvRunQueued, queued)
@@ -1144,6 +1166,10 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 	}
 	if err := rs.drivable(); err != nil {
 		return err
+	}
+	// A follow-up would start the model on a run that calls none.
+	if rs.queuedData().Check != nil {
+		return fmt.Errorf("%w: run %s is a check run, which takes no message", ErrInvalidRequest, id)
 	}
 	if msg.Role == "" {
 		msg.Role = RoleUser
@@ -1705,7 +1731,9 @@ func (a *Agent) driverBody(ctx context.Context, rs *runState) exitReason {
 		return exitError
 	}
 	defer rs.releaseEvents()
-	if a.runner != nil {
+	// The turn loop runs a check run, which calls no model, also on a
+	// process whose runs a Runner drives.
+	if a.runner != nil && rs.queuedData().Check == nil {
 		if reason, ok := a.host(ctx, rs); ok {
 			return reason
 		}
@@ -1901,6 +1929,11 @@ func WithRequest(req RunRequest) RunOption {
 		if req.Outcome != nil {
 			o := *req.Outcome
 			r.Outcome = &o
+		}
+		if req.Check != nil {
+			c := *req.Check
+			c.Steps = slices.Clone(c.Steps)
+			r.Check = &c
 		}
 	}
 }

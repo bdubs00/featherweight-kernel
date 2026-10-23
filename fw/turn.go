@@ -429,6 +429,9 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 			continue
 		case !c.started:
 			err = a.stepStart(ctx, rs, c)
+		case c.queued.Check != nil:
+			// A check run makes its calls and finishes with no model call.
+			err = a.stepCheck(ctx, rs, c)
 		case a.routineDue(rs, c):
 			// The routine runner acts once, before the first model turn.
 			err = a.stepRoutine(ctx, rs, c)
@@ -500,13 +503,13 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	if o := a.k.override(rs.id); o != nil && o.zone != nil && *o.zone != "" {
 		zone = *o.zone
 	}
-	_, err := a.emit(ctx, rs, EvRunStarted, RunStartedData{
-		Model:    a.selectorOf(c.queued, prof),
-		Tools:    names,
-		Brief:    a.brief(ctx, rs, tools),
-		Context:  a.briefContext(ctx, rs, tools),
-		TimeZone: zone,
-	})
+	d := RunStartedData{Tools: names, TimeZone: zone}
+	// A check run calls no model, so it names none, and no tool writes a
+	// brief or a context for it.
+	if c.queued.Check == nil {
+		d.Model, d.Brief, d.Context = a.selectorOf(c.queued, prof), a.brief(ctx, rs, tools), a.briefContext(ctx, rs, tools)
+	}
+	_, err := a.emit(ctx, rs, EvRunStarted, d)
 	if err == nil {
 	}
 	return err
