@@ -40,7 +40,7 @@ home: .                          # runs, memory, agents, and skills live under t
 effort: high                     # low, medium, high, xhigh, or max
 
 tools:
-  builtin: [bash, files, http, memory, recall, skill, clock, ask_user, spawn_task, await_task] # the built-in tools the model can call
+  builtin: [bash, files, http, memory, recall, skill, clock, ask_user, spawn_task, await_task, decide] # the built-in tools the model can call
   files:
     root: .                      # the files tool cannot leave this directory
   http:

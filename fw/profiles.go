@@ -82,6 +82,7 @@ func (a *Agent) resolveProfile(ctx context.Context, req RunRequest, named AgentP
 		Tools:    prof.Tools,
 		TimeZone: prof.TimeZone,
 		Policy:   prof.Policy,
+		Routines: prof.Routines,
 	}
 	if res.Effort == "" {
 		res.Effort = a.cfg.Effort
@@ -150,7 +151,7 @@ func (a *Agent) pinText(named AgentProfile, q *RunQueuedData) *runText {
 // without text, for the code that reads a profile.
 func (r *ResolvedProfile) profile(agent string) AgentProfile {
 	return AgentProfile{Name: agent, Skills: r.Skills, Tools: r.Tools, Model: r.Model, Effort: r.Effort,
-		TimeZone: r.TimeZone, Policy: r.Policy, Budget: r.Budget}
+		TimeZone: r.TimeZone, Policy: r.Policy, Budget: r.Budget, Routines: r.Routines}
 }
 
 // selectorOf returns the model selector of a run. A resolved profile holds

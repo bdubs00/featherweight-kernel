@@ -929,6 +929,9 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 	if err := CheckCompaction(a.cfg, p.Compaction); err != nil {
 		return err
 	}
+	if err := CheckRoutines(a.cfg, p.Routines); err != nil {
+		return err
+	}
 	return CheckOutcome(a.cfg, p.Outcome)
 }
 

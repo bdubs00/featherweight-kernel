@@ -314,6 +314,11 @@ func New(opts ...Option) (*Agent, error) {
 				a.log.Warn("built-in tool not available", "tool", name, "error", err)
 				continue
 			}
+			if t == nil {
+				// The configuration turns the tool off, as no decider
+				// turns off decide.
+				continue
+			}
 			t = a.wrapTool(t)
 			a.tools = append(a.tools, t)
 			keepSetup(t)

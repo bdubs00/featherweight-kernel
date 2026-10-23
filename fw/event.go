@@ -54,6 +54,10 @@ const (
 	EvRunChild          = "fw.run.child"      // a spawner started a child of this run in another process; see RunChildData
 	EvChildReported     = "fw.child.reported" // the usage that a child in another process last reported; see ChildReportedData
 	EvLoopDetected      = "fw.loop.detected"
+	// The routine runner (docs/ROUTINES.md section 3.4).
+	EvRoutineDecided  = "fw.routine.decided"  // the decision on one routine at the start of a run; see RoutineDecidedData
+	EvRoutineApplied  = "fw.routine.applied"  // a live routine ran its steps and checks; see RoutineAppliedData
+	EvRoutineCompared = "fw.routine.compared" // the answer of a routine against what the agent did; see RoutineComparedData
 	// EvToolSend is published on the bus by the send tool. It is not a ledger event.
 	EvToolSend = "fw.tool.send"
 )
@@ -213,6 +217,8 @@ type ResolvedProfile struct {
 	// Compaction is nil in the ledger of an older kernel; such a run reads
 	// the block of the configuration at each step.
 	Compaction *CompactionConfig `json:"compaction,omitempty"`
+	// Routines are the routines of the overlay, as the run saw them.
+	Routines []Routine `json:"routines,omitempty"`
 }
 
 // Metadata keys that the kernel sets with fw.run.annotated when the text
@@ -382,6 +388,10 @@ type ToolRequestedData struct {
 	// Source records ToolSpec.Source: "builtin", the name of the MCP
 	// server or of the A2A peer, or empty for a tool of a Go option.
 	Source string `json:"source,omitempty"`
+	// Routine names the routine of a call that the routine runner made,
+	// and is empty for a call of the model. A decide call that serves
+	// several routines names them all, separated by commas.
+	Routine string `json:"routine,omitempty"`
 }
 
 // ToolRespondedData is the payload of fw.tool.responded.
@@ -505,6 +515,63 @@ type ChildReportedData struct {
 	// child then counts in the tree of its parent with its last usage
 	// alone, and no process reads it again in the background.
 	Lost bool `json:"lost,omitempty"`
+}
+
+// RoutineDecidedData is the payload of fw.routine.decided. The runner
+// records one per routine of the run with standing shadow or live, in the
+// order of the profile, after fw.run.started and before the first model
+// turn. Mode is RoutineShadow, RoutineLive, or RoutineCanary for a live
+// routine on a run that the canary share picked (CanaryPick). Applies is
+// true when every question passed its band and its expected answers.
+// Reason says why not, such as "type below act: 0.61", "beyond expected
+// no: 0.12", or "decider: <error>". Answers are the answers of the decider,
+// keyed by question name. Decider is the key of the decider in the
+// configuration, and Model the model that its server reported.
+type RoutineDecidedData struct {
+	Routine   string            `json:"routine"`
+	Version   int               `json:"version"`
+	Standing  string            `json:"standing"`
+	Mode      string            `json:"mode"`
+	Applies   bool              `json:"applies"`
+	Reason    string            `json:"reason,omitempty"`
+	Answers   map[string]Answer `json:"answers,omitempty"`
+	Decider   string            `json:"decider,omitempty"`
+	Model     string            `json:"model,omitempty"`
+	LatencyMS int64             `json:"latencyMs,omitempty"`
+}
+
+// RoutineAppliedData is the payload of fw.routine.applied: a live routine
+// that applies ran. OK is true when every step and every check passed.
+// Steps counts the steps and checks that ran, the failed one included.
+// FailedStep is the place of the failed one, from 1, among the steps and
+// then the checks; 0 when none failed. Reason says why the routine
+// stopped. Answer is the rendered answer of a routine that completed,
+// which is the output of the run.
+type RoutineAppliedData struct {
+	Routine    string `json:"routine"`
+	Version    int    `json:"version"`
+	OK         bool   `json:"ok"`
+	Steps      int    `json:"steps"`
+	FailedStep int    `json:"failedStep,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Answer     string `json:"answer,omitempty"`
+}
+
+// RoutineComparedData is the payload of fw.routine.compared: at the end of
+// a run in which the model acted, the answer of a routine to one question
+// against what the agent did. Mode is the mode of the decision: shadow,
+// canary, or live for a live routine that did not complete. Said is the
+// chosen option of the routine, or yes or no. Observed is what the agent
+// did, read with the observe block of the question, and "" when nothing
+// matched. Agree is true when the two are equal, case ignored.
+type RoutineComparedData struct {
+	Routine  string `json:"routine"`
+	Version  int    `json:"version"`
+	Mode     string `json:"mode"`
+	Question string `json:"question"`
+	Said     string `json:"said"`
+	Observed string `json:"observed"`
+	Agree    bool   `json:"agree"`
 }
 
 // ErrorData is the payload of fw.error.

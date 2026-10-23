@@ -22,31 +22,34 @@ type Config struct {
 	// ledger event carries it, so the egress stream tells a consumer which
 	// process holds a run. Under ax it is "ax:<atespace>/<task>", which the
 	// package ax sets; elsewhere the default is "<host>:<port>".
-	Node       string                    `yaml:"node,omitempty" json:"node,omitempty"`
-	Auth       AuthConfig                `yaml:"auth" json:"auth"`
-	Access     AccessConfig              `yaml:"access" json:"access"`
-	Model      string                    `yaml:"model" json:"model"`
-	Models     map[string]string         `yaml:"models" json:"models,omitempty"`
-	Providers  map[string]ProviderConfig `yaml:"providers" json:"providers,omitempty"`
-	Effort     string                    `yaml:"effort" json:"effort"`
-	Secrets    SecretsConfig             `yaml:"secrets" json:"secrets"`
-	Ledger     LedgerConfig              `yaml:"ledger" json:"ledger"`
-	Bus        BusConfig                 `yaml:"bus" json:"bus"`
-	Tools      ToolsConfig               `yaml:"tools" json:"tools"`
-	Policy     PolicyConfig              `yaml:"policy" json:"policy"`
-	Budget     Budget                    `yaml:"budget" json:"budget"`
-	Compaction CompactionConfig          `yaml:"compaction" json:"compaction"`
-	Time       TimeConfig                `yaml:"time" json:"time"`
-	Spawn      SpawnConfig               `yaml:"spawn" json:"spawn"`
-	Tokens     TokensConfig              `yaml:"tokens" json:"tokens"`
-	Prices     map[string]Price          `yaml:"prices" json:"prices,omitempty"`
-	Agents     map[string]AgentProfile   `yaml:"agents" json:"agents,omitempty"`
-	Surfaces   []string                  `yaml:"surfaces" json:"surfaces"`
-	A2A        A2AConfig                 `yaml:"a2a" json:"a2a"`
-	MCP        MCPSurfaceConfig          `yaml:"mcp" json:"mcp"`
-	AX         AXConfig                  `yaml:"ax" json:"ax"`
-	Telemetry  TelemetryConfig           `yaml:"telemetry" json:"telemetry"`
-	MaxRuns    int                       `yaml:"maxRuns" json:"maxRuns"`
+	Node      string                    `yaml:"node,omitempty" json:"node,omitempty"`
+	Auth      AuthConfig                `yaml:"auth" json:"auth"`
+	Access    AccessConfig              `yaml:"access" json:"access"`
+	Model     string                    `yaml:"model" json:"model"`
+	Models    map[string]string         `yaml:"models" json:"models,omitempty"`
+	Providers map[string]ProviderConfig `yaml:"providers" json:"providers,omitempty"`
+	// Deciders names the deciders that routines and the tool decide ask,
+	// by key (see DeciderConfig). No decider exists by default.
+	Deciders   map[string]DeciderConfig `yaml:"deciders,omitempty" json:"deciders,omitempty"`
+	Effort     string                   `yaml:"effort" json:"effort"`
+	Secrets    SecretsConfig            `yaml:"secrets" json:"secrets"`
+	Ledger     LedgerConfig             `yaml:"ledger" json:"ledger"`
+	Bus        BusConfig                `yaml:"bus" json:"bus"`
+	Tools      ToolsConfig              `yaml:"tools" json:"tools"`
+	Policy     PolicyConfig             `yaml:"policy" json:"policy"`
+	Budget     Budget                   `yaml:"budget" json:"budget"`
+	Compaction CompactionConfig         `yaml:"compaction" json:"compaction"`
+	Time       TimeConfig               `yaml:"time" json:"time"`
+	Spawn      SpawnConfig              `yaml:"spawn" json:"spawn"`
+	Tokens     TokensConfig             `yaml:"tokens" json:"tokens"`
+	Prices     map[string]Price         `yaml:"prices" json:"prices,omitempty"`
+	Agents     map[string]AgentProfile  `yaml:"agents" json:"agents,omitempty"`
+	Surfaces   []string                 `yaml:"surfaces" json:"surfaces"`
+	A2A        A2AConfig                `yaml:"a2a" json:"a2a"`
+	MCP        MCPSurfaceConfig         `yaml:"mcp" json:"mcp"`
+	AX         AXConfig                 `yaml:"ax" json:"ax"`
+	Telemetry  TelemetryConfig          `yaml:"telemetry" json:"telemetry"`
+	MaxRuns    int                      `yaml:"maxRuns" json:"maxRuns"`
 	// MaxQueuedRuns bounds direct root work waiting behind MaxRuns. Zero
 	// takes the backward-compatible finite default of 64. Children use spawn limits.
 	MaxQueuedRuns int    `yaml:"maxQueuedRuns" json:"maxQueuedRuns"`
@@ -801,7 +804,7 @@ func DefaultConfig() *Config {
 		Ledger:  LedgerConfig{Driver: "file"},
 		Bus:     BusConfig{Driver: "mem"},
 		Tools: ToolsConfig{
-			Builtin: []string{"bash", "files", "http", "memory", "recall", "skill", "clock", "ask_user", "spawn_task", "await_task"},
+			Builtin: []string{"bash", "files", "http", "memory", "recall", "skill", "clock", "ask_user", "spawn_task", "await_task", "decide"},
 			Files: FilesToolConfig{
 				Deny:         append([]string(nil), defaultDeny...),
 				ReadOnly:     []string{".git"},

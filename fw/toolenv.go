@@ -104,6 +104,9 @@ func toolHidden(cfg *Config) map[string]bool {
 		for _, p := range cfg.Providers {
 			names = append(names, p.APIKeyEnv)
 		}
+		for _, d := range cfg.Deciders {
+			names = append(names, d.APIKeyEnv)
+		}
 		for _, s := range cfg.Tools.MCP {
 			names = append(names, s.Auth.Bearer)
 			if o := s.Auth.OAuth; o != nil {

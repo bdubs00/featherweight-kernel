@@ -210,6 +210,10 @@ type AgentProfile struct {
 	// at, model, and off, over the block compaction of the configuration
 	// (see CompactionConfig). Nil takes the block of the configuration.
 	Compaction *CompactionConfig `yaml:"compaction,omitempty" json:"compaction,omitempty"`
+	// Routines are the routines of the agent (see Routine). The kernel
+	// pins them in the resolved profile of each run, and the runner acts
+	// on those with standing shadow or live (docs/ROUTINES.md).
+	Routines []Routine `yaml:"routines,omitempty" json:"routines,omitempty"`
 }
 
 // Overlay returns p with the set fields of o applied on top. A set System,
@@ -221,7 +225,9 @@ type AgentProfile struct {
 // outcome block replaces the block of p as a whole. The compaction block
 // takes every set field of o, as the budget does: a set At turns
 // compaction on with that size, Off turns it off, and a set Model
-// replaces the model.
+// replaces the model. A non-nil Routines list replaces the list of p, as
+// Tools does, so the front of a fleet sends the routines of an agent
+// whole, and an empty list leaves the run without routines.
 func (p AgentProfile) Overlay(o AgentProfile) AgentProfile {
 	if o.Name != "" {
 		p.Name = o.Name
@@ -289,6 +295,9 @@ func (p AgentProfile) Overlay(o AgentProfile) AgentProfile {
 	if o.Outcome != nil {
 		out := *o.Outcome
 		p.Outcome = &out
+	}
+	if o.Routines != nil {
+		p.Routines = append(make([]Routine, 0, len(o.Routines)), o.Routines...)
 	}
 	// Access is never taken from an overlay: a request cannot grant itself
 	// a role.

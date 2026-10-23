@@ -827,3 +827,59 @@ func TestPromptFileSuffix(t *testing.T) {
 		t.Errorf("d: a link to /proc/self/environ was read: %q", got)
 	}
 }
+
+func TestValidateDecidersAndRoutines(t *testing.T) {
+	cleanEnv(t)
+	path := writeFile(t, filepath.Join(t.TempDir(), "fw.yaml"), `
+model: anthropic/claude-haiku-5-5
+deciders:
+  clef: {baseUrl: "http://127.0.0.1:5100", apiKeyEnv: CLEF_API_KEY, model: clef, timeout: 30s}
+  nomodel: {baseUrl: "http://127.0.0.1:5100"}
+  nourl: {baseUrl: "127.0.0.1:5100", model: x}
+agents:
+  triage:
+    routines:
+      - name: ack
+        version: 1
+        standing: live
+        decider: clef
+        questions:
+          beyond: {type: noul, act: 0.95, expect: no}
+        steps:
+          - tool: gitea.issue_write
+            input: '{"n": {{ find .input "#(\\d+)" }}}'
+        answer: done
+  shadow:
+    routines:
+      - name: ack
+        version: 1
+        standing: shadow
+        decider: jev
+        questions:
+          beyond: {type: noul}
+        steps:
+          - {tool: x, input: '{{ .input '}
+`)
+	_, err := Load(path)
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("error %v is not a ValidationError", err)
+	}
+	wants := []string{
+		"deciders.nomodel.model is empty; a decider has no default model",
+		`deciders.nourl.baseUrl "127.0.0.1:5100" is not an http:// or https:// URL`,
+		`agents.shadow.routines[0] (ack).decider "jev" is not a key of deciders`,
+		"agents.shadow.routines[0] (ack).steps[0].input: template:",
+	}
+	for _, w := range wants {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("error lacks %q:\n%v", w, err)
+		}
+	}
+	if len(ve.Problems) != len(wants) {
+		t.Errorf("%d problems, want %d:\n%v", len(ve.Problems), len(wants), err)
+	}
+	if strings.Contains(err.Error(), "agents.triage") || strings.Contains(err.Error(), "deciders.clef") {
+		t.Errorf("the routine of triage and the decider clef are valid:\n%v", err)
+	}
+}

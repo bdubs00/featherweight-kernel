@@ -111,6 +111,13 @@ providers:                      # one connection per provider; FW_PROVIDERS_<NAM
       idleTimeout: 120s         # a stream with no event for this long fails
       mediaTypes: auto          # attachments that the model reads: auto (images, plus PDF for api.openai.com), none, or a list
 
+# deciders:                     # the deciders of routines and of the tool decide; none by default (docs/ROUTINES.md); FW_DECIDERS_<NAME>_BASE_URL
+#   clef:
+#     baseUrl: http://127.0.0.1:5100   # a System One server: POST {baseUrl}/v1/systemone
+#     apiKeyEnv: CLEF_API_KEY          # the secret that holds the bearer token; empty sends no token
+#     model: clef                      # required: the model name to send; the response names the model served
+#     timeout: 30s                     # one call; 0 is 30s
+
 secrets:
   driver: env                   # env | vault | gsm
   options: {}                   # driver options; FW_SECRETS_OPTIONS_<NAME>
@@ -140,7 +147,7 @@ tokens:                         # the tokens of people, from a broker outside th
   subject: fw.connections       # the bus subject of the notices of the broker. FW_TOKENS_SUBJECT
 
 tools:
-  builtin: [bash, files, http, memory, recall, skill, clock, ask_user, spawn_task, await_task]   # the workbench adds propose_agent
+  builtin: [bash, files, http, memory, recall, skill, clock, ask_user, spawn_task, await_task, decide]   # decide needs deciders; the workbench adds propose_agent
   user: ""                      # the user of bash and of the stdio MCP servers: a name or uid, with :group or :gid; "none" is the user of fw.
                                 # Empty is 65532 (nonroot of the images) under ax with fw as root and CAP_SETUID and the rest of section 7.12, else the user of fw. FW_TOOLS_USER (section 7.12)
   files:                        # the workspace of the files tool and bash (section 7.9)
