@@ -115,3 +115,20 @@ func TestProposeFreeHole(t *testing.T) {
 		t.Errorf("no run = %+v %+v", r2, p2)
 	}
 }
+
+// A proposal without a decider loads for replay, and a name that the
+// kernel refuses makes the proposal not complete, with the problem.
+func TestProposeProblems(t *testing.T) {
+	runs, _ := proposeRuns(t)
+	r, prop := Propose(runs, ProposeOptions{Name: "triage"})
+	if r.Decider != "" || len(r.Questions) == 0 || len(prop.Problems) != 0 || !prop.Complete {
+		t.Fatalf("without a decider: %+v, problems %v", prop, prop.Problems)
+	}
+	if res := Replay(r, runs[:12], ReplayOptions{}); len(res.Matched) != 12 {
+		t.Fatalf("replay of a proposal without a decider = %+v", res)
+	}
+	_, prop = Propose(runs, ProposeOptions{Name: "Triage Desk"})
+	if prop.Complete || len(prop.Problems) != 1 || !strings.Contains(prop.Problems[0], `name "Triage Desk"`) {
+		t.Fatalf("a bad name: %+v", prop.Problems)
+	}
+}

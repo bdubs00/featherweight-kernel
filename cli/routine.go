@@ -253,7 +253,7 @@ func cmdRoutinePropose(ctx context.Context, g *globals, args []string) int {
 	}
 	n := *name
 	if n == "" {
-		n = strings.ToLower(*agent)
+		n = routineName(*agent)
 	}
 	r, prop := routine.Propose(runs, routine.ProposeOptions{Name: n, Decider: *decider})
 	if len(prop.Runs) == 0 {
@@ -289,6 +289,30 @@ func cmdRoutinePropose(ctx context.Context, g *globals, args []string) int {
 	return exitOK
 }
 
+// routineName makes a valid routine name from an agent name: lower case,
+// and every run of other characters than a-z and 0-9 a single -.
+func routineName(agent string) string {
+	var b strings.Builder
+	dash := false
+	for _, r := range strings.ToLower(agent) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			dash = false
+		} else if !dash && b.Len() > 0 {
+			b.WriteByte('-')
+			dash = true
+		}
+	}
+	n := strings.TrimRight(b.String(), "-")
+	if len(n) > 64 {
+		n = strings.TrimRight(n[:64], "-")
+	}
+	if n == "" {
+		n = "proposed"
+	}
+	return n
+}
+
 // writeProposal prints a proposal for a person.
 func writeProposal(w io.Writer, r fw.Routine, p routine.Proposal) {
 	total := len(p.Runs) + len(p.Divergent)
@@ -298,6 +322,9 @@ func writeProposal(w io.Writer, r fw.Routine, p routine.Proposal) {
 	}
 	for _, x := range p.Excluded {
 		fmt.Fprintf(w, "  left out: %s, %s\n", x.Run, x.Reason)
+	}
+	for _, x := range p.Problems {
+		fmt.Fprintf(w, "  to fix: %s\n", x)
 	}
 	if len(p.Holes) > 0 {
 		fmt.Fprintln(w, "Values that differ between runs:")

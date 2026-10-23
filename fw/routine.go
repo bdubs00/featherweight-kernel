@@ -194,7 +194,8 @@ var routineReserved = []string{"input", "json", "meta"}
 
 // CheckRoutines reports with ErrInvalidRequest whether the kernel accepts
 // the routines of a profile. The error names the first problem. cfg names
-// the deciders and the built-in tools; a nil cfg checks no decider name.
+// the deciders and the built-in tools. A nil cfg checks no decider, so a
+// routine without its configuration, such as a proposal, can pass.
 func CheckRoutines(cfg *Config, rs []Routine) error {
 	if p := RoutineProblems(cfg, rs); len(p) > 0 {
 		return fmt.Errorf("%w: %s", ErrInvalidRequest, p[0])
@@ -250,7 +251,7 @@ func routineProblems(cfg *Config, key string, r Routine) []string {
 		p = append(p, fmt.Sprintf("%s.after has %d checks; the limit is %d", key, len(r.After), MaxRoutineSteps))
 	}
 	switch {
-	case len(r.Questions) > 0 && r.Decider == "":
+	case len(r.Questions) > 0 && r.Decider == "" && cfg != nil:
 		p = append(p, fmt.Sprintf("%s.decider is empty; a routine with questions names a key of deciders", key))
 	case r.Decider != "" && cfg != nil && !hasDecider(cfg, r.Decider):
 		p = append(p, fmt.Sprintf("%s.decider %q is not a key of deciders", key, r.Decider))

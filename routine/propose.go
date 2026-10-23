@@ -37,8 +37,9 @@ type ProposeOptions struct {
 // Sequence. Divergent are the completed runs with another sequence, and
 // Agreement is the share of the completed runs with the sequence. Excluded
 // are the runs that it did not read, with the reason. Holes lists every
-// value that is not the same in every run, with its kind. Complete is
-// false while a free hole is left.
+// value that is not the same in every run, with its kind. Problems are
+// what the kernel would refuse in the routine, such as a name that is not
+// valid. Complete is false while a free hole or a problem is left.
 type Proposal struct {
 	Runs      []string     `json:"runs"`
 	Divergent []string     `json:"divergent,omitempty"`
@@ -46,6 +47,7 @@ type Proposal struct {
 	Sequence  []string     `json:"sequence"`
 	Agreement float64      `json:"agreement"`
 	Holes     []Hole       `json:"holes"`
+	Problems  []string     `json:"problems,omitempty"`
 	Complete  bool         `json:"complete"`
 }
 
@@ -139,7 +141,8 @@ func Propose(runs [][]fw.Event, opts ProposeOptions) (fw.Routine, Proposal) {
 		r.Decider = opts.Decider
 	}
 	prop.Holes = p.holes
-	prop.Complete = true
+	prop.Problems = fw.RoutineProblems(nil, []fw.Routine{r})
+	prop.Complete = len(prop.Problems) == 0
 	for _, h := range p.holes {
 		if h.Kind == HoleFree {
 			prop.Complete = false

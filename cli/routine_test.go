@@ -117,3 +117,11 @@ func TestRoutineProposeVerb(t *testing.T) {
 		t.Fatalf("no runs: %d %s", code, errOut)
 	}
 }
+
+func TestRoutineName(t *testing.T) {
+	for in, want := range map[string]string{"Triage": "triage", "Identity Desk": "identity-desk", "a_b..c": "a-b-c", "--": "proposed", "x" + strings.Repeat("y", 70): "x" + strings.Repeat("y", 63)} {
+		if got := routineName(in); got != want {
+			t.Errorf("routineName(%q) = %q; want %q", in, got, want)
+		}
+	}
+}
