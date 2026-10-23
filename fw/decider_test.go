@@ -214,3 +214,22 @@ func TestSystemOneSpellings(t *testing.T) {
 		})
 	}
 }
+
+// A score whose levels are numbers reads the same in both spellings: keys
+// that are all levels are levels, and other keys are places.
+func TestSystemOneNumericLevels(t *testing.T) {
+	qs := map[string]Question{"severity": {Type: QuestionScore, Criteria: []any{"1", "2", "3"}}}
+	for name, body := range map[string]string{
+		"typesafe": `{"answers": {"severity": {"type": "score", "answer": "3", "probabilities": {"1": 0.1, "2": 0.2, "3": 0.7}}}}`,
+		"clef":     `{"answers": {"severity": {"type": "score", "score": 1.6, "legend": {"0": "1", "1": "2", "2": "3"}, "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}}}`,
+		"places":   `{"answers": {"severity": {"type": "score", "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7}}}}`,
+	} {
+		res, err := ParseSystemOne([]byte(body), qs)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if a := res.Answers["severity"]; a.Choice != "3" || a.Probability != 0.7 || a.Probabilities["1"] != 0.1 {
+			t.Errorf("%s: severity = %+v", name, a)
+		}
+	}
+}

@@ -336,16 +336,26 @@ func parseAnswer(id string, q Question, raw json.RawMessage) (Answer, error) {
 			a.Choice, a.Probability = *named, *w.Probability
 			break
 		}
-		// Clef keys the probabilities by the place of each level, which the
-		// legend names; TypeSafe keys them by the level.
+		// Clef keys the probabilities by the place of each level, which its
+		// legend names. TypeSafe keys them by level, without a legend: keys
+		// that are all levels are levels, also levels such as "1" and "2".
 		levels, _ := stringList(q.Criteria)
+		byLevel := len(w.Legend) == 0
+		for k := range w.Probabilities {
+			if !slices.Contains(levels, k) {
+				byLevel = false
+				break
+			}
+		}
 		a.Probabilities = map[string]float64{}
 		for k, p := range w.Probabilities {
 			level := k
-			if name, ok := w.Legend[k].(string); ok && name != "" {
-				level = name
-			} else if i, err := strconv.Atoi(k); err == nil && i >= 0 && i < len(levels) {
-				level = levels[i]
+			if !byLevel {
+				if name, ok := w.Legend[k].(string); ok && name != "" {
+					level = name
+				} else if i, err := strconv.Atoi(k); err == nil && i >= 0 && i < len(levels) {
+					level = levels[i]
+				}
 			}
 			a.Probabilities[level] = p
 		}
