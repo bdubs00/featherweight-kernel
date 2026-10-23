@@ -2,8 +2,8 @@ package fw
 
 import (
 	"encoding/json"
-	"maps"
 	"errors"
+	"maps"
 	"os"
 	"strings"
 	"testing"
@@ -272,7 +272,6 @@ func TestRoutineApplies(t *testing.T) {
 		t.Error("said")
 	}
 }
-
 
 func TestObserveAnswer(t *testing.T) {
 	q := RoutineQuestion{Question: Question{Type: QuestionChoice}, Observe: &Observe{Answer: `"type": "type/([a-z-]+)"`}}
