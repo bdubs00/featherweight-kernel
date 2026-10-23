@@ -130,6 +130,7 @@ func verbs() []verb {
 		{"skills", "list the skills, or print one skill", cmdSkills},
 		{"events", "print or follow the ledger of a run", cmdEvents},
 		{"replay", "replay a recorded run against a model", cmdReplay},
+		{"routine", "check a routine against recorded runs, or propose one from them", cmdRoutine},
 		{"card", "print the A2A agent card", cmdCard},
 		{"config", "print the resolved configuration with secrets masked", cmdConfig},
 		{"env", "print every configuration variable, with its value when it is set", cmdEnv},

@@ -176,6 +176,13 @@ func canonicalJSON(raw []byte) string {
 	return string(b)
 }
 
+// CanonicalJSON is the canonical form of a JSON value that replay matches
+// inputs by: object keys in sorted order, no insignificant whitespace, and
+// number literals unchanged. Two inputs match when their forms are equal.
+// Package routine compares the steps of a routine with recorded calls
+// through it.
+func CanonicalJSON(raw []byte) string { return canonicalJSON(raw) }
+
 // replayShow renders a canonical input for a result to the model. A long
 // input is cut at a rune boundary, and an input that was not valid JSON
 // loses its marker byte.

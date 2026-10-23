@@ -110,19 +110,32 @@ func (a *Agent) DeciderNamed(ctx context.Context, name string) (Decider, error) 
 	if d, ok := a.deciders[name]; ok {
 		return d, nil
 	}
-	cfg, ok := a.cfg.Deciders[name]
-	if !ok {
+	if _, ok := a.cfg.Deciders[name]; !ok {
 		return nil, fmt.Errorf("fw: no decider %q; the deciders are %s", name, strings.Join(a.Deciders(), ", "))
 	}
+	return NewDecider(ctx, a.cfg, a.secrets, name)
+}
+
+// NewDecider returns the System One client of deciders.<name> of cfg, with
+// the bearer token from the secret that apiKeyEnv names. A command that
+// has no agent, such as fw routine replay, builds its decider this way.
+func NewDecider(ctx context.Context, cfg *Config, secrets Secrets, name string) (Decider, error) {
+	dc, ok := cfg.Deciders[name]
+	if !ok {
+		return nil, fmt.Errorf("fw: no decider %q in deciders", name)
+	}
 	token := ""
-	if key := strings.TrimSpace(cfg.APIKeyEnv); key != "" {
-		v, err := a.secrets.Get(ctx, key)
+	if key := strings.TrimSpace(dc.APIKeyEnv); key != "" {
+		if secrets == nil {
+			return nil, fmt.Errorf("fw: decider %s: no secrets source to read %s", name, key)
+		}
+		v, err := secrets.Get(ctx, key)
 		if err != nil || strings.TrimSpace(v) == "" {
 			return nil, fmt.Errorf("fw: decider %s: the secret %s is not set", name, key)
 		}
 		token = strings.TrimSpace(v)
 	}
-	return NewSystemOne(cfg, token), nil
+	return NewSystemOne(dc, token), nil
 }
 
 // maxDeciderResponse bounds the body of a response of a System One server.
