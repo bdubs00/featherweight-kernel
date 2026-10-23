@@ -431,7 +431,7 @@ func (a *Agent) drive(ctx context.Context, rs *runState) exitReason {
 			err = a.stepStart(ctx, rs, c)
 		case a.routineDue(rs, c):
 			// The routine runner acts once, before the first model turn.
-			err = a.stepRoutine(ctx, rs, c, n)
+			err = a.stepRoutine(ctx, rs, c)
 		case routineFinishDue(c):
 			err = a.finishRoutine(ctx, rs, c, n)
 		case c.rep != nil:

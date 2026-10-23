@@ -228,18 +228,6 @@ func clipLine(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// activeRoutines returns the routines that the runner acts on: those with
-// standing shadow or live, in the order of the profile.
-func activeRoutines(rs []Routine) []Routine {
-	var out []Routine
-	for _, r := range rs {
-		if r.Standing == RoutineShadow || r.Standing == RoutineLive {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
 // routineDue reports whether the runner acts now: the run started, did not
 // finish, has made no model turn, is no replay and no branch, and its
 // profile has a routine to act on. The runner acts once: any routine
@@ -254,7 +242,7 @@ func (a *Agent) routineDue(rs *runState, c *cursor) bool {
 	if c.queued.Metadata["replayOf"] != "" || a.k.override(rs.id) != nil {
 		return false
 	}
-	return len(activeRoutines(a.profileOf(c.queued).Routines)) > 0
+	return len(a.profileOf(c.queued).Routines) > 0
 }
 
 // routineRun is the work of the runner on one run.
@@ -274,10 +262,12 @@ type routineVerdict struct {
 }
 
 // stepRoutine is the start of the runner: the decision, then the live
-// routine that applies. n is the number of events that c read.
-func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor, n int) error {
+// routine that applies, which ends with fw.routine.applied. The next step
+// finishes a run whose routine completed (finishRoutine), the same step
+// that a restart between the two events takes.
+func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
-	routines := activeRoutines(prof.Routines)
+	routines := prof.Routines
 	_, tools := a.runTools(ctx, rs, prof)
 	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), calls: c.toolCalls - c.keptCalls}
 	verdicts, err := rr.decide(ctx, routines, c.queued.Input)
@@ -300,17 +290,7 @@ func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor, n int)
 	if err != nil {
 		return err
 	}
-	rs.emitMu.Lock()
-	defer rs.emitMu.Unlock()
-	if _, err := a.emitLocked(ctx, rs, EvRoutineApplied, applied); err != nil {
-		return err
-	}
-	if !applied.OK || c.unseen || messageSince(rs.events, n) {
-		// A message that arrived meanwhile needs the model, which starts
-		// with the context block of the routine.
-		return nil
-	}
-	_, err = a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: applied.Answer})
+	_, err = a.emit(ctx, rs, EvRoutineApplied, applied)
 	return err
 }
 
@@ -347,8 +327,9 @@ func (rs *runState) routineWaits() bool {
 	return p != nil && strings.HasPrefix(p.CallID, routineCallPrefix)
 }
 
-// finishRoutine finishes a run whose routine completed when a restart came
-// between fw.routine.applied and fw.run.finished.
+// finishRoutine finishes a run whose routine completed, with its answer as
+// the output. A message that arrived meanwhile goes to the model instead,
+// which starts with the context block of the routine.
 func (a *Agent) finishRoutine(ctx context.Context, rs *runState, c *cursor, n int) error {
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
@@ -359,8 +340,8 @@ func (a *Agent) finishRoutine(ctx context.Context, rs *runState, c *cursor, n in
 	return err
 }
 
-// routineFinishDue reports whether a run whose routine completed still
-// needs its fw.run.finished, and no message waits for the model.
+// routineFinishDue reports whether a run whose routine completed needs its
+// fw.run.finished, and no message waits for the model.
 func routineFinishDue(c *cursor) bool {
 	r := c.routine
 	return r.applied && r.ok && !r.done && !c.terminal && !c.unseen && c.turns == 0
