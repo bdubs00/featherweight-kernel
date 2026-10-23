@@ -2773,24 +2773,25 @@ A profile carries its routines in `routines`, as `fw.Routine` values. A routine 
 | `standing` | `shadow` or `live` |
 | `canary` | for a live routine, the share of the runs that the agent handles anyway. Without it, the share is 0.05. |
 | `decider` | a key of `deciders`, for a routine with questions |
-| `questions` | the decision schema: a type (`choice`, `noul`, or `score`), instructions, criteria, the band `act`, the expected answers `expect`, and `observe` |
-| `steps` | the tool calls in order, each with an input and an optional `as` |
+| `questions` | the decision schema: a type (`choice`, `noul`, or `score`), instructions, criteria, the band `act`, the expected answers `expect`, and `observe`. The criteria of a `noul` are absent or name `true` and `false` only. |
+| `steps` | the tool calls in order, each with an input, an optional `as`, and an optional `compare`, the keys that a replay compares |
 | `after` | the checks afterward: a call, with the substrings that its result holds (`contains`) and lacks (`lacks`) |
 | `answer` | after a routine that completes, the output of the run |
 
 The inputs, the answer, and the strings of `contains` and `lacks` are Go `text/template` texts. The data holds `.input`, `.json`, `.meta`, one field per question, and one field per step with `as`. The functions are `find`, `json`, and `lower`. The built-in functions of `text/template`, such as `printf`, `if`, and `eq`, stay. A missing field is an error. A `find` that matches nothing is an error too, so a routine never calls a tool with a missing value.
 
-An inline profile with a `routines` list replaces the routines of the named profile, as a tool list does. An empty list leaves the run without routines. The resolved profile holds the routines, so a run keeps the routines that it was queued with (section 12.5).
+An inline profile with a `routines` list replaces the routines of the named profile, as a tool list does. An empty list leaves the run without routines, and the JSON of a profile keeps an empty list, as it keeps the skills. The resolved profile holds the routines, so a run keeps the routines that it was queued with (section 12.5).
 
 When the kernel loads a profile, it checks the routines. It also checks the routines of each inline profile. It refuses these:
 
+- more than 64 routines in a profile
 - more than 16 steps, more than 16 checks, more than 16 questions, or a template over 4 KiB
 - a routine with questions and no decider, or a decider that `deciders` does not have
-- questions in a configuration whose `tools.builtin` leaves out `decide`
 - a template that does not parse, or a regular expression that does not compile
 - a name that is not valid, or a name that an earlier routine has
+- any routine on a process that hosts its runs (section 19), because no turn loop runs there
 
-Each error names the key, such as `agents.triage.routines[0] (ack).steps[1].input`.
+Each error names the key, such as `agents.triage.routines[0] (ack).steps[1].input`, in words for an operator: "no model answers questions under the name clef". `fw.CheckRoutineName` checks a name with the same rule, for the workbench.
 
 ### 22.2 Deciders
 
@@ -2805,19 +2806,19 @@ deciders:
     timeout: 30s                     # one call; 0 is 30s
 ```
 
-No decider exists by default, and a decider has no default model. The client posts `{model, state, questions}`, with at most 64 questions in one call. It reads the answers of Clef and Workers AI: `choice`, `noul`, and a `score` with a legend. It also reads the answers of TypeSafe: `answer`, `probability`, and a score by level. Any other shape is an error that names the field. The token comes from `Secrets` at each call and goes only in the `Authorization` header. The redactor knows the token, so no event and no log line holds it. A tool process never gets the variable of `apiKeyEnv` (section 7.12).
+No decider exists by default, and a decider has no default model. The client posts `{model, state, questions}`, with at most 64 questions in one call. The runner splits more questions of one decider into several calls. It reads the answers of Clef and Workers AI: `choice`, `noul`, and a `score` with a legend. It also reads the answers of TypeSafe: `answer`, `probability`, and a score by level. Any other shape is an error that names the field. The token comes from `Secrets` at each call and goes only in the `Authorization` header. The redactor knows the token, so no event and no log line holds it. A tool process never gets the variable of `apiKeyEnv` (section 7.12).
 
 ### 22.3 The runner
 
 The runner acts once per run, after `fw.run.started` and before the first model turn. It acts on the routines with the standing `shadow` or `live`. It never acts on a replay or a branch. After a restart, it never runs a routine again.
 
-1. The runner asks each decider once for the routines that share it. It calls the tool `decide` through the tool path of the model, so the call and the probabilities are in `fw.tool.requested` and `fw.tool.responded`. The question ids are `<routine>.<question>`, and the state is the input of the run.
-2. It records one `fw.routine.decided` per routine, in the order of the profile. A shadow routine has the mode `shadow`. If the canary share picks the run, a live routine has the mode `canary`. Otherwise it has the mode `live`. The pick is a stable hash of the run id, `fw.CanaryPick`. If every question passes its band and its expected answers, the routine applies. When a decider fails, each of its routines does not apply, with the reason.
+1. The runner asks each decider once for the routines that share it. It calls the tool `decide` of the kernel, `fw.DecideTool`, through the tool path of the model, whatever `tools.builtin` holds. The call and the probabilities are therefore in `fw.tool.requested` and `fw.tool.responded`. The question ids are `<routine>.<question>`, and the state is the input of the run.
+2. It records one `fw.routine.decided` per routine, in the order of the profile. A shadow routine has the mode `shadow`. If the canary share picks the run, a live routine has the mode `canary`. Otherwise it has the mode `live`. The pick is a stable hash of the run id. If every question passes its band and its expected answers, the routine applies. When a decider fails, each of its routines does not apply, with the reason.
 3. The first routine in the mode `live` that applies runs its steps and then its checks. Each call goes through the path of a call of the model: the budget of the run and of its tree, the policy with its approval flow, and the limits of the tool. Each call records its events with `routine` set. An error result, a policy deny, the deny of a person, a template error, or a failed check ends the routine. The runner records `fw.routine.applied`.
 4. When the routine completes, the run finishes with the rendered answer and makes no model call. Otherwise the model runs. When the run has a decision in the mode `live`, the first user message starts with one block of data, as below. A run in the mode `shadow` or `canary` gets no block, because the model must not see the answers of the routine.
 5. At the end of a run that the model completed, the runner compares. It takes each routine in the mode `shadow` or `canary`, and each live routine that did not complete. For each question with `observe`, it records one `fw.routine.compared` before `fw.run.finished`. A finished run therefore stays finished. A run that fails is not compared.
 
-A restart can cut a live routine off. At the next start, the runner records `fw.routine.applied` with the reason "the process stopped during the routine", and the model starts with the block. A pending approval of a routine stays pending after a restart, and its decision then reaches no step.
+A restart can cut a live routine off. At the next start, the runner records `fw.routine.applied` with the reason "the process stopped during the routine", and the model starts with the block. The kernel resumes a run that waits for an approval of a call of its routine. It denies the approval as `kernel` first, so a later answer of a person gets `ErrNoPendingApproval`. After a routine that completes, the next step of the turn loop finishes the run. A restart between the two events takes the same step. A replay keeps the mark `replayOf` in its metadata, so it runs no routine after a restart either. A branch never compares the decisions that it kept from its source.
 
 The block names the source `routine`, so the sentence `fw.ContextNote` of the system prompt covers it (section 7.8.2):
 
@@ -2833,18 +2834,18 @@ It stopped: step 3 gitea.issue_write: error: gitea: 503 Service Unavailable.
 </context>
 ```
 
-A run that section 19 hosts gets no routine.
-
 ### 22.4 Replay and propose
 
-Package `routine` reads recorded runs. `routine.Replay` checks a routine against them. For each run, it reads the answers of the agent with `observe` and renders each step with them. Then it compares each input with the call of the agent to the same tool at the same place, as canonical JSON. A check matches the next call of its tool and the recorded result. With a decider, Replay also scores the decider per question: the agreement, the Brier score, and a table of reliability at the bands 0.5, 0.7, 0.85, and 0.95.
+Package `routine` reads recorded runs. `routine.Replay` checks a routine against them. For each run, it reads the answers of the agent with `observe`. A run whose answer a question does not expect, or whose `find` finds no value, is one that the routine hands to the agent: Replay counts it as handed. For every other run, Replay renders each step and compares it with the call of the agent to the same tool at the same place. It compares each key of `compare`, or else each key of the rendered input, as canonical JSON. A key that only the agent sets is extra and is counted. A check matches the next call of its tool and the recorded result. A check that the agent never made is unchecked and is counted. With a decider, Replay also scores the decider per question: the agreement, the Brier score, and a table of reliability at the bands 0.5, 0.7, 0.85, and 0.95.
 
-`routine.Propose` makes a routine from the runs that completed and that nobody sent back. The most common sequence of tool names gives the steps. Each value of an input, and of a JSON answer, gets one kind:
+`routine.Propose` makes a routine from the runs that completed and that nobody sent back. The most common sequence of tool names gives the steps, and a list takes the length that most runs give it. The runs with another sequence or another length are not used, with the reason. Each value of an input, and of a JSON answer, gets one kind:
 
 - A value that every run shares is a constant.
-- A value from the input or from an earlier result is a `find` with the shortest context that reads every run. The context can hold the value of a question, through `printf`.
-- A value from a small set, at most 8 values over at least 10 runs, is a question with the option `other`.
-- A text made of such values is a `printf` template.
-- Any other value is free, `{{/* free <place> */}}`. The routine stays incomplete until a person writes it.
+- A key that some runs leave out and the others set to one value is an optional key, which the routine leaves out.
+- A list goes element by element.
+- A value from the input or from an earlier result is a `find`. Its context is the word that labels the value, such as `Number: (\d+)`, else the shortest context that reads every run.
+- A value from a small set, at most 8 values over at least 10 runs, is a question with the option `other`. The values of the answer become questions first.
+- A value whose context in a result holds the value of a question is a `find` with `printf`.
+- Any other value is free, `{{/* free <place> */}}`. The routine stays incomplete until a person writes it, and a replay of the step says "the routine cannot fill the value <place> yet".
 
-The verbs `fw routine replay` and `fw routine propose` run both over a ledger (section 12.9).
+The proposal also lists each problem that the kernel refuses in the routine. The verbs `fw routine replay` and `fw routine propose` run both over a ledger (section 12.9). Without `--ledger`, they read the ledger of the configuration.

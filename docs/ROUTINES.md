@@ -63,6 +63,7 @@ steps:                               # tool calls, in order, each through the no
   - tool: gitea.label_read
     input: '{"method": "list", "owner": "lab", "repo": "helpdesk"}'
     as: labels                       # the result text is available to later templates as .labels
+    compare: [method, owner, repo]   # optional: the keys that a replay compares; default every key of the rendered input
   - tool: gitea.issue_write
     input: >-
       {"method": "add_labels", "owner": "lab", "repo": "helpdesk",
@@ -102,6 +103,12 @@ Semantics:
 - A rendered `find` that finds nothing fails the routine at that step,
   with the reason `hole <pattern> empty`. A routine therefore never
   calls a tool with a missing value. A missing field fails the step too.
+- `compare` of a step names the keys of its input that a replay compares
+  with the call of the agent (section 3.6). Without it, a replay compares
+  every key of the rendered input. A comment in words is a key to leave
+  out. The runner never reads `compare`.
+- A `noul` takes no criteria, or criteria with the keys `true` and
+  `false` only.
 - The `steps` run in order. Each one is a normal tool call of the run.
   The policy applies (allow, ask, deny), the limits apply, and the budget
   counts the call. The ledger records it as `fw.tool.requested` and
@@ -174,7 +181,8 @@ stays the same.
 
 The one implementation is the System One HTTP client. Its request is
 `{model, state, questions}`, the shapes of the API of TypeSafe, which Clef
-and Jev both speak. One call holds up to 64 questions. The client reads
+and Jev both speak. One call holds up to 64 questions. The runner splits
+more questions of one decider into several calls. The client reads
 both spellings of the answers. Clef and Workers AI send a `choice` with
 `probabilities` and `confidence`, a `noul`, and a `score` with a `legend`
 and `probabilities`. TypeSafe sends `answer` in place of `choice`, and
@@ -191,10 +199,11 @@ it allows any built-in tool. The input is this:
 
 The output is the `fw.DecideResult` as JSON text. The ledger records it as
 any tool call, so the probabilities behind every decision sit in
-`fw.tool.responded`. The routine runner asks the decider through the same
-path, also for a profile whose tool list leaves `decide` out. A decision
-of a model and a decision of a routine therefore look the same in the
-ledger.
+`fw.tool.responded`. The tool is part of the kernel (`fw.DecideTool`).
+The routine runner calls it through the same path for its own decisions,
+whatever `tools.builtin` holds and whatever the tool list of the profile
+holds. A decision of a model and a decision of a routine therefore look
+the same in the ledger.
 
 ### 3.3 The runner
 
@@ -216,7 +225,7 @@ again.
    per routine (section 3.4). A shadow routine has the `mode` `shadow`. A
    live routine has the mode `canary` on a run that the canary share
    picked, and `live` otherwise. The pick is a stable hash of the run id
-   against `canary`, so the pick is reproducible (`fw.CanaryPick`).
+   against `canary`, so the pick is reproducible.
 3. The first routine in profile order with `mode: live` and `applies:
    true` runs. It runs its steps, then its `after` checks. A step that
    fails ends the routine: an error result, a denied call, a template
@@ -248,9 +257,19 @@ the lab profiles have one.
 
 A restart can cut a live routine off. At the next start, the runner
 records `fw.routine.applied` with `ok: false` and the reason `the process
-stopped during the routine`. The model then starts with the block. A
-follow-up message that arrives during a routine also goes to the model
-with the block, even after a routine that completed.
+stopped during the routine`. The model then starts with the block. For a
+call of the routine that waited for an approval, the kernel first denies
+the approval as `kernel`. A later answer of a person then gets the error
+that no approval waits. A follow-up message that arrives during a routine
+also goes to the model with the block, even after a routine that
+completed.
+
+A replay never runs a routine, also after a restart, because the mark
+`replayOf` of its metadata says that it is one. A branch never compares
+the decisions that it kept from its source. On a process whose runs a
+hosted coding agent drives (ARCHITECTURE.md section 19), no turn loop
+runs. The kernel therefore refuses a profile with routines there, at load
+and on an inline profile.
 
 ### 3.4 The events
 
@@ -312,50 +331,81 @@ matches, and `no` otherwise.
 
 Package `routine` offers two pure functions and the verb `fw routine`.
 
-`Replay(r Routine, runs [][]Event, opts) ReplayResult` works as follows.
-For each recorded run, it reads the answers of the agent with `observe`.
-It renders the steps with those answers and with the recorded results of
-the earlier steps. A recorded result belongs to a step by tool name and by
-place among the calls of the agent to that tool. Replay compares each
-rendered step input with the recorded call of the agent to the same tool.
-It compares canonical JSON, with the order of the keys ignored. For a match, every
-step and every `after` check of the run must match. The result lists the
-matched runs and the diverged runs. A diverged run comes with the first
-diverging step, the rendered input, and the recorded input, each bounded
-to 200 bytes. The result also lists the unreadable runs. With `--decide`,
-Replay also asks the configured decider on the input of each run. It
-reports per question the agreement with the observed answer, the Brier
-score, and a reliability table at the bands 0.5, 0.7, 0.85, and 0.95.
+`Replay(ctx, r, runs, opts) ReplayResult` works as follows. For each
+recorded run, it reads the answers of the agent with `observe`. Some runs
+are ones that the routine leaves to the agent: an answer that a question
+does not `expect`, or a `find` that finds no value. Replay counts such a
+run as handed, apart from the comparison. For every other run, it renders
+the steps with the answers and with the recorded results of the earlier
+steps. A recorded result belongs to a step by tool name and by place among
+the calls of the agent to that tool.
+
+Replay then compares each step with the recorded call of the agent to the
+same tool. It compares each key of `compare`, or else each key of the
+rendered input, as canonical JSON. A key that only the call of the agent
+holds is extra: Replay counts it and compares it not. A check `after`
+matches the next call of its tool in the same way. Its recorded result
+must hold every `contains` and no `lacks`. An agent that made no such call
+leaves the check unchecked, and Replay counts it. For a match, every step
+and every check with a call must match.
+
+The result lists the matched runs, the diverged runs, the handed runs, and
+the unreadable runs. A diverged run comes with the first diverging step,
+the key that differs, the rendered input, and the recorded input, each
+bounded to 200 bytes. With `--decide`, Replay also asks the configured
+decider on the input of each run. It reports per question the agreement
+with the observed answer and the Brier score. It also reports a
+reliability table at the bands 0.5, 0.7, 0.85, and 0.95, in the text
+output too.
 
 ```
-fw routine replay --routine r.yaml --ledger <dir> [--agent name] [--decide] [--json]
+fw routine replay --routine r.yaml [--ledger <dir>] [--agent name] [--decide] [--json]
 ```
+
+Without `--ledger`, the verb reads the ledger of the configuration.
 
 `Propose(runs [][]Event, opts) (Routine, Proposal)` is anti-unification of
 the tool calls of verified runs. It takes the sequence of tool names of
-each run. The most common sequence is the template, and the runs with
-another sequence are listed as divergent. For each call position and each
-leaf of the input JSON, across runs, it decides the kind of the leaf:
+each run. The most common sequence is the template. A list in an input
+takes the length that most runs give it. The runs with another sequence or
+another length are listed as divergent, with the reason. For each call
+position and each leaf of the input JSON, across runs, Propose decides the
+kind of the leaf:
 
 - A value that is equal everywhere is a constant.
+- A key that some runs leave out and the others set to one value is left
+  out, as an optional key. A key that some runs leave out and the others
+  set to several values is a free hole of its own.
+- A list goes element by element.
 - A value that appears in the run input or in an earlier result text
-  becomes a `find` template over that source, with the shortest
-  unambiguous context.
+  becomes a `find` template over that source. The context is the word
+  that labels the value, such as `Number: (\d+)`. Only for a labeled
+  context that is ambiguous, Propose takes the shortest unambiguous one.
 - A value from a small set becomes a question, with those values as
   options plus `other`. A small set holds at most 8 distinct values over
   at least 10 runs. The `observe` of the question comes from the tool and
-  the context that revealed the value.
+  the context that revealed the value. The values of the answer become
+  questions first.
+- A value whose context in a result holds the value of a question becomes
+  a `find` with `printf`, such as the label of a type.
 - Anything else is a free hole, `{{/* free <place> */}}`, and the proposal
   names it. A free hole makes the routine incomplete. A person then
-  templates it, or hands that step to the agent. Go does not parse the
-  form `{{ /* free */ }}` with the spaces inside.
+  templates it, or hands that step to the agent. A replay of a step with a
+  free hole fails with `the routine cannot fill the value <place> yet`. Go
+  does not parse the form `{{ /* free */ }}` with the spaces inside.
 
 The proposal lists the runs used, the agreement of the sequence, and every
-hole with its kind and its value counts.
+hole with its kind and its value counts. It also lists the optional keys
+that it left out, and each problem that the kernel refuses in the routine.
+A proposal with a problem or a free hole is not complete.
 
 ```
-fw routine propose --ledger <dir> --agent name [--runs ids] [--out r.yaml]
+fw routine propose --agent name [--ledger <dir>] [--runs ids] [--out r.yaml] [--name n] [--decider d] [--json]
 ```
+
+Without `--name`, the name is the agent name in lower case, with `-` for
+every other character. `--decider` names the decider of the questions.
+Without `--ledger`, the verb reads the ledger of the configuration.
 
 With little time, build Replay before Propose.
 
@@ -366,8 +416,9 @@ With little time, build Replay before Propose.
   what the profile says and records what happened.
 - No new scheduler, no background work, and no second ledger. The runner
   is a function at the start of a run and a function at its end.
-- At profile load, the kernel refuses a routine with more than 16 steps,
-  more than 16 questions, or a template over 4 KiB, with a clear error.
+- At profile load, the kernel refuses more than 64 routines, and a
+  routine with more than 16 steps, more than 16 checks, more than 16
+  questions, or a template over 4 KiB, with a clear error.
 - The tests cover the runner on a fake tool server and a fake decider, in
   these cases:
   - applies, below band, expect, and canary pick
