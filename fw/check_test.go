@@ -474,10 +474,10 @@ func TestCheckRunSkipsTheRunner(t *testing.T) {
 
 // After a restart, a check that made no call yet runs, and a check that a
 // restart cut off after its first call fails: the kernel never runs a
-// check twice.
+// check twice. A check in the ledger without its defaults gets them.
 func TestCheckRunAfterARestart(t *testing.T) {
 	l := NewMemLedger()
-	chk := &Check{Steps: []CheckStep{step("queue.read", "{}")}, Timeout: DefaultCheckTimeout, MaxBytes: DefaultCheckMaxBytes}
+	chk := &Check{Steps: []CheckStep{step("queue.read", "")}}
 	queued := RunQueuedData{Agent: "default", Origin: OriginBus, Metadata: map[string]string{MetaKind: RunKindCheck}, Check: chk,
 		Resolved: &ResolvedProfile{Model: "anthropic/claude-opus-5-5"}}
 	seed(t, l, "run-check-fresh",

@@ -204,7 +204,12 @@ func (a *Agent) stepCheck(ctx context.Context, rs *runState, c *cursor) error {
 	if c.toolCalls > c.keptCalls {
 		return a.fail(ctx, rs, checkInterrupted)
 	}
-	chk := *c.queued.Check
+	// The start resolved the check. A ledger that another process wrote
+	// gets the defaults here too.
+	chk, err := c.queued.Check.Resolved()
+	if err != nil {
+		return a.fail(ctx, rs, strings.TrimPrefix(err.Error(), ErrInvalidRequest.Error()+": "))
+	}
 	prof := a.profileOf(c.queued)
 	_, tools := a.runTools(ctx, rs, prof)
 	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), prefix: checkCallPrefix, check: true}
