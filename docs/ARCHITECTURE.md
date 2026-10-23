@@ -69,8 +69,8 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 
 | Type | Data |
 |---|---|
-| `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5), kept events of a branch (section 4.7) |
-| `fw.run.started` | model, tool names, brief (the sections that tools add to the system prompt), context (the data that tools add to the first user message, section 7.8.2), time zone |
+| `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5), kept events of a branch (section 4.7), the check of a check run (section 23) |
+| `fw.run.started` | model (none for a check run, section 23), tool names, brief (the sections that tools add to the system prompt), context (the data that tools add to the first user message, section 7.8.2), time zone |
 | `fw.memory.changed` | one change of a memory note by a tool call: call id, tool, operation, ref, old ref, scope, agent, size, SHA-256; never the text (section 7.8.1) |
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2), or a trusted quality receipt with its own cost snapshot (section 10.1) |
 | `fw.run.reacted` | the reaction of a person on an event of the run: `seq`, the event, `0` for the run as a whole; `reaction`, `up`, `down`, or `heart`; `by`, the subject of the person; `note`, at most 1 KB; and `receipt`, true when a thumb also recorded a quality receipt (sections 8.2 and 10.1) |
@@ -682,6 +682,8 @@ Every tool call goes through the limits middleware, `fw.LimitTools`. The configu
 
 The limits apply to the built-in tools, to MCP tools, to A2A peers, and to tools passed as Go options alike. The reason is that the middleware wraps every tool outermost. The kernel records the bounded result in the ledger, so the history that the next model call sends is bounded too. An image or a document in a result counts with its size. If it does not fit, the kernel drops it with a note. The cut keeps two thirds of the room for the head and one third for the tail. The start of a listing and the end of a log therefore both survive.
 
+The output limit does not cut the result of a step of a check run, because no model reads it. The check keeps at most its own `maxBytes` of each result (section 23.3).
+
 In a run, the kernel also writes the full text of a cut result to `.fw-tool/<call id>.txt` in the directory of the run, with every secret replaced as in the ledger, and records `fw.file.changed` for it. The note at the cut names the file and its size, so the model reads the part that it needs with the `files` tool and a line range. One careless command then costs the context window only the limit, and a lower limit, such as 16 KB for a local model, loses nothing. The `bash` tool keeps up to 1 MiB of the head of each stream and 32 KB of its tail when this limit applies to it, so the file holds the whole output of most commands. Without the limit, `bash` keeps 100 KB of the head and the tail itself. Without `tools.files.perRun`, the directory of the run is the root of the workspace, so a git checkout there wants `.fw-tool/` in its `.gitignore`.
 
 ### 7.8 Memory
@@ -1051,8 +1053,8 @@ The native API is small. Every call returns JSON. Every error is an RFC 9457 pro
 
 | Method and path | Purpose |
 |---|---|
-| `POST /v1/runs` | Create a run. Body fields: `agent`, `input`, `title`, `instructions`, `profile`, `budget`, `metadata`, `wait`, `files` (section 7.10). A trusted caller, the static token or a workload, also sets `principal` and `principalKind`, the person that the run is for, and `id`, the id of the run (section 11.9). |
-| `GET /v1/runs` | List the runs of this process. `?parent={id}` lists the children of a run. `agent`, `state`, `principal`, `batch`, and `limit` narrow the list; `batch` matches the metadata key `fw.batch`. `GET /v1/fleet/runs` of the workbench lists the runs of a whole fleet. |
+| `POST /v1/runs` | Create a run. Body fields: `agent`, `input`, `title`, `instructions`, `profile`, `budget`, `metadata`, `wait`, `files` (section 7.10), and `check` (section 23). A run with `check` calls tools and no model, and its `input` can be empty. A trusted caller, the static token or a workload, also sets `principal` and `principalKind`, the person that the run is for, and `id`, the id of the run (section 11.9). |
+| `GET /v1/runs` | List the runs of this process. `?parent={id}` lists the children of a run. `agent`, `state`, `principal`, `batch`, `kind`, and `limit` narrow the list. `batch` matches the metadata key `fw.batch`. Without `kind`, the list leaves out the check runs, and `kind=check` lists the check runs alone (section 23). `GET /v1/fleet/runs` of the workbench lists the runs of a whole fleet. |
 | `GET /v1/runs/{id}` | Get one run. |
 | `GET /v1/runs/{id}/live` | Stream the text of the run as the model produces it, as server-sent events without ids (section 5.1). For the model call in flight and every later one while the client stays connected: `delta` with `{turn, text}` for each piece of the answer, joined to at most one event per 40 ms; `tool` with `{turn, name, callId}` when the adapter yields a tool call of the response; `done` with `{turn, stopReason}` when the model call ends, `error` for a call that failed; and `idle` with `{state}` when the run leaves the running state. A client that connects in the middle of a call gets the pieces from then on. A comment line every 15 seconds keeps proxies open. The stream ends when the run finishes or the client goes, and it drops a client that falls 64 events behind. It needs the viewer role on the run, as the events route does. A run takes 16 clients; one more gets a 429. The relay of the workbench forwards it as it forwards the events route. |
 | `GET /v1/runs/{id}/events` | Stream the ledger as server-sent events. `Last-Event-ID` resumes from a sequence number. Under `Accept: application/json`, one page of events with `lines`, the short line of each event, as the MCP tool `run_events` of the workbench gives. |
@@ -1124,7 +1126,7 @@ The kernel makes no title call. A title that a model writes comes from the workb
 
 #### Annotations
 
-`Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entries `idempotencyKey`, `fw.drift.system`, and `fw.drift.instructions` (section 12.5) are the kernel's and cannot change. A request cannot set them either, on any surface. The metadata after the merge must fit the bounds of `fw.CheckMetadata`. The entries that the kernel sets, also `fw.forkOf` and `fw.forkSeq` of a branch (section 4.7) and the `fw.intake.*` entries of a job from the bus intake (section 9.3), do not count, so an entry of the kernel never makes a later annotation fail.
+`Agent.Annotate` adds metadata to a run after the kernel queued it, as the event `fw.run.annotated`. The metadata merges into the metadata of the run, and a later entry replaces an earlier one. A new `fw.title` entry changes the title of the run. The data can carry the usage, the provider, and the model of the model call that produced the metadata, such as a title call. The usage and the cost of the run then include that usage, and the metrics count it (section 10.1). With a principal, the caller needs the operator role on the run. The entries `idempotencyKey`, `fw.drift.system`, and `fw.drift.instructions` (section 12.5), and `fw.kind` of a check run (section 23), are the kernel's and cannot change. A request cannot set them either, on any surface. The metadata after the merge must fit the bounds of `fw.CheckMetadata`. The entries that the kernel sets, also `fw.forkOf` and `fw.forkSeq` of a branch (section 4.7) and the `fw.intake.*` entries of a job from the bus intake (section 9.3), do not count, so an entry of the kernel never makes a later annotation fail.
 
 The kernel annotates a run itself when the text of its profile changed across a restart, with the keys `fw.drift.system` and `fw.drift.instructions` (section 12.5).
 
@@ -1228,7 +1230,7 @@ The bus has no other contract. An earlier revision let a driver keep the last ev
 
 ### 9.3 Intake
 
-The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each message is a run request with the same body as `POST /v1/runs`. A request from the queue keeps the `principal` and the `principalKind` that it names, because the bus is a channel of the process, so the front of a fleet sends the work of a person to a worker and the run acts as that person (the workbench architecture, section 4.9). If the bus is out of reach when the process boots, the consumer does not start, and the kernel logs a warning and tries again in the background, with a pause that doubles up to 30 seconds, while the process serves its API and its health. A sandbox whose egress policy takes effect after the first packet, and a bus server that restarts, both need this.
+The setting `bus.intake` names a queue, for example `fw.jobs.reviewer`. Each message is a run request with the same body as `POST /v1/runs`. A request with `check` starts a check run (section 23). A request from the queue keeps the `principal` and the `principalKind` that it names, because the bus is a channel of the process, so the front of a fleet sends the work of a person to a worker and the run acts as that person (the workbench architecture, section 4.9). If the bus is out of reach when the process boots, the consumer does not start, and the kernel logs a warning and tries again in the background, with a pause that doubles up to 30 seconds, while the process serves its API and its health. A sandbox whose egress policy takes effect after the first packet, and a bus server that restarts, both need this.
 
 #### One job for each free run slot
 
@@ -1855,6 +1857,14 @@ func (a *Agent) Following() int
 
 // TitleFrom makes a short title from the input of a run (section 8.2).
 func TitleFrom(input string) string
+
+// WithCheck makes a run a check run: the kernel makes the tool calls of
+// the check under the policy of the agent and calls no model (section
+// 23). Resolved fills the defaults of a check and names its first
+// problem. Kind is RunKindCheck for a check run.
+func WithCheck(c Check) RunOption
+func (c Check) Resolved() (Check, error)
+func (r *Run) Kind() string
 
 // Run options: AsAgent, WithInstructions, WithRunProfile, WithRunBudget,
 // WithParent, WithMetadata, WithIdempotencyKey, WithOrigin, and
@@ -2861,7 +2871,7 @@ No decider exists by default, and a decider has no default model. The System One
 
 ### 22.3 The runner
 
-The runner acts once per run, after `fw.run.started` and before the first model turn. It acts on the routines with the standing `shadow` or `live`. It never acts on a replay or a branch. After a restart, it never runs a routine again.
+The runner acts once per run, after `fw.run.started` and before the first model turn. It acts on the routines with the standing `shadow` or `live`. It never acts on a replay, a branch, or a check run (section 23). After a restart, it never runs a routine again.
 
 1. The runner asks each decider once for the routines that share it. It calls the tool `decide` of the kernel, `fw.DecideTool`, through the tool path of the model, whatever `tools.builtin` holds. The call and the probabilities are therefore in `fw.tool.requested` and `fw.tool.responded`. The question ids are `<routine>.<question>`, and the state is the input of the run.
 2. It records one `fw.routine.decided` per routine, in the order of the profile. A shadow routine has the mode `shadow`. If the canary share picks the run, a live routine has the mode `canary`. Otherwise it has the mode `live`. The pick is a stable hash of the run id. If every question passes its band and its expected answers, the routine applies. When a decider fails, each of its routines does not apply, with the reason.
@@ -2913,3 +2923,68 @@ A process without deciders and without routines spends nothing on them. No run a
 4. Set the standing to `live` once the routine agrees with the agent. `canary` keeps a share of the runs with the agent.
 
 To turn a routine off, take it out of the list, or send an inline profile with `routines: []`. Without a decider, the load refuses a routine with questions, so a half setup never runs.
+
+## 23. Check runs
+
+A check run makes tool calls and calls no model. The front of a fleet starts one for the check of a duty, and it wakes the model of the duty only for work. A quiet queue therefore costs no tokens.
+
+### 23.1 The request
+
+A run request takes `check`. The body of `POST /v1/runs`, a message of the bus intake, and `RunRequest.Check` of the Go API take the same shape:
+
+```json
+{"agent": "triage", "input": "", "check": {"steps": [{"tool": "servicenow.query_incidents", "input": {"query": "priority<=2"}}], "timeout": "30s", "maxBytes": 1048576}}
+```
+
+| Field | Rule |
+|---|---|
+| `steps` | 1 to 5 tool calls, in order. Each step has `tool`, the name of a tool of the agent, and `input`, a JSON object. An empty input is `{}`. |
+| `timeout` | The time limit of the whole check, as a duration string such as `"30s"`, or a number of nanoseconds. The default is 30 seconds. The limit is 60 seconds. |
+| `maxBytes` | The most bytes that the output keeps of the result of each step. The default is 1 MiB. The limit is 4 MiB. |
+
+The input of a check run can be empty. The kernel refuses a check outside these bounds with a 400 that names the field. A Go caller, such as the front of a fleet, gets the same answer from `fw.Check.Resolved` before it saves a duty.
+
+The kernel sets the metadata `fw.kind` to `check` on a check run (`fw.MetaKind`, `fw.RunKindCheck`, `fw.Run.Kind`). Only the kernel sets this key. A request or an annotation with this key gets a 400.
+
+### 23.2 The calls
+
+After `fw.run.started`, the turn loop makes the calls of the steps in order. Each call takes the path of a call of the routine runner (section 22.3). The budget of the run and of its tree, the policy of the agent, and the limits of the tool apply. The ledger records `fw.tool.requested` and `fw.tool.responded` for each call, as for a call of the model. The call ids start with `check_`.
+
+- If the policy asks before the tool of a step, the run fails at once, because nobody answers a check. The error names the step, the tool, and the rule, such as `check step 1 (rm): the policy asks before this tool (rule: ask destructive), and a check runs only tools that the policy allows without a question`.
+- If the policy denies the tool of a step, the run fails with the reason of the policy.
+- If the agent has no tool with the name of a step, the run fails. A tool that the tool list of the profile leaves out counts as such a tool.
+- After a step that fails the run, no step runs.
+- An error result of a tool does not fail the run. The result of the step then has `"isError": true`, and the next step runs.
+- A tool of a check gets no asker and no connecter. A question of the tool therefore gets `fw.ErrNoAsker`, and the run never waits for a person.
+- At the time limit, the call in flight ends. The ledger records its error result, and the run fails. A step with no time left does not start.
+- Each call counts against `budget.maxToolCalls` of the run, as any call does.
+
+The `fw.run.started` of a check run names no model, and no tool writes a brief or a context for it. A process without a model therefore takes a check run. On a process whose runs a `Runner` drives (section 19.2), the turn loop runs the check runs. The runner of routines does not act on a check run.
+
+### 23.3 The output
+
+The output of a completed check run is JSON with one result per step, in the order of the steps (`fw.CheckOutput`):
+
+```json
+{"results": [{"tool": "servicenow.query_incidents", "output": {"result": {"records": [{"number": "INC0012"}]}}, "isError": false}]}
+```
+
+`output` holds the text of the result of the tool. If the text parses as JSON, `output` is that JSON. Otherwise, `output` is a JSON string.
+
+If the text is longer than `maxBytes`, the step keeps the first `maxBytes` bytes of the text, on a rune boundary. Its `output` is then a JSON string, and the result has `"cut": true`. The ledger records the cut result. A result with an image or a document keeps only its text, and it also has `"cut": true`. The output limit of the tools (`tools.limits.maxOutputBytes`, section 7.7) does not cut the result of a step, because no model reads it.
+
+A failed check run has the reason in `error`. Its output holds the results of the steps before the failure. A check run that failed at its first step has no output.
+
+The usage of a check run has no tokens and no cost. It counts the tool calls.
+
+### 23.4 Limits of a check run
+
+- A check run takes no follow-up message and no branch (section 4.7), because a message starts the model. `Agent.Send` and `Agent.Fork` refuse with `ErrInvalidRequest`, and the routes answer 400.
+- A check run has no outcome (section 20), because no model writes an answer to grade.
+- After a restart, a check run that made no call yet runs its check. A check run that a restart or a shutdown cut off after its first call fails with the error "the process stopped during the check". The kernel never runs a check twice, because it cannot know that the tools of the check only read.
+
+### 23.5 The lists and the intake
+
+`GET /v1/runs` leaves out the check runs. The query `kind=check` lists the check runs alone. The A2A method `tasks/list` and the search of recall over runs (section 7.8.3) also leave out the check runs. `GET /v1/runs/{id}` reads a check run as any run. A linked package, such as the front of a fleet, filters its own lists with `view.FilterKind`. The status of the process and the metrics count the check runs, so a Task with a check in progress is not idle.
+
+A check run comes over the bus intake as any run request (section 9.3). The retry of a failed check run keeps the check, so the retry is a check run too. The dead-letter record also holds the check.

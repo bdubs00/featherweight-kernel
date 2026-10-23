@@ -42,6 +42,7 @@ Arrows show calls or data flow, not Go imports. Dotted arrows show composition, 
 | Observability | [`surface/metrics/metrics.go`](../surface/metrics/metrics.go); [`telemetry/metrics.go`](../telemetry/metrics.go): `Attach`; [`telemetry/otlp.go`](../telemetry/otlp.go): `Export` |
 | Package environments (section 18) | [`env/`](../env/): `Start`, `toolEnv`, the tool `env`, `section`; [`fw/toolenv.go`](../fw/toolenv.go): `RegisterToolEnv`, `ExtendToolEnv`; [`fw/prompt.go`](../fw/prompt.go): `RegisterPromptSection`; [`cli/env.go`](../cli/env.go): `fw env dockerfile` |
 | Child execution and credentials | [`fw/spawn.go`](../fw/spawn.go): `SpawnChild`, `Spawner`, `Forker`; [`ax/spawn.go`](../ax/spawn.go); [`fw/connect.go`](../fw/connect.go); [`tokens/tokens.go`](../tokens/tokens.go) |
+| Check runs (section 23 of the design) | [`fw/check.go`](../fw/check.go): `Check`, `stepCheck`, `checkTool`, `CheckOutput`. The calls take `routineRun.call` of [`fw/routine_run.go`](../fw/routine_run.go). `view.FilterKind` leaves them out of the lists (added 2026-10-23). |
 | Hosted harnesses (section 19 of the design) | [`fw/runner.go`](../fw/runner.go): `Runner`, `RegisterRunner`, `WithRunner`, `Hosted`, called first by `driverBody`; [`harness/`](../harness/): [`core.go`](../harness/core.go) (ledger scan, turns, files, policy, budget), [`opencode.go`](../harness/opencode.go), [`claudecode.go`](../harness/claudecode.go) (and its hook route on the native API) |
 
 ## 2. Run execution and durability
