@@ -2,6 +2,8 @@ package routine
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -28,7 +30,7 @@ func proposeRuns(t *testing.T) ([][]fw.Event, []ticket) {
 func TestPropose(t *testing.T) {
 	runs, _ := proposeRuns(t)
 	r, prop := Propose(runs, ProposeOptions{Name: "triage", Decider: "clef"})
-	if len(prop.Runs) != 12 || len(prop.Divergent) != 1 || prop.Divergent[0] != runs[12][0].Subject ||
+	if len(prop.Runs) != 12 || len(prop.Divergent) != 1 || prop.Divergent[0].Run != runs[12][0].Subject ||
 		len(prop.Excluded) != 1 || prop.Excluded[0].Reason != "the run was sent back" {
 		t.Fatalf("proposal = %+v", prop)
 	}
@@ -131,5 +133,72 @@ func TestProposeProblems(t *testing.T) {
 	_, prop = Propose(runs, ProposeOptions{Name: "Triage Desk"})
 	if prop.Complete || len(prop.Problems) != 1 || !strings.Contains(prop.Problems[0], `"Triage Desk" is not the name of a routine`) {
 		t.Fatalf("a bad name: %+v", prop.Problems)
+	}
+}
+
+// A key that some runs leave out and the others set to one value is left
+// out, a list goes element by element, a run whose list has another
+// length is not used, and the number of an input is found after its word.
+func TestProposeOptionalKeysAndLists(t *testing.T) {
+	kinds := []string{"bug", "outage", "access"}
+	var tickets []ticket
+	for i := 0; i < 12; i++ {
+		tickets = append(tickets, ticket{number: 30 + i, kind: kinds[i%3]})
+	}
+	runs := recordRuns(t, t.TempDir(), tickets)
+	// One run sets per_page on the label read, as an agent can.
+	runs[0] = withInput(t, runs[0], 0, `{"method": "list", "owner": "lab", "repo": "helpdesk", "per_page": 100}`)
+	// One run labels one label only.
+	runs[1] = withInput(t, runs[1], 1, `{"method": "add_labels", "owner": "lab", "repo": "helpdesk", "issue_number": 31, "labels": [22]}`)
+	r, prop := Propose(runs, ProposeOptions{Name: "triage", Decider: "clef"})
+	if len(prop.Dropped) != 1 || prop.Dropped[0] != "step 1 per_page" || r.Steps[0].Input != `{"method": "list", "owner": "lab", "repo": "helpdesk"}` {
+		t.Fatalf("dropped = %v, step 1 = %s", prop.Dropped, r.Steps[0].Input)
+	}
+	if len(prop.Divergent) != 1 || prop.Divergent[0].Run != runs[1][0].Subject || !strings.Contains(prop.Divergent[0].Reason, "lists of another length") {
+		t.Fatalf("divergent = %+v", prop.Divergent)
+	}
+	if !strings.Contains(r.Steps[1].Input, "`Ticket #(-?\\d+(?:\\.\\d+)?)`") || !strings.Contains(r.Steps[1].Input, `"labels": [{{`) {
+		t.Errorf("step 2 = %s", r.Steps[1].Input)
+	}
+	for _, h := range prop.Holes {
+		if strings.Contains(h.Template, "  ") {
+			t.Errorf("a hole with a double space: %q", h.Template)
+		}
+	}
+}
+
+// withInput replaces the input of the call c of a run in its events.
+func withInput(t *testing.T, events []fw.Event, c int, input string) []fw.Event {
+	t.Helper()
+	out := slices.Clone(events)
+	n := 0
+	for i, e := range out {
+		if e.Type != fw.EvToolRequested {
+			continue
+		}
+		if n == c {
+			var d fw.ToolRequestedData
+			if err := e.Decode(&d); err != nil {
+				t.Fatal(err)
+			}
+			d.Input = json.RawMessage(input)
+			out[i].Data, _ = json.Marshal(d)
+		}
+		n++
+	}
+	return out
+}
+
+// A proposal that holds a free value fails replay by naming the value.
+func TestReplayOfAFreeValue(t *testing.T) {
+	var tickets []ticket
+	for i := 0; i < 5; i++ {
+		tickets = append(tickets, ticket{number: 60 + i, kind: []string{"bug", "outage"}[i%2]})
+	}
+	runs := recordRuns(t, t.TempDir(), tickets)
+	r, _ := Propose(runs, ProposeOptions{Name: "triage"})
+	res := Replay(context.Background(), r, runs, ReplayOptions{})
+	if len(res.Diverged) != 5 || res.Diverged[0].Reason != "the routine cannot fill the value step 2 labels[0] yet" {
+		t.Fatalf("replay = %+v", res.Diverged)
 	}
 }

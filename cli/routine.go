@@ -291,7 +291,7 @@ func cmdRoutinePropose(ctx context.Context, g *globals, args []string) int {
 	}
 	head := fmt.Sprintf("# Proposed by fw routine propose from %d runs of the agent %s.\n", len(prop.Runs), *agent)
 	if !prop.Complete {
-		head += "# Not complete: write each {{/* free ... */}} value, or hand that step to the agent.\n"
+		head += "# Not complete: write each value that the routine cannot fill yet, or hand that step to the agent.\n"
 	}
 	body = append([]byte(head), body...)
 	if *out != "" {
@@ -343,11 +343,14 @@ func routineName(agent string) string {
 func writeProposal(w io.Writer, r fw.Routine, p routine.Proposal) {
 	total := len(p.Runs) + len(p.Divergent)
 	fmt.Fprintf(w, "%s: %d of %d completed runs make the calls %s (%.0f%%)\n", r.Name, len(p.Runs), total, strings.Join(p.Sequence, ", "), 100*p.Agreement)
-	if len(p.Divergent) > 0 {
-		fmt.Fprintf(w, "  other calls: %s\n", strings.Join(p.Divergent, ", "))
+	for _, x := range p.Divergent {
+		fmt.Fprintf(w, "  not used: %s, %s\n", x.Run, x.Reason)
 	}
 	for _, x := range p.Excluded {
 		fmt.Fprintf(w, "  left out: %s, %s\n", x.Run, x.Reason)
+	}
+	for _, x := range p.Dropped {
+		fmt.Fprintf(w, "  optional, left out: %s\n", x)
 	}
 	for _, x := range p.Problems {
 		fmt.Fprintf(w, "  to fix: %s\n", x)
@@ -355,20 +358,25 @@ func writeProposal(w io.Writer, r fw.Routine, p routine.Proposal) {
 	if len(p.Holes) > 0 {
 		fmt.Fprintln(w, "Values that differ between runs:")
 	}
+	kinds := map[string]string{
+		routine.HoleFind:     "found in %s",
+		routine.HoleQuestion: "the question %s",
+		routine.HoleFree:     "a value the routine cannot fill yet",
+	}
 	for _, h := range p.Holes {
 		where := "answer"
 		if h.Step > 0 {
 			where = fmt.Sprintf("step %d %s", h.Step, h.Tool)
 		}
-		fmt.Fprintf(w, "  %s %s: %s, %d values", where, h.Path, h.Kind, h.Distinct)
-		if h.Name != "" {
-			fmt.Fprintf(w, ", %s", h.Name)
+		kind := kinds[h.Kind]
+		if strings.Contains(kind, "%s") {
+			kind = fmt.Sprintf(kind, h.Name)
 		}
-		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  %s %s: %s, %d values\n", where, h.Path, kind, h.Distinct)
 	}
 	if p.Complete {
 		fmt.Fprintln(w, "The routine is complete. Run fw routine replay on it before it rehearses.")
 	} else {
-		fmt.Fprintln(w, "The routine is not complete: write each free value, or hand that step to the agent.")
+		fmt.Fprintln(w, "The routine is not complete: write each value that it cannot fill yet, or hand that step to the agent.")
 	}
 }

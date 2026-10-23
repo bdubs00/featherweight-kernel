@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
@@ -17,36 +18,41 @@ import (
 const (
 	HoleFind     = "find"     // a value from the input or an earlier result
 	HoleQuestion = "question" // a value from a small set: a question for the decider
-	HoleTemplate = "template" // a text made of other holes
-	HoleFree     = "free"     // anything else: a person templates it
+	HoleFree     = "free"     // anything else: a person fills it
 )
 
-// ProposeOptions are the options of Propose. Name and Decider name the
-// routine and its decider. A value becomes a question when it has at most
-// MaxOptions distinct values over at least MinRuns runs; zero takes 8 and
-// 10.
+// A value becomes a question when it has at most maxOptions distinct
+// values over at least minRuns runs.
+const (
+	maxOptions = 8
+	minRuns    = 10
+)
+
+// ProposeOptions are the options of Propose: the name of the routine and
+// the decider of its questions.
 type ProposeOptions struct {
-	Name       string
-	Decider    string
-	MaxOptions int
-	MinRuns    int
+	Name    string
+	Decider string
 }
 
 // Proposal says how Propose made a routine. Runs are the runs that it
 // used: the runs with the most common sequence of tool calls, which is
-// Sequence. Divergent are the completed runs with another sequence, and
-// Agreement is the share of the completed runs with the sequence. Excluded
-// are the runs that it did not read, with the reason. Holes lists every
-// value that is not the same in every run, with its kind. Problems are
-// what the kernel would refuse in the routine, such as a name that is not
-// valid. Complete is false while a free hole or a problem is left.
+// Sequence, and lists of the same length. Divergent are the completed runs
+// that it did not use, with the reason, and Agreement is the share of the
+// completed runs that it used. Excluded are the runs that it did not read.
+// Holes lists every value that is not the same in every run, with its
+// kind. Dropped names the keys that some runs leave out and the others
+// set to one value, which the routine leaves out. Problems are what the
+// kernel would refuse in the routine. Complete is false while a free hole
+// or a problem is left.
 type Proposal struct {
 	Runs      []string     `json:"runs"`
-	Divergent []string     `json:"divergent,omitempty"`
+	Divergent []Unreadable `json:"divergent,omitempty"`
 	Excluded  []Unreadable `json:"excluded,omitempty"`
 	Sequence  []string     `json:"sequence"`
 	Agreement float64      `json:"agreement"`
 	Holes     []Hole       `json:"holes"`
+	Dropped   []string     `json:"dropped,omitempty"`
 	Problems  []string     `json:"problems,omitempty"`
 	Complete  bool         `json:"complete"`
 }
@@ -69,22 +75,21 @@ type Hole struct {
 
 // Propose makes a routine from verified runs of an agent (docs/ROUTINES.md
 // section 3.6): the runs that completed and that no one sent back. The most
-// common sequence of tool names is the sequence of the steps. For each
-// value of the input of each call, and of a JSON answer: a value that is
-// the same in every run is a constant; a value that the input of the run
-// or an earlier result holds becomes a find over that source, with the
-// shortest context that finds it in every run; a value from a small set
-// becomes a question with those values as options and other, observed from
-// the tool and the context that showed it; a text made of such values
-// becomes a template; anything else is a free hole, {{/* free <path> */}},
-// which a person templates or hands to the agent.
+// common sequence of tool names is the sequence of the steps, and a list
+// in an input has the length that most runs give it. For each value of the
+// input of each call, and of a JSON answer:
+//   - a value that is the same in every run is a constant;
+//   - a key that some runs leave out and the others set to one value is
+//     left out;
+//   - a value that the input of the run or an earlier result holds becomes
+//     a find over that source, with a context that reads every run: the
+//     word before the value first, else the shortest context;
+//   - a value from a small set becomes a question with those values as
+//     options and other, observed where the agent wrote it;
+//   - a value whose context in a result holds the value of a question
+//     becomes a find with printf, such as the label of a type;
+//   - anything else is a free hole, {{/* free <place> */}}.
 func Propose(runs [][]fw.Event, opts ProposeOptions) (fw.Routine, Proposal) {
-	if opts.MaxOptions <= 0 {
-		opts.MaxOptions = 8
-	}
-	if opts.MinRuns <= 0 {
-		opts.MinRuns = 10
-	}
 	prop := Proposal{Runs: []string{}, Holes: []Hole{}}
 	var done []record
 	for _, events := range runs {
@@ -101,37 +106,16 @@ func Propose(runs [][]fw.Event, opts ProposeOptions) (fw.Routine, Proposal) {
 	if len(done) == 0 {
 		return fw.Routine{}, prop
 	}
-	// The most common sequence of tool names; the first run breaks a tie.
-	key := func(r record) string {
-		var names []string
-		for _, c := range r.calls {
-			names = append(names, c.tool)
-		}
-		return strings.Join(names, "\x00")
-	}
-	count := map[string]int{}
-	best := ""
-	for _, r := range done {
-		k := key(r)
-		count[k]++
-		if count[k] > count[best] || best == "" {
-			best = k
-		}
-	}
-	var used []record
-	for _, r := range done {
-		if key(r) == best {
-			used = append(used, r)
-			prop.Runs = append(prop.Runs, r.id)
-		} else {
-			prop.Divergent = append(prop.Divergent, r.id)
-		}
-	}
+	used := majority(done, sequenceOf, "another sequence of calls", &prop)
+	used = majority(used, listsOf, "lists of another length in its calls", &prop)
 	prop.Agreement = float64(len(used)) / float64(len(done))
+	for _, r := range used {
+		prop.Runs = append(prop.Runs, r.id)
+	}
 	for _, c := range used[0].calls {
 		prop.Sequence = append(prop.Sequence, c.tool)
 	}
-	p := &proposer{opts: opts, runs: used, names: map[string]bool{}}
+	p := &proposer{runs: used, names: map[string]bool{"input": true, "json": true, "meta": true}, answers: map[string][]string{}}
 	r := p.build()
 	if r.Name = opts.Name; r.Name == "" {
 		r.Name = "proposed"
@@ -140,7 +124,7 @@ func Propose(runs [][]fw.Event, opts ProposeOptions) (fw.Routine, Proposal) {
 	if len(r.Questions) > 0 {
 		r.Decider = opts.Decider
 	}
-	prop.Holes = p.holes
+	prop.Holes, prop.Dropped = p.holes, p.dropped
 	prop.Problems = fw.RoutineProblems(nil, []fw.Routine{r})
 	prop.Complete = len(prop.Problems) == 0
 	for _, h := range p.holes {
@@ -149,6 +133,62 @@ func Propose(runs [][]fw.Event, opts ProposeOptions) (fw.Routine, Proposal) {
 		}
 	}
 	return r, prop
+}
+
+// majority keeps the runs whose key is the most common one, the first run
+// breaking a tie, and lists the others as divergent with the reason.
+func majority(runs []record, key func(record) string, reason string, prop *Proposal) []record {
+	count := map[string]int{}
+	best := key(runs[0])
+	for _, r := range runs {
+		k := key(r)
+		count[k]++
+		if count[k] > count[best] {
+			best = k
+		}
+	}
+	var out []record
+	for _, r := range runs {
+		if key(r) == best {
+			out = append(out, r)
+		} else {
+			prop.Divergent = append(prop.Divergent, Unreadable{Run: r.id, Reason: reason})
+		}
+	}
+	return out
+}
+
+// sequenceOf is the sequence of the tool names of a run.
+func sequenceOf(r record) string {
+	var names []string
+	for _, c := range r.calls {
+		names = append(names, c.tool)
+	}
+	return strings.Join(names, "\x00")
+}
+
+// listsOf names the length of each list in the inputs of the calls of a
+// run, so runs with lists of the same lengths have the same key.
+func listsOf(r record) string {
+	var b strings.Builder
+	var walk func(path string, v any)
+	walk = func(path string, v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for _, k := range slices.Sorted(maps.Keys(x)) {
+				walk(path+"."+k, x[k])
+			}
+		case []any:
+			fmt.Fprintf(&b, "%s=%d;", path, len(x))
+			for i, e := range x {
+				walk(fmt.Sprintf("%s[%d]", path, i), e)
+			}
+		}
+	}
+	for i, c := range r.calls {
+		walk(strconv.Itoa(i), decodeJSON(c.input))
+	}
+	return b.String()
 }
 
 // sentBack reports whether a quality receipt of the run says rejected.
@@ -165,34 +205,25 @@ func sentBack(events []fw.Event) bool {
 	return false
 }
 
-// proposer builds one routine from runs with the same sequence of calls.
+// proposer builds one routine from runs with the same calls.
 type proposer struct {
-	opts      ProposeOptions
 	runs      []record
 	names     map[string]bool // the fields of the template data in use
 	questions map[string]fw.RoutineQuestion
+	answers   map[string][]string // the value of each question, by run
+	sources   []source            // the results that a find reads, with their as
 	holes     []Hole
-	sources   []source // the input, then each result that a template reads
-	known     []known  // the values of finds and questions, for templates
+	dropped   []string
 }
 
-// source is a text that a find reads: the input of the run, or the result
-// of a call, by run.
+// source is the result of a call that a find reads, by its as.
 type source struct {
-	field string // the template field: input, or the as of a step
-	step  int    // the call, from 0, or -1 for the input
-	texts []string
-}
-
-// known is a hole whose value a template of text can use.
-type known struct {
-	expr string   // a template expression, such as .type or (find .input `#(\d+)`)
-	vals []string // by run
+	field string
+	step  int
 }
 
 // node is the shape of a JSON value that is the same in every run: an
-// object with the same keys, or an array of the same length. Any other
-// value is a leaf.
+// object, or a list of the same length. Any other value is a leaf.
 type node struct {
 	keys  []string
 	kids  map[string]*node
@@ -200,7 +231,7 @@ type node struct {
 	leaf  *leafVal
 }
 
-// leafVal is one value of the input of a call, by run.
+// leafVal is one value of the input of a call, or of the answer, by run.
 type leafVal struct {
 	step int // the call, from 0, or -1 for the answer
 	tool string
@@ -208,72 +239,44 @@ type leafVal struct {
 	vals []string // the value as text: a string unquoted, else its JSON
 	raw  []any
 	str  bool // a string in every run
-	tmpl string
 	kind string
+	name string // the question, or the source of a find
+	tmpl string
 }
 
 func (p *proposer) build() fw.Routine {
-	n := len(p.runs)
 	p.questions = map[string]fw.RoutineQuestion{}
-	p.names["input"], p.names["json"], p.names["meta"] = true, true, true
-	inputs := make([]string, n)
-	for i, r := range p.runs {
-		inputs[i] = r.input
-	}
-	p.sources = []source{{field: "input", step: -1, texts: inputs}}
-	// The tree of the input of each call, and the leaves in order.
 	calls := len(p.runs[0].calls)
 	trees := make([]*node, calls)
 	var leaves []*leafVal
 	for c := 0; c < calls; c++ {
-		vals := make([]any, n)
+		vals := make([]any, len(p.runs))
 		for i, r := range p.runs {
 			vals[i] = decodeJSON(r.calls[c].input)
 		}
-		trees[c] = shape(vals, "", c, p.runs[0].calls[c].tool, &leaves)
+		trees[c] = p.shape(vals, "", c, p.runs[0].calls[c].tool, &leaves)
 	}
-	// The answer: a text before a JSON object, the same in every run, or a
-	// text as a whole.
-	prefix, answerTree := answerShape(p.runs, &leaves)
-	// Each kind in turn, so a later kind can use the holes of an earlier one.
-	var outputs []string
-	for _, r := range p.runs {
-		outputs = append(outputs, r.output)
+	prefix, answerTree := p.answerShape(&leaves)
+	// Each pass in turn, so a later pass can use the questions of an
+	// earlier one. The values of the answer become questions first.
+	passes := []func(*leafVal) bool{
+		p.constant,
+		func(l *leafVal) bool { return p.find(l, false) },
+		func(l *leafVal) bool { return l.step < 0 && p.question(l) },
+		func(l *leafVal) bool { return p.find(l, true) },
+		func(l *leafVal) bool { return l.step >= 0 && p.question(l) },
 	}
-	for _, l := range leaves {
-		p.constant(l)
-	}
-	for _, l := range leaves {
-		if l.kind == "" {
-			p.find(l, false)
-		}
-	}
-	for _, l := range leaves {
-		if l.kind == "" && l.step < 0 {
-			p.question(l, outputs)
+	for _, pass := range passes {
+		for _, l := range leaves {
+			if l.kind == "" {
+				pass(l)
+			}
 		}
 	}
 	for _, l := range leaves {
 		if l.kind == "" {
-			p.find(l, true)
+			p.free(l)
 		}
-	}
-	for _, l := range leaves {
-		if l.kind == "" {
-			p.template(l)
-		}
-	}
-	for _, l := range leaves {
-		if l.kind == "" && l.step >= 0 {
-			p.question(l, outputs)
-		}
-	}
-	for _, l := range leaves {
-		if l.kind == "" {
-			l.kind, l.tmpl = HoleFree, "{{/* free "+holeName(l)+" */}}"
-		}
-	}
-	for _, l := range leaves {
 		if l.kind != "constant" {
 			p.holes = append(p.holes, hole(l))
 		}
@@ -283,34 +286,34 @@ func (p *proposer) build() fw.Routine {
 		r.Questions = nil
 	}
 	as := map[int]string{}
-	for _, s := range p.sources[1:] {
+	for _, s := range p.sources {
 		as[s.step] = s.field
 	}
 	for c := 0; c < calls; c++ {
 		r.Steps = append(r.Steps, fw.RoutineStep{Tool: p.runs[0].calls[c].tool, Input: render(trees[c]), As: as[c]})
 	}
-	switch {
-	case answerTree != nil:
+	if answerTree != nil {
 		r.Answer = escapeText(prefix) + render(answerTree)
-	default:
-		r.Answer = render(&node{leaf: leaves[len(leaves)-1]})
+	} else {
+		r.Answer = leaves[len(leaves)-1].tmpl
 	}
 	return r
 }
 
-// holeName names a leaf in the comment of a free hole.
-func holeName(l *leafVal) string {
-	if l.step < 0 {
-		return "answer" + dotted(l.path)
+// place names a leaf for a person, such as "step 2 labels[0]" or "answer
+// type".
+func place(l *leafVal) string {
+	where := "answer"
+	if l.step >= 0 {
+		where = fmt.Sprintf("step %d", l.step+1)
 	}
-	return fmt.Sprintf("step %d %s", l.step+1, strings.TrimPrefix(l.path, "."))
-}
-
-func dotted(path string) string {
-	if path == "" {
-		return ""
+	switch path := strings.TrimPrefix(l.path, "."); {
+	case path != "":
+		return where + " " + path
+	case l.step >= 0:
+		return where + " input"
 	}
-	return " " + strings.TrimPrefix(path, ".")
+	return where
 }
 
 func hole(l *leafVal) Hole {
@@ -328,21 +331,13 @@ func hole(l *leafVal) Hole {
 	for _, v := range top[:min(8, len(top))] {
 		values[bound(v)] = counts[v]
 	}
-	h := Hole{Step: l.step + 1, Tool: l.tool, Path: strings.TrimPrefix(l.path, "."), Kind: l.kind, Template: l.tmpl, Values: values, Distinct: len(counts)}
+	h := Hole{Step: l.step + 1, Tool: l.tool, Path: strings.TrimPrefix(l.path, "."), Kind: l.kind, Name: l.name,
+		Template: l.tmpl, Values: values, Distinct: len(counts)}
 	if h.Path == "" {
 		h.Path = "(whole)"
 	}
-	if l.step < 0 {
-		h.Step = 0
-	}
-	if m := fieldRef.FindStringSubmatch(l.tmpl); m != nil {
-		h.Name = m[1]
-	}
 	return h
 }
-
-// fieldRef finds the first field of a template, for the name of a hole.
-var fieldRef = regexp.MustCompile(`\.([a-z][a-z0-9_]*)`)
 
 // decodeJSON decodes an input with its numbers kept as written.
 func decodeJSON(raw []byte) any {
@@ -356,29 +351,53 @@ func decodeJSON(raw []byte) any {
 }
 
 // shape builds the tree of the values of the runs at one place, and adds
-// each leaf to leaves.
-func shape(vals []any, path string, step int, tool string, leaves *[]*leafVal) *node {
-	if m0, ok := vals[0].(map[string]any); ok {
-		keys := slices.Sorted(maps.Keys(m0))
-		same := true
-		for _, v := range vals[1:] {
-			m, ok := v.(map[string]any)
-			if !ok || !slices.Equal(slices.Sorted(maps.Keys(m)), keys) {
-				same = false
-				break
+// each leaf to leaves. In an object, a key that some runs leave out is
+// dropped when the others agree on its value, and is a free hole of its
+// own otherwise. A list has the same length in every run (listsOf).
+func (p *proposer) shape(vals []any, path string, step int, tool string, leaves *[]*leafVal) *node {
+	objs := make([]map[string]any, len(vals))
+	isObj := true
+	for i, v := range vals {
+		if objs[i], isObj = v.(map[string]any); !isObj {
+			break
+		}
+	}
+	if isObj {
+		keys := map[string]bool{}
+		for _, o := range objs {
+			for k := range o {
+				keys[k] = true
 			}
 		}
-		if same {
-			n := &node{keys: keys, kids: map[string]*node{}}
-			for _, k := range keys {
-				kv := make([]any, len(vals))
-				for i, v := range vals {
-					kv[i] = v.(map[string]any)[k]
+		n := &node{kids: map[string]*node{}}
+		for _, k := range slices.Sorted(maps.Keys(keys)) {
+			kv := make([]any, len(vals))
+			var present []string
+			for i, o := range objs {
+				if v, ok := o[k]; ok {
+					kv[i] = v
+					b, _ := json.Marshal(v)
+					present = append(present, string(b))
 				}
-				n.kids[k] = shape(kv, path+"."+k, step, tool, leaves)
 			}
-			return n
+			if len(present) < len(vals) {
+				if len(slices.Compact(slices.Sorted(slices.Values(present)))) == 1 {
+					p.dropped = append(p.dropped, place(&leafVal{step: step, path: path + "." + k}))
+					continue
+				}
+				l := &leafVal{step: step, tool: tool, path: path + "." + k, raw: kv}
+				for _, v := range kv {
+					b, _ := json.Marshal(v)
+					l.vals = append(l.vals, string(b))
+				}
+				p.free(l)
+				*leaves = append(*leaves, l)
+				n.keys, n.kids[k] = append(n.keys, k), &node{leaf: l}
+				continue
+			}
+			n.keys, n.kids[k] = append(n.keys, k), p.shape(kv, path+"."+k, step, tool, leaves)
 		}
+		return n
 	}
 	if a0, ok := vals[0].([]any); ok {
 		same := true
@@ -389,13 +408,13 @@ func shape(vals []any, path string, step int, tool string, leaves *[]*leafVal) *
 			}
 		}
 		if same {
-			n := &node{}
+			n := &node{items: []*node{}}
 			for j := range a0 {
 				iv := make([]any, len(vals))
 				for i, v := range vals {
 					iv[i] = v.([]any)[j]
 				}
-				n.items = append(n.items, shape(iv, fmt.Sprintf("%s[%d]", path, j), step, tool, leaves))
+				n.items = append(n.items, p.shape(iv, fmt.Sprintf("%s[%d]", path, j), step, tool, leaves))
 			}
 			return n
 		}
@@ -417,11 +436,11 @@ func shape(vals []any, path string, step int, tool string, leaves *[]*leafVal) *
 // answerShape reads the answers of the runs: a text before a JSON object
 // that every run shares, and the tree of the object. Without such an
 // object, the answer is one text leaf, the last of leaves.
-func answerShape(runs []record, leaves *[]*leafVal) (string, *node) {
+func (p *proposer) answerShape(leaves *[]*leafVal) (string, *node) {
 	var prefix string
-	objs := make([]any, len(runs))
+	objs := make([]any, len(p.runs))
 	ok := true
-	for i, r := range runs {
+	for i, r := range p.runs {
 		at := strings.IndexByte(r.output, '{')
 		if at < 0 {
 			ok = false
@@ -437,10 +456,10 @@ func answerShape(runs []record, leaves *[]*leafVal) (string, *node) {
 		prefix, objs[i] = r.output[:at], v
 	}
 	if ok {
-		return prefix, shape(objs, "", -1, "", leaves)
+		return prefix, p.shape(objs, "", -1, "", leaves)
 	}
 	l := &leafVal{step: -1, str: true}
-	for _, r := range runs {
+	for _, r := range p.runs {
 		l.vals = append(l.vals, r.output)
 		l.raw = append(l.raw, r.output)
 	}
@@ -448,55 +467,86 @@ func answerShape(runs []record, leaves *[]*leafVal) (string, *node) {
 	return "", nil
 }
 
+// whole reports whether a leaf is the whole answer as text, which renders
+// without JSON.
+func (l *leafVal) whole() bool { return l.step < 0 && l.path == "" }
+
 // constant marks a leaf that is the same in every run.
-func (p *proposer) constant(l *leafVal) {
+func (p *proposer) constant(l *leafVal) bool {
 	for _, v := range l.vals[1:] {
 		if v != l.vals[0] {
-			return
+			return false
 		}
 	}
 	l.kind = "constant"
-	if l.step < 0 && l.path == "" {
-		l.tmpl = escapeText(l.vals[0]) // a whole answer is text
-		return
+	if l.whole() {
+		l.tmpl = escapeText(l.vals[0])
+		return true
 	}
 	b, _ := json.Marshal(l.raw[0])
 	l.tmpl = escapeText(string(b))
+	return true
 }
 
-// find makes a leaf a find over the input or an earlier result: the
-// shortest context that finds its value first in every run. With printf,
-// the context can hold the value of a question, as in the label of a
-// type.
-func (p *proposer) find(l *leafVal, printf bool) {
-	if printf && len(p.questions) == 0 {
-		return
-	}
-	for _, src := range p.candidates(l) {
-		pattern, q, ok := p.context(src.texts, l.vals, isNumber(l), printf, nil)
-		if !ok {
-			continue
-		}
-		field := p.sourceField(src, l)
-		expr := "find ." + field + " " + quoteArg(pattern)
-		if q != "" {
-			expr = "find ." + field + " (printf " + quoteArg(strings.ReplaceAll(pattern, "%", "%%")) + " ." + q + ")"
-			expr = strings.Replace(expr, "%%s", "%s", 1)
-		}
-		l.kind = HoleFind
-		l.tmpl = "{{ " + expr + " }}"
-		if l.str && !(l.step < 0 && l.path == "") {
-			l.tmpl = "{{ json (" + expr + ") }}"
-		}
-		p.known = append(p.known, known{expr: "(" + expr + ")", vals: l.vals})
-		return
-	}
+// free marks a leaf that a person fills.
+func (p *proposer) free(l *leafVal) {
+	l.kind, l.tmpl = HoleFree, "{{/* free "+place(l)+" */}}"
 }
 
-// candidates returns the sources that a leaf can read: the input, and the
+// find makes a leaf a find over the input or an earlier result. With
+// withQuestion, the context of the value holds the value of a question,
+// through printf, as the label of a type in a list of labels.
+func (p *proposer) find(l *leafVal, withQuestion bool) bool {
+	names := []string{""}
+	if withQuestion {
+		names = slices.Sorted(maps.Keys(p.questions))
+	}
+	for _, src := range p.sourcesOf(l) {
+		for _, q := range names {
+			texts := src.texts
+			pattern, ok := p.context(texts, l.vals, isNumber(l), q, func(patterns []string) bool {
+				return matchesEach(patterns, texts, l.vals)
+			})
+			if !ok {
+				continue
+			}
+			field := p.field(src.step)
+			expr := "find ." + field + " " + quoteArg(pattern)
+			if q != "" {
+				expr = "find ." + field + " (printf " + quoteArg(printfFormat(pattern)) + " ." + q + ")"
+			}
+			l.kind, l.name, l.tmpl = HoleFind, field, "{{ "+expr+" }}"
+			if l.str && !l.whole() {
+				l.tmpl = "{{ json (" + expr + ") }}"
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// printfFormat makes a pattern with one %s a format of printf: every other
+// % doubles.
+func printfFormat(pattern string) string {
+	at := strings.Index(pattern, "%s")
+	return strings.ReplaceAll(pattern[:at], "%", "%%") + "%s" + strings.ReplaceAll(pattern[at+2:], "%", "%%")
+}
+
+// textSource is a text that a find can read, by run: the input (step -1)
+// or the result of a call.
+type textSource struct {
+	step  int
+	texts []string
+}
+
+// sourcesOf returns the texts that a leaf can read: the input, and the
 // results of the calls before it, or of every call for the answer.
-func (p *proposer) candidates(l *leafVal) []source {
-	out := []source{p.sources[0]}
+func (p *proposer) sourcesOf(l *leafVal) []textSource {
+	inputs := make([]string, len(p.runs))
+	for i, r := range p.runs {
+		inputs[i] = r.input
+	}
+	out := []textSource{{step: -1, texts: inputs}}
 	last := l.step
 	if last < 0 {
 		last = len(p.runs[0].calls)
@@ -506,49 +556,82 @@ func (p *proposer) candidates(l *leafVal) []source {
 		for i, r := range p.runs {
 			texts[i] = r.calls[c].result
 		}
-		out = append(out, source{step: c, texts: texts})
+		out = append(out, textSource{step: c, texts: texts})
 	}
 	return out
 }
 
-// sourceField returns the template field of a source, and names the
-// result of a call with the as of its step the first time.
-func (p *proposer) sourceField(src source, l *leafVal) string {
-	if src.step < 0 {
+// field returns the template field of a source: input, or the as of the
+// step of a result, which it names the first time.
+func (p *proposer) field(step int) string {
+	if step < 0 {
 		return "input"
 	}
-	for _, s := range p.sources[1:] {
-		if s.step == src.step {
+	for _, s := range p.sources {
+		if s.step == step {
 			return s.field
 		}
 	}
-	tool := p.runs[0].calls[src.step].tool
+	tool := p.runs[0].calls[step].tool
 	if i := strings.LastIndexByte(tool, '.'); i >= 0 {
 		tool = tool[i+1:]
 	}
-	src.field = p.newName(tool)
-	p.sources = append(p.sources, src)
-	return src.field
+	s := source{field: p.newName(tool), step: step}
+	p.sources = append(p.sources, s)
+	return s.field
 }
 
-// context searches the shortest context around the value of each run in
-// its text, before and after, that a pattern with one capture group can
-// use: the pattern finds the value of the run first in every text. With
-// printf, the context can hold the value of a question in place of %s; it
-// returns the name of that question. check, when set, decides whether a
-// pattern without printf fits, in place of the match over texts.
-func (p *proposer) context(texts, vals []string, number, printf bool, check func(string) bool) (string, string, bool) {
-	if check == nil {
-		check = func(pattern string) bool { return matchesAll(pattern, texts, vals) }
-	}
+// The capture groups of a context, and the word before a value that
+// labels it, such as "Number: " or "id":.
+var (
+	numberGroup = `(-?\d+(?:\.\d+)?)`
+	textGroup   = `(.+?)`
+	labelBefore = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_]*[^A-Za-z0-9\n]{0,4}$`)
+)
+
+// context finds a context around the value of each run in its text that a
+// pattern with one capture group reads: the word that labels the value
+// first, such as Number: before 12, else the shortest context, before and
+// after. It builds the pattern of each run from the context in the text of
+// the first run. With the question q, the context holds the value of the
+// question, which the pattern of each run takes from its run, and the
+// result has %s in its place. fits decides whether the patterns of the
+// runs fit.
+func (p *proposer) context(texts, vals []string, number bool, q string, fits func(patterns []string) bool) (string, bool) {
 	for i, t := range texts {
 		if vals[i] == "" || !strings.Contains(t, vals[i]) {
-			return "", "", false
+			return "", false
 		}
 	}
-	capture := `(.+?)`
+	group := textGroup
 	if number {
-		capture = `(-?\d+(?:\.\d+)?)`
+		group = numberGroup
+	}
+	var qv []string
+	if q != "" {
+		qv = p.answers[q]
+	}
+	try := func(pre, post string) (string, bool) {
+		if !number && post == "" {
+			return "", false // a text needs a mark after it
+		}
+		if q == "" {
+			pattern := regexp.QuoteMeta(pre) + group + regexp.QuoteMeta(post)
+			return pattern, fits(slices.Repeat([]string{pattern}, len(texts)))
+		}
+		if qv[0] == "" || !strings.Contains(pre+"\x00"+post, qv[0]) {
+			return "", false
+		}
+		patterns := make([]string, len(texts))
+		for i := range texts {
+			patterns[i] = regexp.QuoteMeta(strings.Replace(pre, qv[0], qv[i], 1)) + group + regexp.QuoteMeta(strings.Replace(post, qv[0], qv[i], 1))
+		}
+		if !fits(patterns) {
+			return "", false
+		}
+		mark := "\x01"
+		pattern := regexp.QuoteMeta(strings.Replace(pre, qv[0], mark, 1)) + group + regexp.QuoteMeta(strings.Replace(post, qv[0], mark, 1))
+		return strings.Replace(pattern, mark, "%s", 1), true
 	}
 	t0, v0 := texts[0], vals[0]
 	var at []int
@@ -560,92 +643,48 @@ func (p *proposer) context(texts, vals []string, number, printf bool, check func
 		at = append(at, from+i)
 		from += i + 1
 	}
-	var names []string
-	if printf {
-		names = slices.Sorted(maps.Keys(p.questions))
+	for _, pos := range at {
+		if pre := labelBefore.FindString(t0[:pos]); pre != "" {
+			post := ""
+			if end := pos + len(v0); !number && end < len(t0) {
+				_, n := utf8.DecodeRuneInString(t0[end:])
+				post = t0[end : end+n]
+			}
+			if pattern, ok := try(pre, post); ok {
+				return pattern, true
+			}
+		}
 	}
 	for size := 1; size <= 40; size++ {
 		for before := size; before >= 0; before-- {
 			after := size - before
-			if !number && after == 0 {
-				continue // a text needs a mark after it
-			}
 			for _, pos := range at {
-				if pos-before < 0 || pos+len(v0)+after > len(t0) {
+				end := pos + len(v0) + after
+				if pos-before < 0 || end > len(t0) || !utf8.RuneStart(t0[pos-before]) || (end < len(t0) && !utf8.RuneStart(t0[end])) {
 					continue
 				}
-				pre, post := t0[pos-before:pos], t0[pos+len(v0):pos+len(v0)+after]
-				if !printf {
-					pattern := regexp.QuoteMeta(pre) + capture + regexp.QuoteMeta(post)
-					if check(pattern) {
-						return pattern, "", true
-					}
-					continue
-				}
-				for _, q := range names {
-					qv := p.answers(q)
-					if qv[0] == "" || !strings.Contains(pre+"\x00"+post, qv[0]) {
-						continue
-					}
-					ok := true
-					for i := range texts {
-						pi := strings.Replace(pre, qv[0], qv[i], 1)
-						si := strings.Replace(post, qv[0], qv[i], 1)
-						if !matchesAll(regexp.QuoteMeta(pi)+capture+regexp.QuoteMeta(si), texts[i:i+1], vals[i:i+1]) {
-							ok = false
-							break
-						}
-					}
-					if ok {
-						pattern := regexp.QuoteMeta(strings.Replace(pre, qv[0], "\x01", 1)) + capture + regexp.QuoteMeta(strings.Replace(post, qv[0], "\x01", 1))
-						return strings.Replace(pattern, "\x01", "%s", 1), q, true
-					}
+				if pattern, ok := try(t0[pos-before:pos], t0[pos+len(v0):pos+len(v0)+after]); ok {
+					return pattern, true
 				}
 			}
 		}
 	}
-	return "", "", false
+	return "", false
 }
 
-// answers returns the value of a question in each run.
-func (p *proposer) answers(q string) []string {
-	for _, k := range p.known {
-		if k.expr == "."+q {
-			return k.vals
-		}
-	}
-	return make([]string, len(p.runs))
-}
-
-func matchesAll(pattern string, texts, vals []string) bool {
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return false
-	}
+// matchesEach reports whether the pattern of each run reads its value
+// first in its text.
+func matchesEach(patterns, texts, vals []string) bool {
 	for i, t := range texts {
-		m := re.FindStringSubmatch(t)
-		if m == nil || m[1] != vals[i] {
+		re, err := regexp.Compile(patterns[i])
+		if err != nil {
+			return false
+		}
+		if m := re.FindStringSubmatch(t); m == nil || m[1] != vals[i] {
 			return false
 		}
 	}
 	return true
-}
-
-// keyPattern returns a pattern that reads the value of a leaf after its
-// JSON key, such as "type"\s*:\s*"(.+?)", or "" for a leaf without a key.
-func keyPattern(l *leafVal) string {
-	i := strings.LastIndexByte(l.path, '.')
-	if i < 0 || strings.ContainsAny(l.path[i+1:], "[]") {
-		return ""
-	}
-	key := regexp.QuoteMeta(`"`+l.path[i+1:]+`"`) + `\s*:\s*`
-	if isNumber(l) {
-		return key + `(-?\d+(?:\.\d+)?)`
-	}
-	if !l.str {
-		return ""
-	}
-	return key + `"(.+?)"`
 }
 
 func isNumber(l *leafVal) bool {
@@ -658,37 +697,35 @@ func isNumber(l *leafVal) bool {
 }
 
 // question makes a leaf from a small set of values a question with those
-// values as options and other. outputs are the answers of the runs, for
-// the observe block of a value of the answer.
-func (p *proposer) question(l *leafVal, outputs []string) {
+// values as options and other. The observe block reads the value where the
+// agent wrote it: in the answer, or in the input of its call.
+func (p *proposer) question(l *leafVal) bool {
 	counts := map[string]int{}
 	for _, v := range l.vals {
 		counts[v]++
 	}
-	if len(p.runs) < p.opts.MinRuns || len(counts) > p.opts.MaxOptions || len(counts) < 2 {
-		return
+	if len(p.runs) < minRuns || len(counts) > maxOptions || len(counts) < 2 || (!l.str && !isNumber(l)) {
+		return false
 	}
-	if !l.str && !isNumber(l) {
-		return
-	}
-	// observe reads the value where the agent wrote it.
-	texts := outputs
-	obs := &fw.Observe{}
-	if l.step >= 0 {
-		texts = make([]string, len(p.runs))
-		for i, r := range p.runs {
+	texts := make([]string, len(p.runs))
+	obs := fw.Observe{}
+	for i, r := range p.runs {
+		texts[i] = r.output
+		if l.step >= 0 {
 			texts[i] = string(r.calls[l.step].input)
 		}
+	}
+	if l.step >= 0 {
 		obs.Tool = l.tool
 	}
 	// The pattern must read the value of every run as ObserveAnswer reads
-	// it: over the output, or over the calls of the tool, the first match.
-	check := func(pattern string) bool {
-		o := *obs
+	// it: over the answer, or over the calls of the tool, the first match.
+	pattern, ok := p.context(texts, l.vals, isNumber(l), "", func(patterns []string) bool {
+		o := obs
 		if l.step >= 0 {
-			o.Match = pattern
+			o.Match = patterns[0]
 		} else {
-			o.Answer = pattern
+			o.Answer = patterns[0]
 		}
 		q := fw.RoutineQuestion{Question: fw.Question{Type: fw.QuestionChoice}, Observe: &o}
 		for i, r := range p.runs {
@@ -697,17 +734,9 @@ func (p *proposer) question(l *leafVal, outputs []string) {
 			}
 		}
 		return true
-	}
-	// A JSON key before the value reads best and stands a change of the
-	// spaces; else the shortest context that reads every run.
-	pattern, ok := keyPattern(l), false
-	if pattern != "" && check(pattern) {
-		ok = true
-	} else {
-		pattern, _, ok = p.context(texts, l.vals, isNumber(l), false, check)
-	}
+	})
 	if !ok {
-		return
+		return false
 	}
 	if l.step >= 0 {
 		obs.Match = pattern
@@ -725,82 +754,25 @@ func (p *proposer) question(l *leafVal, outputs []string) {
 		criteria[v] = fmt.Sprintf("The agent chose %s in %d of %d runs; describe when it applies", v, counts[v], len(p.runs))
 		expect = append(expect, v)
 	}
-	where := "the answer"
-	if l.step >= 0 {
-		where = fmt.Sprintf("%s of the call of %s", strings.TrimPrefix(l.path, "."), l.tool)
-	}
 	p.questions[name] = fw.RoutineQuestion{
-		Question: fw.Question{Type: fw.QuestionChoice, Instructions: "Which value fits this run for " + where + "?", Criteria: criteria},
-		Act:      0.9, Expect: expect, Observe: obs,
+		Question: fw.Question{Type: fw.QuestionChoice, Instructions: "Which value fits this run for " + place(l) + "?", Criteria: criteria},
+		Act:      0.9, Expect: expect, Observe: &obs,
 	}
-	l.kind, l.tmpl = HoleQuestion, "{{ ."+name+" }}"
-	if l.str && !(l.step < 0 && l.path == "") {
+	p.answers[name] = l.vals
+	l.kind, l.name, l.tmpl = HoleQuestion, name, "{{ ."+name+" }}"
+	if l.str && !l.whole() {
 		l.tmpl = "{{ json ." + name + " }}"
 	}
-	p.known = append(p.known, known{expr: "." + name, vals: l.vals})
+	return true
 }
 
-// template makes a text leaf a template of the values of other holes:
-// each run gives the same text once those values are taken out.
-func (p *proposer) template(l *leafVal) {
-	if !l.str || len(p.known) == 0 {
-		return
-	}
-	var format string
-	var args []string
-	for i, v := range l.vals {
-		f, a := v, []string(nil)
-		// The longest values first, so a value inside another stays.
-		order := slices.Clone(p.known)
-		slices.SortStableFunc(order, func(x, y known) int { return len(y.vals[i]) - len(x.vals[i]) })
-		marks := map[string]string{}
-		for k, h := range order {
-			if len(h.vals[i]) < 2 || !strings.Contains(f, h.vals[i]) {
-				continue
-			}
-			mark := fmt.Sprintf("\x00%d\x00", k)
-			marks[mark] = h.expr
-			f = strings.ReplaceAll(f, h.vals[i], mark)
-		}
-		var used []string
-		for _, m := range regexp.MustCompile("\x00[0-9]+\x00").FindAllString(f, -1) {
-			used = append(used, marks[m])
-		}
-		f = regexp.MustCompile("\x00[0-9]+\x00").ReplaceAllString(strings.ReplaceAll(f, "%", "%%"), "%s")
-		a = used
-		if i == 0 {
-			format, args = f, a
-			if len(args) == 0 {
-				return
-			}
-			continue
-		}
-		if f != format || !slices.Equal(a, args) {
-			return
-		}
-	}
-	expr := "printf " + quoteArg(format) + " " + strings.Join(args, " ")
-	l.kind = HoleTemplate
-	if l.step < 0 && l.path == "" {
-		l.tmpl = "{{ " + expr + " }}"
-		return
-	}
-	l.tmpl = "{{ json (" + expr + ") }}"
-}
+// notField finds the marks that a template field cannot hold.
+var notField = regexp.MustCompile(`[^a-z0-9]+`)
 
 // newName returns a template field for a base, such as a JSON key: a
 // field name that no other field of the routine has.
 func (p *proposer) newName(base string) string {
-	b := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			return r
-		case r >= 'A' && r <= 'Z':
-			return r + 'a' - 'A'
-		}
-		return '_'
-	}, base)
-	b = strings.Trim(regexp.MustCompile(`_+`).ReplaceAllString(b, "_"), "_")
+	b := strings.Trim(notField.ReplaceAllString(strings.ToLower(base), "_"), "_")
 	if b == "" || b[0] < 'a' || b[0] > 'z' {
 		b = "v_" + b
 	}
