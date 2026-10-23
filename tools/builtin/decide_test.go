@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
+
+	_ "github.com/bdubs00/featherweight-kernel/decider/systemone"
 )
 
 // recordedAnswer is what Clef answered to the noul of the model card

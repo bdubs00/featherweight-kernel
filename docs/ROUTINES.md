@@ -131,20 +131,23 @@ stays one static binary.
 ```yaml
 deciders:
   clef:
+    driver: systemone                # optional, the registered client, systemone by default
     baseUrl: http://127.0.0.1:5100   # a System One server: POST {baseUrl}/v1/systemone
     apiKeyEnv: CLEF_API_KEY          # the secret that holds the bearer token, resolved as providers resolve theirs; optional
     model: clef                      # the model name sent; the response names the model served
     timeout: 30s
 ```
 
-`Config.Deciders map[string]DeciderConfig` mirrors `Providers`. The
-configuration has no decider by default, and a decider has no default
-model. A routine with questions and no decider is a configuration error at
-load. So is a decider name that the configuration lacks. The error names
-the problem: no silent default, and no silent skip. The token never
-enters the ledger, a log line, or an event. The redactor already strips
-the values of the environment. The client sends the token only as the
-`Authorization` header.
+`Config.Deciders map[string]DeciderConfig` mirrors `Providers`. Each field
+has a variable: `FW_DECIDERS_<NAME>_DRIVER`, `_BASE_URL`, `_API_KEY_ENV`,
+`_MODEL`, and `_TIMEOUT`. A variable creates the entry when the file lacks
+it. The configuration has no decider by default, and a decider has no
+default model. A routine with questions and no decider is a configuration
+error at load. So is a decider name that the configuration lacks. The
+error names the problem: no silent default, and no silent skip. The token
+never enters the ledger, a log line, or an event. The redactor already
+strips the values of the environment. The client sends the token only as
+the `Authorization` header.
 
 ### 3.2 The decider and the `decide` tool
 
@@ -179,7 +182,14 @@ The kernel names the result `fw.DecideResult`, not `fw.Decision`. The
 policy of the kernel already has the name `fw.Decision`. The JSON shape
 stays the same.
 
-The one implementation is the System One HTTP client. Its request is
+Package `fw` holds the interface, the configuration, the tool, and a
+registry of the clients: a driver package calls
+`fw.RegisterDecider(name, ctor)` in `init`, as a model provider does, and
+`driver` names it. A `driver` that the binary does not link stops the
+load. The one driver is the System One HTTP client, the package
+`decider/systemone`. Every build of `fw` links it, the lean build of a
+worker too, because it needs only `net/http`. So does `fw-workbench`. A
+configuration with `deciders` therefore needs no rebuild. Its request is
 `{model, state, questions}`, the shapes of the API of TypeSafe, which Clef
 and Jev both speak. One call holds up to 64 questions. The runner splits
 more questions of one decider into several calls. The client reads
@@ -407,6 +417,13 @@ Without `--name`, the name is the agent name in lower case, with `-` for
 every other character. `--decider` names the decider of the questions.
 Without `--ledger`, the verb reads the ledger of the configuration.
 
+A proposal reads many runs. That is the work of the workbench or of a
+librarian over a ledger, not of a worker. A build with the tag `lean`,
+such as the worker image, leaves out `Propose` and the verb, and `fw
+routine propose` then says so. The tag `propose` brings them back. `fw`
+without tags and `fw-workbench` carry them. Replay stays in every build,
+because it needs the rendering of the kernel.
+
 With little time, build Replay before Propose.
 
 ### 3.7 Bounds and what stays out
@@ -426,8 +443,35 @@ With little time, build Replay before Propose.
   - the warm fall-through block, present or absent
   - compared events, and a finished run that stays finished
 - The tests also cover the System One client against a recorded response,
-  the templates (find, json, missing hole), replay on a recorded ledger,
-  and propose on a synthetic set. `go test ./...` and `go vet` pass.
+  the registry of the deciders, the templates (find, json, missing hole),
+  replay on a recorded ledger, and propose on a synthetic set. `go test
+  ./...` and `go vet` pass, and `go test -tags lean ./cli/ ./routine/`
+  covers the build without propose.
+
+### 3.8 Turn routines on and off
+
+Routines cost nothing until a configuration asks for them. Without
+deciders and without routines, no run asks a decider, the tool `decide`
+is off, and the runner returns at once. The front keeps an empty store,
+which gives no profile a routine, so the hash of every pool stays and no
+Task is replaced.
+
+| Where | On | Off |
+|---|---|---|
+| The workers | `deciders.<name>` or `FW_DECIDERS_<NAME>_*`, and `decide` in `tools.builtin`, for a routine with questions | no `deciders` |
+| A profile | `agents.<name>.routines`, in `fw.yaml` or a profile file, or the store of the front for a pool | no routine, or an inline profile with `routines: []` |
+| The front | `workbench.routines.enabled` absent or true, on the bus `nats` or `mem` | `workbench.routines.enabled: false` or `FW_WORKBENCH_ROUTINES_ENABLED=off` |
+
+The thresholds of the front are `workbench.routines.readyAfter` and
+`readyAgreement`, or `FW_WORKBENCH_ROUTINES_READY_AFTER` and
+`FW_WORKBENCH_ROUTINES_READY_AGREEMENT`.
+
+One routine stops with a pause or a retirement in the store, or with its
+removal from the profile. With the front off, the next pass of the pools
+takes the routines of the store away from every profile, and the profiles
+keep the routines of their own configuration. The page then says that
+routines are off. Section 22.5 of `ARCHITECTURE.md` and section 21.7.1 of
+the architecture of the workbench give the steps.
 
 ## 4. The workbench
 
@@ -510,7 +554,8 @@ version:
 - `sentBack.agreed == 0`
 
 The thresholds live in `workbench.routines` of the configuration of the
-front. The page shows `ready` as `needs you`.
+front, beside the switch `enabled` (section 3.8). The page shows `ready`
+as `needs you`.
 
 ### 4.4 Routes and tools
 

@@ -54,7 +54,8 @@ type options struct {
 func WithSpawner(s Spawner) Option { return func(o *options) { o.spawner = s } }
 
 // WithDecider answers the calls to the decider name with d, in place of
-// the System One client of deciders.<name> (see Agent.DeciderNamed). A
+// the client that the driver of deciders.<name> builds (see
+// Agent.DeciderNamed). A
 // test gives a fake decider this way. A routine still names a key of
 // deciders, so the configuration lists the name too.
 func WithDecider(name string, d Decider) Option {

@@ -2,7 +2,10 @@
 // section 3.6). Replay checks a routine against the runs that an agent
 // made, and Propose makes a routine from them. Both are functions of the
 // events alone; only Replay with a decider makes a call. The verb fw
-// routine of package cli runs them over a ledger.
+// routine of package cli runs them over a ledger. Propose works over many
+// runs, which is the work of the workbench or of a librarian, not of a
+// worker: a build with the tag lean leaves it out, and the tag propose
+// brings it back.
 package routine
 
 import (

@@ -1682,6 +1682,7 @@ A value in `fw.yaml` and in a profile file expands `${NAME}` and `${NAME:-defaul
 | `ToolLimits` | 256 KB in, 100 KB out, 10 min | your own numbers per tool | `tools.limits:` |
 | `PersonTokens` | none | the package `tokens`, a client of a token broker, or a linked package that keeps the grants of people, such as the workbench | `tokens.url:` or `Agent.SetPersonTokens` |
 | `Spawner` | children in this process | `ax`, a child Task per child; your own | `spawn.driver:` or `fw.WithSpawner` |
+| `Decider` | none, and a routine with questions and the tool `decide` need `deciders:` | `systemone`, the client of a System One server such as Clef or Jev, or your own | `deciders.<name>.driver:` or `fw.WithDecider` |
 
 ### 12.3 Middleware
 
@@ -1741,7 +1742,7 @@ A skill is a directory with a `SKILL.md` file whose front matter names and descr
 
 Each driver registers itself by name at init, for example `fw.RegisterBus("nats", nats.New)`. A third-party Go module adds a driver by being imported. A blank import in `cmd/fw/drivers.go` selects the drivers that the default binary includes. A custom build leaves out a driver by leaving out its import.
 
-A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), `fw.RegisterRunAnnotator` adds a run annotator, `fw.RegisterService` adds a service (section 12.4), `fw.RegisterSpawner` adds a spawner driver (section 11.9), `metrics.RegisterCollector` adds series to the metrics surface (section 10.1), `cli.RegisterDoctorCheck` adds a line to `fw doctor`, `Kit.SetRelay` of the native surface sets the relay for the runs and the profiles of other processes (section 12.8), and `Agent.SetPersonTokens` gives the tool sources the tokens of people (section 7.11).
+A linked package can also change the default configuration. It calls `fw.RegisterDefaults(func(*fw.Config))` in `init`. `DefaultConfig` applies the changes after the kernel defaults, in the order of registration. A file or a variable still overrides the result. The workbench uses it to add the surface `mcp` and the tool `propose_agent` (the workbench architecture, section 1.1). In the same way, `fw.RegisterExtension` claims a configuration block (section 12.1), `fw.RegisterRunAnnotator` adds a run annotator, `fw.RegisterService` adds a service (section 12.4), `fw.RegisterSpawner` adds a spawner driver (section 11.9), `fw.RegisterDecider` adds the client of a decider (section 22.2), `metrics.RegisterCollector` adds series to the metrics surface (section 10.1), `cli.RegisterDoctorCheck` adds a line to `fw doctor`, `Kit.SetRelay` of the native surface sets the relay for the runs and the profiles of other processes (section 12.8), and `Agent.SetPersonTokens` gives the tool sources the tokens of people (section 7.11).
 
 ### 12.7 Out-of-process extension
 
@@ -1969,7 +1970,7 @@ The command line mirrors the API. Each command is one verb.
 | `fw agents [name]` | List the profiles or print one. `put` and `delete` come with `fw-workbench`. |
 | `fw whoami` | Print the local principal that the commands use |
 | `fw routine replay --routine r.yaml [--ledger dir] [--agent name] [--decide] [--json]` | Check a routine against the runs of a ledger (section 22.4) |
-| `fw routine propose --agent name [--ledger dir] [--runs ids] [--out r.yaml] [--name n] [--decider d] [--json]` | Make a routine from the runs of an agent (section 22.4) |
+| `fw routine propose --agent name [--ledger dir] [--runs ids] [--out r.yaml] [--name n] [--decider d] [--json]` | Make a routine from the runs of an agent (section 22.4). A build with the tag `lean` leaves it out, and the tag `propose` brings it back. |
 
 `fw-workbench` takes every verb above. It adds `fw-workbench mcp`, which serves the MCP server over stdio (the workbench architecture, section 3). In `fw`, the verb `mcp` fails with a message that names `fw-workbench mcp`.
 
@@ -2176,7 +2177,9 @@ tools/builtin/          bash, files, http, memory, recall, skill, clock, ask_use
                         send, spawn_task, await_task, decide
 memory/                 the memory store: notes, scopes, limits, audit, recall,
                         and the optional FTS5 index (tag memory_sqlite)
-routine/                replay and propose of routines over recorded runs (section 22.4)
+routine/                replay and propose of routines over recorded runs (section 22.4),
+                        propose only without the tag lean, or with the tag propose
+decider/systemone/      the client of a System One server, the decider driver "systemone"
 tools/mcp/              MCP client as a ToolSource, a decision point, and a Connector
 tools/a2a/              A2A peers as a ToolSource
 bus/nats/ bus/redis/
@@ -2198,7 +2201,7 @@ The workbench architecture, section 1.3, gives the layout of the workbench.
 
 ## 15. Dependencies
 
-The default binary carries these modules. The blank imports of `cmd/fw/drivers.go` and `cmd/fw/driver_*.go` link the drivers. Without a build tag the binary carries every driver. With the tag `lean` it carries the core alone, the configuration loader, the native API, the built-in tools, the MCP client, the token client of the fleet, and the telemetry, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses inside ax, for example `go build -tags lean,nats,openai,oidc ./cmd/fw`, or `docker build --build-arg TAGS=lean,nats,openai,oidc`, and the Makefile takes `TAGS`. The full binary is about 82 MB; the lean core is about 38 MB, and a worker with NATS, OpenAI, and `oidc` about 41 MB. A configuration that names a driver that the build left out stops at start with the name of the driver, except a surface or a built-in tool, which the kernel skips with a warning. One tag adds a capability and no driver: `memory_sqlite` adds the SQLite FTS5 index of the memory (section 7.8.3) from the pure-Go `modernc.org/sqlite`, in the full and in the lean build alike, for about 4 MB; without it, the memory scans the notes. The ax manifest types are defined in the `ax` package from the YAML schema, so the binary does not import the ax module. Unencrypted HTTP/2 on one port comes from the standard library `http.Server.Protocols` field.
+The default binary carries these modules. The blank imports of `cmd/fw/drivers.go` and `cmd/fw/driver_*.go` link the drivers. Without a build tag the binary carries every driver. With the tag `lean` it carries the core alone, the configuration loader, the native API, the built-in tools, the MCP client, the token client of the fleet, the System One client of the deciders, and the telemetry, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses inside ax, for example `go build -tags lean,nats,openai,oidc ./cmd/fw`, or `docker build --build-arg TAGS=lean,nats,openai,oidc`, and the Makefile takes `TAGS`. The full binary is about 82 MB; the lean core is about 38 MB, and a worker with NATS, OpenAI, and `oidc` about 41 MB. A configuration that names a driver that the build left out stops at start with the name of the driver, except a surface or a built-in tool, which the kernel skips with a warning. One tag adds a capability and no driver: `memory_sqlite` adds the SQLite FTS5 index of the memory (section 7.8.3) from the pure-Go `modernc.org/sqlite`, in the full and in the lean build alike, for about 4 MB; without it, the memory scans the notes. The tag `lean` also leaves out `fw routine propose`, which reads many runs, the work of the workbench or of a librarian over a ledger, not of a worker. The tag `propose` brings the verb back (section 22.4). `fw routine replay` stays in every build. The ax manifest types are defined in the `ax` package from the YAML schema, so the binary does not import the ax module. Unencrypted HTTP/2 on one port comes from the standard library `http.Server.Protocols` field.
 
 | Module | Used for |
 |---|---|
@@ -2838,18 +2841,23 @@ Each error names the key, such as `agents.triage.routines[0] (ack).steps[1].inpu
 
 ### 22.2 Deciders
 
-The block `deciders` names the System One servers that routines and the tool `decide` ask:
+The block `deciders` names the servers that routines and the tool `decide` ask:
 
 ```yaml
 deciders:
   clef:
+    driver: systemone                # optional, the client of the decider, systemone by default
     baseUrl: http://127.0.0.1:5100   # POST {baseUrl}/v1/systemone
     apiKeyEnv: CLEF_API_KEY          # the secret of the bearer token; empty sends no token
     model: clef                      # required; the response names the model served
     timeout: 30s                     # one call; 0 is 30s
 ```
 
-No decider exists by default, and a decider has no default model. The client posts `{model, state, questions}`, with at most 64 questions in one call. The runner splits more questions of one decider into several calls. It reads the answers of Clef and Workers AI: `choice`, `noul`, and a `score` with a legend. It also reads the answers of TypeSafe: `answer`, `probability`, and a score by level. Any other shape is an error that names the field. The token comes from `Secrets` at each call and goes only in the `Authorization` header. The redactor knows the token, so no event and no log line holds it. A tool process never gets the variable of `apiKeyEnv` (section 7.12).
+Every field has a variable: `FW_DECIDERS_<NAME>_DRIVER`, `FW_DECIDERS_<NAME>_BASE_URL`, `FW_DECIDERS_<NAME>_API_KEY_ENV`, `FW_DECIDERS_<NAME>_MODEL`, and `FW_DECIDERS_<NAME>_TIMEOUT` (section 12.1). A variable creates the entry when the file lacks it.
+
+Package `fw` holds the interface `fw.Decider`, the configuration, the tool `decide`, and a registry of the clients. A driver package registers its client in `init` with `fw.RegisterDecider(name, ctor)`, as a model provider does, and `driver` names it. Package `decider/systemone` is the one driver of the kernel, and every build links it, the lean build too, because it needs only `net/http`. A worker image therefore serves a configuration with `deciders` without a rebuild. A `driver` that the binary does not link stops the load with the drivers that it links. `fw.WithDecider` gives an agent a decider of its own, such as a fake one in a test.
+
+No decider exists by default, and a decider has no default model. The System One client posts `{model, state, questions}`, with at most 64 questions in one call. The runner splits more questions of one decider into several calls. It reads the answers of Clef and Workers AI: `choice`, `noul`, and a `score` with a legend. It also reads the answers of TypeSafe: `answer`, `probability`, and a score by level. Any other shape is an error that names the field. The token comes from `Secrets` at each call and goes only in the `Authorization` header. The redactor knows the token, so no event and no log line holds it. A tool process never gets the variable of `apiKeyEnv` (section 7.12).
 
 ### 22.3 The runner
 
@@ -2892,3 +2900,16 @@ Package `routine` reads recorded runs. `routine.Replay` checks a routine against
 - Any other value is free, `{{/* free <place> */}}`. The routine stays incomplete until a person writes it, and a replay of the step says "the routine cannot fill the value <place> yet".
 
 The proposal also lists each problem that the kernel refuses in the routine. The verbs `fw routine replay` and `fw routine propose` run both over a ledger (section 12.9). Without `--ledger`, they read the ledger of the configuration.
+
+A proposal reads many runs. That is the work of the workbench or of a librarian over a ledger, not of a worker. A build with the tag `lean`, such as a worker image, therefore leaves out `routine.Propose` and `fw routine propose`, and the verb then says so. The tag `propose` brings them back. `fw` without the tag and `fw-workbench` carry them. A replay stays in every build, because it needs the rendering of the kernel.
+
+### 22.5 Turn routines on
+
+A process without deciders and without routines spends nothing on them. No run asks a decider, the tool `decide` is off, and the runner returns at once. The rendered Task of a profile without routines does not change. These steps turn routines on for one profile:
+
+1. Name a decider in `deciders`, or with the variables `FW_DECIDERS_<NAME>_*`, and add `decide` to `tools.builtin`. A routine with questions needs both. A routine without questions needs neither.
+2. Give the profile its routines under `agents.<name>.routines`, in `fw.yaml` or in a profile file, with the standing `shadow` first. The workbench gives the profiles of a pool the routines of its store instead (the workbench architecture, section 21.3).
+3. Read the decisions and the comparisons in the ledger, or run `fw routine replay --decide` over the past runs.
+4. Set the standing to `live` once the routine agrees with the agent. `canary` keeps a share of the runs with the agent.
+
+To turn a routine off, take it out of the list, or send an inline profile with `routines: []`. Without a decider, the load refuses a routine with questions, so a half setup never runs.

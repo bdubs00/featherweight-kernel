@@ -425,7 +425,7 @@ func (rr *routineRun) decide(ctx context.Context, routines []Routine, input stri
 }
 
 // ask calls the tool decide for the questions, in calls of at most
-// maxDeciderQuestions. It returns the answers, the model, and the latency
+// MaxDeciderQuestions. It returns the answers, the model, and the latency
 // of the calls together, or why the decider gave no decision.
 func (rr *routineRun) ask(ctx context.Context, decider, routines, input string, questions map[string]Question) (map[string]Answer, string, int64, string, error) {
 	// The runner asks through the tool decide of the kernel, with the
@@ -435,9 +435,9 @@ func (rr *routineRun) ask(ctx context.Context, decider, routines, input string, 
 	answers := map[string]Answer{}
 	var model string
 	var latency int64
-	for start := 0; start < len(ids); start += maxDeciderQuestions {
+	for start := 0; start < len(ids); start += MaxDeciderQuestions {
 		part := map[string]Question{}
-		for _, id := range ids[start:min(start+maxDeciderQuestions, len(ids))] {
+		for _, id := range ids[start:min(start+MaxDeciderQuestions, len(ids))] {
 			part[id] = questions[id]
 		}
 		in, err := json.Marshal(map[string]any{"decider": decider, "state": input, "questions": part})

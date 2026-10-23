@@ -155,6 +155,12 @@ func TestEnvMapsOfStructs(t *testing.T) {
 		}, map[string]string{"FW_AGENTS_CODE_REVIEW_MODEL": "a/b", "FW_AGENTS_CODE_REVIEW_BUDGET_DEADLINE": "1m"},
 			func(c *fw.Config) any { return c.Agents["code-review"] },
 			fw.AgentProfile{System: "s", Model: "a/b", Budget: &fw.Budget{MaxTurns: 5, Deadline: time.Minute}}},
+		{"decider fields land in one entry", nil, map[string]string{
+			"FW_DECIDERS_CLEF_BASE_URL": "http://127.0.0.1:5100", "FW_DECIDERS_CLEF_API_KEY_ENV": "CLEF_API_KEY", "FW_DECIDERS_CLEF_MODEL": "clef",
+			"FW_DECIDERS_CLEF_TIMEOUT": "5s", "FW_DECIDERS_CLEF_DRIVER": "systemone",
+		},
+			func(c *fw.Config) any { return c.Deciders },
+			map[string]fw.DeciderConfig{"clef": {Driver: "systemone", BaseURL: "http://127.0.0.1:5100", APIKeyEnv: "CLEF_API_KEY", Model: "clef", Timeout: 5 * time.Second}}},
 		{"per tool limit", nil, map[string]string{"FW_TOOLS_LIMITS_PER_TOOL_HTTP_MAX_OUTPUT_BYTES": "1048576", "FW_TOOLS_LIMITS_PER_TOOL_HTTP_TIMEOUT": "1m"},
 			func(c *fw.Config) any { return c.Tools.Limits.PerTool },
 			map[string]fw.Limit{"http": {MaxOutputBytes: 1 << 20, Timeout: time.Minute}}},
