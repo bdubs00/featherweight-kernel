@@ -50,7 +50,7 @@ func cmdRoutineReplay(ctx context.Context, g *globals, args []string) int {
 	file := fs.String("routine", "", "the routine `file`, YAML or JSON")
 	dir := fs.String("ledger", "", "the root `dir` of a file ledger (default: the configured ledger)")
 	agent := fs.String("agent", "", "read only the runs of this agent `name`")
-	decide := fs.Bool("decide", false, "also ask the decider of the routine on the input of each run, and score its answers")
+	decide := fs.Bool("decide", false, "also ask the questions of the routine on the input of each run, and score the answers")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
@@ -72,7 +72,7 @@ func cmdRoutineReplay(ctx context.Context, g *globals, args []string) int {
 	}
 	check := cfg
 	if !*decide {
-		check = nil // no decider is asked, so its name needs no entry
+		check = nil // no model is asked, so its name needs no entry
 	}
 	if p := fw.RoutineProblems(check, []fw.Routine{r}); len(p) > 0 {
 		return g.fail("routine replay", fmt.Errorf("%s: %s", *file, strings.Join(p, "; ")))
@@ -176,8 +176,10 @@ func readRuns(ctx context.Context, cfg *fw.Config, dir, agent string, ids []stri
 
 // writeReplay prints the result of a replay for a person.
 func writeReplay(w io.Writer, r fw.Routine, res routine.ReplayResult) {
+	compared := len(res.Matched) + len(res.Diverged)
 	fmt.Fprintf(w, "%s, version %d: %d runs\n", res.Routine, res.Version, res.Runs)
-	fmt.Fprintf(w, "  matched     %d\n  diverged    %d\n  unreadable  %d\n", len(res.Matched), len(res.Diverged), len(res.Unreadable))
+	fmt.Fprintf(w, "  matched     %d of %d\n  diverged    %d\n", len(res.Matched), compared, len(res.Diverged))
+	fmt.Fprintf(w, "  handed      %d (the routine leaves these runs to the agent)\n  unreadable  %d\n", len(res.Handed), len(res.Unreadable))
 	if len(res.Diverged) > 0 {
 		fmt.Fprintln(w, "\nDiverged:")
 		for _, d := range res.Diverged {
@@ -190,18 +192,36 @@ func writeReplay(w io.Writer, r fw.Routine, res routine.ReplayResult) {
 			}
 		}
 	}
-	if len(res.Unreadable) > 0 {
-		fmt.Fprintln(w, "\nUnreadable:")
-		for _, u := range res.Unreadable {
+	for _, list := range []struct {
+		title string
+		runs  []routine.Unreadable
+	}{{"Handed to the agent", res.Handed}, {"Unreadable", res.Unreadable}} {
+		if len(list.runs) == 0 {
+			continue
+		}
+		fmt.Fprintf(w, "\n%s:\n", list.title)
+		for _, u := range list.runs {
 			fmt.Fprintf(w, "  %s  %s\n", u.Run, u.Reason)
+		}
+	}
+	if len(res.Extra) > 0 {
+		fmt.Fprintln(w, "\nKeys that only the agent sets, not compared:")
+		for _, x := range res.Extra {
+			fmt.Fprintf(w, "  step %d %s %s: %d runs\n", x.Step, x.Tool, x.Key, x.Runs)
+		}
+	}
+	if len(res.Unchecked) > 0 {
+		fmt.Fprintln(w, "\nChecks afterward that the agent does not make, not compared:")
+		for _, x := range res.Unchecked {
+			fmt.Fprintf(w, "  step %d %s: %d runs\n", x.Step, x.Tool, x.Runs)
 		}
 	}
 	if res.Questions == nil {
 		return
 	}
-	fmt.Fprintf(w, "\nDecisions of %s on the input of each run:\n", r.Decider)
+	fmt.Fprintf(w, "\nAnswers of the model %s on the input of each run:\n", r.Decider)
 	if res.DeciderErrors > 0 {
-		fmt.Fprintf(w, "  %d runs failed; the first error: %s\n", res.DeciderErrors, res.DeciderError)
+		fmt.Fprintf(w, "  %d runs failed. The first error: %s\n", res.DeciderErrors, strings.TrimPrefix(res.DeciderError, "fw: decider: "))
 	}
 	for _, name := range r.QuestionNames() {
 		s := res.Questions[name]
@@ -210,15 +230,16 @@ func writeReplay(w io.Writer, r fw.Routine, res routine.ReplayResult) {
 			continue
 		}
 		fmt.Fprintf(w, "  %s: agreed %d of %d (%.0f%%), Brier score %.3f\n", name, s.Agreed, s.Compared, 100*float64(s.Agreed)/float64(s.Compared), s.Brier)
+		fmt.Fprintln(w, "    probability    runs  agreed")
 		for i, b := range s.Bands {
 			span := fmt.Sprintf("below %.2f", s.Bands[min(i+1, len(s.Bands)-1)].From)
 			switch {
 			case i == len(s.Bands)-1:
-				span = fmt.Sprintf("%.2f and above", b.From)
+				span = fmt.Sprintf("%.2f and up", b.From)
 			case i > 0:
 				span = fmt.Sprintf("%.2f to %.2f", b.From, s.Bands[i+1].From)
 			}
-			fmt.Fprintf(w, "    probability %s: %d runs, %d agreed\n", span, b.Runs, b.Agreed)
+			fmt.Fprintf(w, "    %-13s %5d %7d\n", span, b.Runs, b.Agreed)
 		}
 	}
 }
@@ -230,7 +251,7 @@ func cmdRoutinePropose(ctx context.Context, g *globals, args []string) int {
 	ids := fs.String("runs", "", "read only these runs: `ids` separated by commas")
 	out := fs.String("out", "", "write the routine to this `file` (default: standard output)")
 	name := fs.String("name", "", "the `name` of the routine (default: the agent name)")
-	decider := fs.String("decider", "", "the decider `name` of the questions, a key of deciders")
+	decider := fs.String("decider", "", "the `name` of the model that answers the questions, a key of the configuration")
 	asJSON := fs.Bool("json", false, "print the routine and the proposal as JSON")
 	pos, err := parseArgs(fs, args)
 	if err != nil {

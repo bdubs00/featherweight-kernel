@@ -64,7 +64,7 @@ func TestRoutineReplayVerb(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errOut)
 	}
-	for _, want := range []string{"label, version 1: 2 runs", "matched     1", "diverged    1", "R2  step 1 tracker.label: the input differs",
+	for _, want := range []string{"label, version 1: 2 runs", "matched     1 of 2", "diverged    1", "R2  step 1 tracker.label: the key label differs",
 		`routine: {"issue":7,"label":"bug"}`, `agent:   {"issue":7,"label":"idea"}`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
@@ -110,7 +110,7 @@ func TestRoutineProposeVerb(t *testing.T) {
 	}
 	// The proposal is a routine that replay checks.
 	code, stdout, errOut = run(t, "", "routine", "replay", "--routine", out, "--ledger", dir, "--agent", "tracker")
-	if code != 0 || !strings.Contains(stdout, "matched     2") {
+	if code != 0 || !strings.Contains(stdout, "matched     2 of 2") {
 		t.Fatalf("replay of the proposal: %d %s %s", code, stdout, errOut)
 	}
 	if code, _, errOut := run(t, "", "routine", "propose", "--agent", "nobody", "--ledger", dir); code == 0 || !strings.Contains(errOut, "no completed run of the agent nobody") {

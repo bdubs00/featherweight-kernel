@@ -34,7 +34,7 @@ func TestReplay(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 	d := res.Diverged[0]
-	if d.Run != runs[2][0].Subject || d.Step != 3 || d.Tool != "gitea.issue_write" || d.Reason != "the input differs" ||
+	if d.Run != runs[2][0].Subject || d.Step != 3 || d.Tool != "gitea.issue_write" || d.Reason != "the key body differs" ||
 		!strings.Contains(d.Rendered, `"body":"Thanks. This looks like a bug."`) || !strings.Contains(d.Recorded, `"body":"Thanks, we are on it."`) {
 		t.Fatalf("divergence = %+v", d)
 	}
@@ -46,12 +46,12 @@ func TestReplay(t *testing.T) {
 	}
 
 	// A check afterward matches the next call of its tool and its result.
+	// A run without the call leaves the check unchecked.
 	checked := triage()
 	checked.After = []fw.RoutineCheck{{Tool: "gitea.issue_read", Input: `{"method": "get", "owner": "lab", "repo": "helpdesk", "issue_number": {{ find .input "#(\\d+)" }}}`, Contains: []string{"status/triaged"}}}
 	more := recordRuns(t, t.TempDir(), []ticket{{number: 5, kind: "bug", extra: true}, {number: 6, kind: "bug"}})
 	res = Replay(context.Background(), checked, more, ReplayOptions{})
-	if len(res.Matched) != 1 || res.Matched[0] != more[0][0].Subject || len(res.Diverged) != 1 ||
-		res.Diverged[0].Step != 4 || !strings.Contains(res.Diverged[0].Reason, "made 0 calls of gitea.issue_read") {
+	if len(res.Matched) != 2 || len(res.Diverged) != 0 || len(res.Unchecked) != 1 || res.Unchecked[0] != (Extra{Step: 4, Tool: "gitea.issue_read", Runs: 1}) {
 		t.Fatalf("checked = %+v", res)
 	}
 	checked.After[0].Contains = []string{"status/closed"}
@@ -82,5 +82,37 @@ func TestReplayDecide(t *testing.T) {
 		if s.Bands[i] != b {
 			t.Errorf("band %d = %+v; want %+v", i, s.Bands[i], b)
 		}
+	}
+}
+
+// A run whose answer the routine does not act on, or whose find finds no
+// value, goes to the agent and counts as handed. A key that only the call
+// of the agent holds is extra, and compare narrows the keys of a step.
+func TestReplayHandedExtraAndCompare(t *testing.T) {
+	runs := recordRuns(t, t.TempDir(), []ticket{
+		{number: 1, kind: "bug"},
+		{number: 2, kind: "bug", comment: "Thanks, we are on it."},
+		{number: 3, kind: "access"},
+	})
+	r := triage()
+	q := r.Questions["type"]
+	q.Expect = fw.Expect{"bug", "outage"}
+	r.Questions["type"] = q
+	// The routine sets no repo on the comment, and compares the comment
+	// by its issue number and method only.
+	r.Steps[2].Input = `{"method": "add_comment", "owner": "lab", "issue_number": {{ find .input "#(\\d+)" }}, "body": "Thanks."}`
+	r.Steps[2].Compare = []string{"method", "issue_number"}
+	res := Replay(context.Background(), r, runs, ReplayOptions{})
+	if len(res.Matched) != 2 || len(res.Diverged) != 0 || len(res.Handed) != 1 || !strings.Contains(res.Handed[0].Reason, "the agent answered type access") {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(res.Extra) != 1 || res.Extra[0] != (Extra{Step: 3, Tool: "gitea.issue_write", Key: "repo", Runs: 2}) {
+		t.Errorf("extra = %+v", res.Extra)
+	}
+	// A find that finds no value hands the run to the agent.
+	r.Steps[1].Input = `{"method": "add_labels", "issue_number": {{ find .input "Issue (\\d+)" }}}`
+	res = Replay(context.Background(), r, runs, ReplayOptions{})
+	if len(res.Handed) != 3 || !strings.Contains(res.Handed[0].Reason, "step 2 gitea.issue_write: the routine finds no value for Issue") {
+		t.Fatalf("empty find = %+v", res.Handed)
 	}
 }

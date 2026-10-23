@@ -2,8 +2,12 @@ package routine
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -20,15 +24,24 @@ type ReplayOptions struct {
 }
 
 // ReplayResult is what Replay found. Matched lists the runs whose every
-// step and check matched. Diverged and Unreadable list the others.
-// Questions holds the score of the decider per question, with a decider.
+// step and check matched, and Diverged the runs with a step that did not.
+// Handed lists the runs that the routine hands to the agent: an answer of
+// the agent that a question does not expect, or a find that finds no
+// value. Unreadable lists the runs whose answers Replay could not read.
+// Extra counts the keys that only the calls of the agent hold, which no
+// step compares. Unchecked counts the checks afterward that the agent
+// made no call for, which Replay skips. Questions holds the score of the
+// decider per question, with a decider.
 type ReplayResult struct {
 	Routine    string                    `json:"routine"`
 	Version    int                       `json:"version"`
 	Runs       int                       `json:"runs"`
 	Matched    []string                  `json:"matched"`
 	Diverged   []Divergence              `json:"diverged,omitempty"`
+	Handed     []Unreadable              `json:"handed,omitempty"`
 	Unreadable []Unreadable              `json:"unreadable,omitempty"`
+	Extra      []Extra                   `json:"extra,omitempty"`
+	Unchecked  []Extra                   `json:"unchecked,omitempty"`
 	Questions  map[string]*QuestionScore `json:"questions,omitempty"`
 	// DeciderErrors counts the runs on which the decider failed, and
 	// DeciderError is the first error.
@@ -49,10 +62,21 @@ type Divergence struct {
 	Recorded string `json:"recorded,omitempty"`
 }
 
-// Unreadable is a run that Replay could not read the answers of.
+// Unreadable is a run that Replay did not compare, with the reason.
 type Unreadable struct {
 	Run    string `json:"run"`
 	Reason string `json:"reason"`
+}
+
+// Extra is a key that the call of the agent holds and the rendered input
+// of the step does not, such as an optional key, with the number of runs.
+// In Unchecked, Key is empty, and the entry counts the runs without the
+// call of a check.
+type Extra struct {
+	Step int    `json:"step"`
+	Tool string `json:"tool"`
+	Key  string `json:"key"`
+	Runs int    `json:"runs"`
 }
 
 // QuestionScore is the score of the decider on one question over the runs
@@ -77,14 +101,19 @@ type Band struct {
 }
 
 // Replay checks a routine against recorded runs (docs/ROUTINES.md section
-// 3.6). For each run, it reads the answers of the agent with observe,
-// renders the steps with those answers and with the recorded results of
-// the earlier steps, and compares each rendered input with the recorded
-// call of the agent to the same tool at the same place among the calls of
-// that tool, as canonical JSON. A check afterward matches when its input
-// matches the next call of its tool and the recorded result holds every
-// contains and no lacks. A run matches when every step and every check
-// matches. ctx bounds the calls to the decider.
+// 3.6). For each run, it reads the answers of the agent with observe. A
+// run whose answers a question does not expect goes to the agent, and
+// Replay counts it as handed. Otherwise Replay renders the steps with the
+// answers and with the recorded results of the earlier steps, and
+// compares each rendered input with the recorded call of the agent to the
+// same tool at the same place among the calls of that tool. A step
+// matches when each key that it compares, every key of the rendered input
+// or the keys of compare, holds the recorded value as canonical JSON. A
+// check afterward matches the next call of its tool in the same way, and
+// the recorded result holds every contains and no lacks. An agent that
+// made no such call leaves the check unchecked. A run matches when every
+// step and every check that it has a call for matches. A find that finds no value
+// hands the run to the agent. ctx bounds the calls to the decider.
 func Replay(ctx context.Context, r fw.Routine, runs [][]fw.Event, opts ReplayOptions) ReplayResult {
 	res := ReplayResult{Routine: r.Name, Version: r.Version, Runs: len(runs), Matched: []string{}}
 	if opts.Decider != nil {
@@ -97,22 +126,31 @@ func Replay(ctx context.Context, r fw.Routine, runs [][]fw.Event, opts ReplayOpt
 			res.Questions[name] = s
 		}
 	}
+	extra, unchecked := map[Extra]int{}, map[Extra]int{}
 	for _, events := range runs {
 		rec := readRun(events)
 		observed, why := observeAll(r, rec)
-		if why == "" {
-			if d := replayRun(r, rec, observed); d != nil {
-				res.Diverged = append(res.Diverged, *d)
-			} else {
+		switch {
+		case why != "":
+			res.Unreadable = append(res.Unreadable, Unreadable{Run: rec.id, Reason: why})
+		case expected(r, observed) != "":
+			res.Handed = append(res.Handed, Unreadable{Run: rec.id, Reason: expected(r, observed)})
+		default:
+			out := replayRun(r, rec, observed, extra, unchecked)
+			switch {
+			case out.handed != "":
+				res.Handed = append(res.Handed, Unreadable{Run: rec.id, Reason: out.handed})
+			case out.div != nil:
+				res.Diverged = append(res.Diverged, *out.div)
+			default:
 				res.Matched = append(res.Matched, rec.id)
 			}
-		} else {
-			res.Unreadable = append(res.Unreadable, Unreadable{Run: rec.id, Reason: why})
 		}
 		if opts.Decider != nil && rec.done && len(r.Questions) > 0 {
 			res.score(ctx, opts.Decider, r, rec, observed)
 		}
 	}
+	res.Extra, res.Unchecked = counted(extra), counted(unchecked)
 	for _, s := range res.Questions {
 		if s.Compared > 0 {
 			s.Brier = s.sum / float64(s.Compared)
@@ -141,46 +179,87 @@ func observeAll(r fw.Routine, rec record) (map[string]string, string) {
 	return out, ""
 }
 
+// counted returns the entries of a count in the order of the steps.
+func counted(m map[Extra]int) []Extra {
+	var out []Extra
+	for k, n := range m {
+		k.Runs = n
+		out = append(out, k)
+	}
+	slices.SortFunc(out, func(a, b Extra) int {
+		if a.Step != b.Step {
+			return a.Step - b.Step
+		}
+		return strings.Compare(a.Key, b.Key)
+	})
+	return out
+}
+
+// expected returns why the answers of the agent are ones that the routine
+// does not act on, or "": an option that expect leaves out, or yes or no
+// against the expect of a noul.
+func expected(r fw.Routine, observed map[string]string) string {
+	for _, name := range r.QuestionNames() {
+		q := r.Questions[name]
+		if len(q.Expect) > 0 && !slices.ContainsFunc(q.Expect, func(v string) bool { return strings.EqualFold(v, observed[name]) }) {
+			return fmt.Sprintf("the agent answered %s %s, which the routine does not act on", name, observed[name])
+		}
+	}
+	return ""
+}
+
+// runOutcome is what replayRun found: a divergence, or why the routine
+// hands the run to the agent, or neither for a match.
+type runOutcome struct {
+	div    *Divergence
+	handed string
+}
+
 // replayRun renders the steps and the checks of the routine for one run
-// and compares them with the calls of the agent. It returns the first
-// divergence, or nil when the run matches.
-func replayRun(r fw.Routine, rec record, observed map[string]string) *Divergence {
+// and compares them with the calls of the agent. It counts the keys that
+// only the agent sets in extra, and the checks without a call of the
+// agent in unchecked.
+func replayRun(r fw.Routine, rec record, observed map[string]string, extra, unchecked map[Extra]int) runOutcome {
 	data := fw.RoutineData(rec.input, rec.meta)
 	for k, v := range observed {
 		data[k] = v
 	}
 	seen := map[string]int{}
-	match := func(place int, tool, input string) (call, *Divergence) {
+	match := func(place int, tool, input string, keys []string) (call, runOutcome) {
 		div := &Divergence{Run: rec.id, Step: place, Tool: tool}
 		j := seen[tool]
 		seen[tool]++
 		rendered, err := fw.RenderRoutineInput(input, data)
+		if errors.Is(err, fw.ErrEmptyHole) {
+			pattern := strings.TrimSuffix(strings.TrimPrefix(err.Error(), "hole "), " empty")
+			return call{}, runOutcome{handed: fmt.Sprintf("step %d %s: the routine finds no value for %s", place, tool, pattern)}
+		}
 		if err != nil {
 			div.Reason = err.Error()
-			return call{}, div
+			return call{}, runOutcome{div: div}
 		}
 		div.Rendered = bound(fw.CanonicalJSON(rendered))
 		agent := rec.callsOf(tool)
 		if j >= len(agent) {
 			div.Reason = fmt.Sprintf("the agent made %d calls of %s, and this is call %d", len(agent), tool, j+1)
-			return call{}, div
+			return call{}, runOutcome{div: div}
 		}
 		c := agent[j]
 		div.Recorded = bound(fw.CanonicalJSON(c.input))
-		if fw.CanonicalJSON(rendered) != fw.CanonicalJSON(c.input) {
-			div.Reason = "the input differs"
-			return call{}, div
+		if key, ok := sameKeys(rendered, c.input, keys, func(k string) { extra[Extra{Step: place, Tool: tool, Key: k}]++ }); !ok {
+			div.Reason = "the key " + key + " differs"
+			return call{}, runOutcome{div: div}
 		}
 		if c.isError {
 			div.Reason = "the call of the agent failed"
-			return call{}, div
+			return call{}, runOutcome{div: div}
 		}
-		return c, nil
+		return c, runOutcome{}
 	}
 	for i, s := range r.Steps {
-		c, div := match(i+1, s.Tool, s.Input)
-		if div != nil {
-			return div
+		c, out := match(i+1, s.Tool, s.Input, s.Compare)
+		if out.div != nil || out.handed != "" {
+			return out
 		}
 		if s.As != "" {
 			data[s.As] = c.result
@@ -188,30 +267,61 @@ func replayRun(r fw.Routine, rec record, observed map[string]string) *Divergence
 	}
 	for j, ck := range r.After {
 		place := len(r.Steps) + j + 1
-		c, div := match(place, ck.Tool, ck.Input)
-		if div != nil {
-			return div
+		if seen[ck.Tool] >= len(rec.callsOf(ck.Tool)) {
+			unchecked[Extra{Step: place, Tool: ck.Tool}]++
+			seen[ck.Tool]++
+			continue
 		}
-		for _, want := range ck.Contains {
-			text, err := fw.RenderRoutine(want, data)
-			if err != nil {
-				return &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: err.Error()}
-			}
-			if !strings.Contains(c.result, text) {
-				return &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: fmt.Sprintf("the result lacks %q", text)}
-			}
+		c, out := match(place, ck.Tool, ck.Input, nil)
+		if out.div != nil || out.handed != "" {
+			return out
 		}
-		for _, bad := range ck.Lacks {
-			text, err := fw.RenderRoutine(bad, data)
-			if err != nil {
-				return &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: err.Error()}
-			}
-			if strings.Contains(c.result, text) {
-				return &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: fmt.Sprintf("the result holds %q", text)}
+		texts := [][]string{ck.Contains, ck.Lacks}
+		for kind, list := range texts {
+			for _, t := range list {
+				text, err := fw.RenderRoutine(t, data)
+				switch {
+				case errors.Is(err, fw.ErrEmptyHole):
+					return runOutcome{handed: fmt.Sprintf("check %d %s: the routine finds no value for its check", j+1, ck.Tool)}
+				case err != nil:
+					return runOutcome{div: &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: err.Error()}}
+				case kind == 0 && !strings.Contains(c.result, text):
+					return runOutcome{div: &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: fmt.Sprintf("the result lacks %q", text)}}
+				case kind == 1 && strings.Contains(c.result, text):
+					return runOutcome{div: &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: fmt.Sprintf("the result holds %q", text)}}
+				}
 			}
 		}
 	}
-	return nil
+	return runOutcome{}
+}
+
+// sameKeys reports whether the recorded input holds the value of each key
+// of the rendered input, or of each key of keys when it names some, as
+// canonical JSON. It returns the first key that differs. It calls extra
+// for each key that only the recorded input holds.
+func sameKeys(rendered, recorded []byte, keys []string, extra func(string)) (string, bool) {
+	var want, got map[string]json.RawMessage
+	if json.Unmarshal(rendered, &want) != nil || json.Unmarshal(recorded, &got) != nil {
+		ok := fw.CanonicalJSON(rendered) == fw.CanonicalJSON(recorded)
+		return "(the whole input)", ok
+	}
+	for _, k := range slices.Sorted(maps.Keys(got)) {
+		if _, ok := want[k]; !ok {
+			extra(k)
+		}
+	}
+	if len(keys) == 0 {
+		keys = slices.Sorted(maps.Keys(want))
+	}
+	for _, k := range keys {
+		w, inWant := want[k]
+		g, inGot := got[k]
+		if inWant != inGot || (inWant && fw.CanonicalJSON(w) != fw.CanonicalJSON(g)) {
+			return k, false
+		}
+	}
+	return "", true
 }
 
 // score asks the decider the questions of the routine on the input of the

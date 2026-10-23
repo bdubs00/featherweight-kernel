@@ -1,3 +1,4 @@
+# A copy of the routine of the lab, with compare on two steps for replay.
 # The routine of the agent triage for the helpdesk lab/helpdesk (the kernel,
 # docs/ROUTINES.md, section 2). It does what the profile triage of
 # ../../front-config.yaml does for an ordinary ticket. It reads the labels,
@@ -87,6 +88,9 @@ steps:
   - tool: gitea.label_read
     input: '{"method": "list_repo_labels", "owner": "lab", "repo": "helpdesk", "per_page": 50}'
     as: labels
+    # A replay compares the keys that decide the call. The agent pages as
+    # it likes, so per_page stays out.
+    compare: [method, owner, repo]
   - tool: gitea.issue_write
     input: >-
       {"method": "add_labels", "owner": "lab", "repo": "helpdesk",
@@ -111,6 +115,9 @@ steps:
       The next step is a first look at what you describe.
       {{ if eq .priority `p1` }}The on-call engineer picks it up now{{ else if eq .priority `p2` }}The service team picks it up today{{ else }}The service team picks it up this week{{ end }},
       and they will reply here. You do not need to do anything until then."}
+    # The agent writes the comment in its own words, so a replay compares
+    # the call and not the text.
+    compare: [method, owner, repo, issue_number]
 after:
   - tool: gitea.issue_read
     input: '{"method": "get", "owner": "lab", "repo": "helpdesk", "issue_number": {{ find .input `Number: (\d+)` }}}'
