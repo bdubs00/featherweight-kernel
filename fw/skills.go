@@ -20,9 +20,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SkillFile is the file that makes a directory a skill.
@@ -173,10 +176,17 @@ func readSkill(dir string) (Skill, error) {
 // SkillFrontMatter returns the name and the description of the front
 // matter of the text of a SKILL.md file, as the kernel reads them for a
 // skill of the directories: the name as it stands, and the description cut
-// to 300 bytes. Both are empty for a text without front matter.
+// to 300 bytes. A description that is a YAML block scalar, such as
+// "description: >-" with its text on the lines below, is read with YAML
+// and put on one line. Both are empty for a text without front matter.
 func SkillFrontMatter(text string) (name, description string) {
 	return frontMatter(strings.NewReader(text))
 }
+
+// blockIndicator is the head of a YAML block scalar: | for a literal and >
+// for a folded one, with an indentation digit and a chomping sign, + or -,
+// in either order, and an optional comment.
+var blockIndicator = regexp.MustCompile(`^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:\s+#.*)?$`)
 
 func frontMatter(r io.Reader) (name, description string) {
 	sc := bufio.NewScanner(io.LimitReader(r, 64<<10))
@@ -184,11 +194,13 @@ func frontMatter(r io.Reader) (name, description string) {
 	if !sc.Scan() || strings.TrimSpace(sc.Text()) != "---" {
 		return "", ""
 	}
+	var fm strings.Builder
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "---" {
 			break
 		}
+		fm.WriteString(sc.Text() + "\n")
 		key, value, ok := strings.Cut(line, ":")
 		if !ok {
 			continue
@@ -201,7 +213,23 @@ func frontMatter(r io.Reader) (name, description string) {
 			description = CutSkillDescription(value)
 		}
 	}
+	if blockIndicator.MatchString(description) {
+		description = blockDescription(fm.String())
+	}
 	return name, description
+}
+
+// blockDescription reads the description of a front matter with YAML, for
+// a description that is a block scalar, and returns it on one line, cut to
+// 300 bytes. It is empty when the front matter is not valid YAML.
+func blockDescription(fm string) string {
+	var v struct {
+		Description string `yaml:"description"`
+	}
+	if yaml.Unmarshal([]byte(fm), &v) != nil {
+		return ""
+	}
+	return strings.TrimSpace(CutSkillDescription(strings.Join(strings.Fields(v.Description), " ")))
 }
 
 // CutSkillDescription cuts the description of a skill to 300 bytes at a
