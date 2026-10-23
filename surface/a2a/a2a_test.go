@@ -831,3 +831,29 @@ func TestParseDecision(t *testing.T) {
 		}
 	}
 }
+
+// ListTasks leaves out the check runs, as GET /v1/runs does, and GetTask
+// still reads one by its id.
+func TestListTasksLeavesOutCheckRuns(t *testing.T) {
+	ctx := testCtx(t)
+	queue := fw.NewTool(fw.ToolSpec{Name: "queue.read", ReadOnly: true}, func(context.Context, json.RawMessage) (fw.ToolResult, error) {
+		return fw.TextResult("{}"), nil
+	})
+	e := newEnv(t, gatedModel(make(chan struct{}, 1), make(chan struct{})), fw.WithTools(queue))
+	done := send(t, e, &sdk.SendMessageRequest{Message: userMsg("quick")})
+	mustState(t, done, sdk.TaskStateCompleted)
+	check, err := e.a.Run(ctx, "", fw.WithCheck(fw.Check{Steps: []fw.CheckStep{{Tool: "queue.read"}}}))
+	if err != nil || check.State != fw.StateCompleted {
+		t.Fatalf("check run = %+v, %v", check, err)
+	}
+	var list sdk.ListTasksResponse
+	if err := e.rpc.Call(ctx, peer.MethodListTasks, &sdk.ListTasksRequest{}, &list); err != nil {
+		t.Fatal(err)
+	}
+	if list.TotalSize != 1 || len(list.Tasks) != 1 || list.Tasks[0].ID != done.ID {
+		t.Fatalf("list = %+v", list)
+	}
+	if got, err := e.rpc.GetTask(ctx, &sdk.GetTaskRequest{ID: sdk.TaskID(check.ID)}); err != nil || got.Status.State != sdk.TaskStateCompleted {
+		t.Fatalf("GetTask of the check run = %+v, %v", got, err)
+	}
+}

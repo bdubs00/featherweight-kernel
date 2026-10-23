@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -715,5 +716,44 @@ func TestFileSearchIsBounded(t *testing.T) {
 	}
 	if len(res.Notes) != 1 || !strings.Contains(res.Notes[0], "16 MB") {
 		t.Fatalf("notes = %q", res.Notes)
+	}
+}
+
+// TestRecallLeavesOutCheckRuns checks that a search over runs never finds
+// a check run, which holds the answer of a tool and no work of the agent.
+func TestRecallLeavesOutCheckRuns(t *testing.T) {
+	ctx := context.Background()
+	s, home := newStore(t, "principal")
+	cfg := fw.DefaultConfig()
+	cfg.Home = home
+	cfg.Tools.Files.Root = t.TempDir()
+	model := fw.ModelFunc{StreamFn: func(context.Context, *fw.Request, func(fw.Delta)) (*fw.Response, error) {
+		return &fw.Response{Content: []fw.Block{fw.Text("done")}, StopReason: fw.StopEndTurn}, nil
+	}}
+	queue := fw.NewTool(fw.ToolSpec{Name: "queue.read", ReadOnly: true}, func(context.Context, json.RawMessage) (fw.ToolResult, error) {
+		return fw.TextResult(`{"zeppelin": 1}`), nil
+	})
+	a, err := fw.New(fw.WithoutDefaults(), fw.WithConfig(cfg), fw.WithLedger(fw.NewMemLedger()), fw.WithBus(fw.NewMemBus()),
+		fw.WithAuthn(fw.NoAuthn{}), fw.WithModel(model), fw.WithTools(queue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close(ctx)
+	alice := fw.WithPrincipal(ctx, &fw.Principal{Subject: "alice", Kind: fw.KindUser})
+	plain, err := a.Run(alice, "the zeppelin plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check, err := a.Run(alice, "", fw.WithMetadata(map[string]string{fw.MetaTitle: "zeppelin check"}),
+		fw.WithCheck(fw.Check{Steps: []fw.CheckStep{{Tool: "queue.read"}}}))
+	if err != nil || check.State != fw.StateCompleted {
+		t.Fatalf("check run = %+v, %v", check, err)
+	}
+	hits, err := s.Search(fw.WithAgent(ctx, a), s.Scope(fw.RunInfo{Agent: "default", Principal: "alice"}), fw.MemoryQuery{Text: "zeppelin", Kinds: []fw.MemoryKind{fw.MemoryKindRun}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Record.Ref != "run://"+plain.ID {
+		t.Fatalf("hits = %+v", hits)
 	}
 }

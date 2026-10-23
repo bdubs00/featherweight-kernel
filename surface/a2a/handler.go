@@ -96,8 +96,9 @@ func (h *handler) GetTask(ctx context.Context, req *sdk.GetTaskRequest) (*sdk.Ta
 	return toTask(r, req.HistoryLength), nil
 }
 
-// ListTasks lists runs, newest first. The page token is the id of the last
-// task of the previous page.
+// ListTasks lists runs, newest first, without the check runs, as GET
+// /v1/runs does without kind. GetTask still reads a check run by its id.
+// The page token is the id of the last task of the previous page.
 func (h *handler) ListTasks(ctx context.Context, req *sdk.ListTasksRequest) (*sdk.ListTasksResponse, error) {
 	if req == nil {
 		req = &sdk.ListTasksRequest{}
@@ -115,6 +116,9 @@ func (h *handler) ListTasks(ctx context.Context, req *sdk.ListTasksRequest) (*sd
 	}
 	var match []*fw.Run
 	for _, r := range runs {
+		if r.Kind() == fw.RunKindCheck {
+			continue
+		}
 		if req.ContextID != "" && contextOf(r) != req.ContextID {
 			continue
 		}

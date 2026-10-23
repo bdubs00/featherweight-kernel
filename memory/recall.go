@@ -209,7 +209,9 @@ func (s *Store) searchNotes(ctx context.Context, scope fw.MemoryScope, terms []s
 // principal of the scope started (runVisible). It lists them with the
 // principal in ctx, so the kernel also authorizes each run for that
 // principal (runCtx). It reads the run projection, not every event, so a
-// search stays bounded.
+// search stays bounded. A check run holds no work of the agent, only the
+// answer of a tool, so it is not a run to recall, and a duty that checks
+// every few minutes does not crowd the other runs out of the bound.
 func searchRuns(ctx context.Context, scope fw.MemoryScope, terms []string) []fw.MemoryHit {
 	a := fw.AgentFrom(ctx)
 	if a == nil {
@@ -228,7 +230,7 @@ func searchRuns(ctx context.Context, scope fw.MemoryScope, terms []string) []fw.
 	var hits []fw.MemoryHit
 	seen := 0
 	for _, r := range runs {
-		if !runVisible(scope, r) || r.ID == scope.Task {
+		if !runVisible(scope, r) || r.ID == scope.Task || r.Kind() == fw.RunKindCheck {
 			continue
 		}
 		if seen++; seen > maxRuns {
