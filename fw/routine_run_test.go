@@ -704,3 +704,43 @@ func TestRoutinesRefusedOnAHostedHarness(t *testing.T) {
 		t.Fatalf("start = %v", err)
 	}
 }
+
+// A replay never runs a routine, also after a restart, when only its
+// metadata says that it is a replay. A branch never compares the
+// decisions that it kept from its source.
+func TestRoutineSkipsReplaysAndBranches(t *testing.T) {
+	routine := ackRoutine(RoutineShadow)
+	resolved := &ResolvedProfile{Model: "anthropic/claude-opus-5-5", Routines: []Routine{routine}}
+	t.Run("replay", func(t *testing.T) {
+		l := NewMemLedger()
+		id := "run-replay"
+		seed(t, l, id,
+			MustEvent(id, EvRunQueued, RunQueuedData{Agent: "triage", Input: "Ticket #42", Origin: OriginCLI, Metadata: map[string]string{"replayOf": "run-source"}, Resolved: resolved}),
+			MustEvent(id, EvRunStarted, RunStartedData{Model: "anthropic/claude-opus-5-5"}),
+		)
+		d := &fakeDecider{answers: confident()}
+		a := routineAgent(t, newScript(endTurn(`TRIAGE {"type": "type/bug"}`)).Model(), d, &helpdesk{}, []Routine{routine}, WithLedger(l))
+		r := waitTerminal(t, a, id)
+		mustState(t, r, nil, StateCompleted)
+		if evs := ledgerEvents(t, l, id); d.calls != 0 || countType(evs, EvRoutineDecided) != 0 || countType(evs, EvRoutineCompared) != 0 {
+			t.Fatalf("a replay ran the routine: %v", eventTypes(evs))
+		}
+	})
+	t.Run("branch", func(t *testing.T) {
+		l := NewMemLedger()
+		id := "run-branch"
+		seed(t, l, id,
+			MustEvent(id, EvRunQueued, RunQueuedData{Agent: "triage", Input: "Ticket #42", Origin: OriginCLI, Kept: 3, Resolved: resolved}),
+			MustEvent(id, EvRunStarted, RunStartedData{Model: "anthropic/claude-opus-5-5"}),
+			MustEvent(id, EvRoutineDecided, RoutineDecidedData{Routine: "ack", Version: 2, Standing: RoutineShadow, Mode: RoutineShadow, Applies: true,
+				Answers: map[string]Answer{"type": {Type: QuestionChoice, Choice: "bug", Probability: 0.93}, "beyond": {Type: QuestionNoul, Probability: 0.01}}}),
+		)
+		d := &fakeDecider{answers: confident()}
+		a := routineAgent(t, newScript(endTurn(`TRIAGE {"type": "type/bug"}`)).Model(), d, &helpdesk{}, []Routine{routine}, WithLedger(l))
+		r := waitTerminal(t, a, id)
+		mustState(t, r, nil, StateCompleted)
+		if evs := ledgerEvents(t, l, id); d.calls != 0 || countType(evs, EvRoutineCompared) != 0 {
+			t.Fatalf("a branch compared the decision of its source: %v", eventTypes(evs))
+		}
+	})
+}

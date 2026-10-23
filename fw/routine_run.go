@@ -249,7 +249,9 @@ func (a *Agent) routineDue(rs *runState, c *cursor) bool {
 	if !c.started || c.routine.seen || c.terminal || c.turns > 0 || c.answered || c.rep != nil || c.queued.Kept > 0 {
 		return false
 	}
-	if a.k.override(rs.id) != nil {
+	// A replay keeps the mark of its source in its metadata, also after
+	// a restart, when the override of the process is gone.
+	if c.queued.Metadata["replayOf"] != "" || a.k.override(rs.id) != nil {
 		return false
 	}
 	return len(activeRoutines(a.profileOf(c.queued).Routines)) > 0
@@ -667,11 +669,12 @@ func resultText(res ToolResult) string {
 // It runs once per run. The caller holds rs.emitMu and appends
 // fw.run.finished next.
 func (a *Agent) compareLocked(ctx context.Context, rs *runState, output string) error {
-	routines := a.profileOf(rs.queuedData()).Routines
+	q := rs.queuedData()
+	routines := a.profileOf(q).Routines
 	if len(routines) == 0 {
 		return nil
 	}
-	for _, d := range RoutineComparisons(routines, rs.events, output) {
+	for _, d := range RoutineComparisons(routines, rs.events, q.Kept, output) {
 		if _, err := a.emitLocked(ctx, rs, EvRoutineCompared, d); err != nil {
 			return err
 		}
@@ -683,13 +686,18 @@ func (a *Agent) compareLocked(ctx context.Context, rs *runState, output string) 
 // that the events decided in mode shadow or canary, or in mode live
 // without completing, and each of its questions with observe, what the
 // routine said against what the agent did. It returns none when the model
-// made no call or when the events hold a comparison already. output is the
-// output text of the run.
-func RoutineComparisons(routines []Routine, events []Event, output string) []RoutineComparedData {
+// made no call or when the events hold a comparison already. A branch
+// skips the events that it kept from its source (kept), so it never
+// compares the decisions of its source again. output is the output text
+// of the run.
+func RoutineComparisons(routines []Routine, events []Event, kept uint64, output string) []RoutineComparedData {
 	var decided []RoutineDecidedData
 	completed := map[string]bool{}
 	acted := false
 	for _, e := range events {
+		if e.Seq <= kept {
+			continue
+		}
 		switch e.Type {
 		case EvRoutineCompared:
 			return nil
