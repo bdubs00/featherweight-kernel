@@ -373,6 +373,11 @@ func New(opts ...Option) (*Agent, error) {
 			return nil, err
 		}
 	}
+	for name, p := range cfg.Agents {
+		if err := a.checkHosted(p); err != nil {
+			return nil, fmt.Errorf("fw: agents.%s: %w", name, err)
+		}
+	}
 	if err := a.startKernel(ctx); err != nil {
 		return nil, err
 	}

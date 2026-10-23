@@ -687,3 +687,20 @@ func waitTerminal(t *testing.T, a *Agent, id string) *Run {
 		}
 	}
 }
+
+// A hosted harness drives the runs in place of the turn loop, so a profile
+// with routines is refused at load, for a named and for an inline profile.
+func TestRoutinesRefusedOnAHostedHarness(t *testing.T) {
+	hosted := WithRunner(runnerFunc(func(context.Context, *Hosted) (bool, error) { return false, nil }))
+	_, err := New(WithoutDefaults(), WithAuthn(NoAuthn{}), WithModelName("anthropic/claude-opus-5-5"), WithModel(newScript().Model()),
+		WithLedger(NewMemLedger()), WithBus(NewMemBus()), WithLogger(quietLogger()), withDeciders, hosted,
+		WithProfile(AgentProfile{Name: "triage", Routines: []Routine{ackRoutine(RoutineShadow)}}))
+	if err == nil || !strings.Contains(err.Error(), "agents.triage") || !strings.Contains(err.Error(), "a hosted harness drives the runs") {
+		t.Fatalf("New = %v", err)
+	}
+	a := newTestAgent(t, newScript().Model(), withDeciders, hosted)
+	_, err = a.Start(testCtx(t), "x", WithRunProfile(AgentProfile{Routines: []Routine{ackRoutine(RoutineShadow)}}))
+	if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "routines need the turn loop") {
+		t.Fatalf("start = %v", err)
+	}
+}
