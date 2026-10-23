@@ -241,6 +241,35 @@ type createBody struct {
 	// another process does, because it records the id of its child before
 	// the child has the run.
 	ID string `json:"id"`
+	// Check makes the run a check run (fw.Check), whose input can be
+	// empty.
+	Check *checkBody `json:"check"`
+}
+
+// checkBody is the check of a request: fw.Check with the timeout as a
+// duration string, such as "30s", or a number of nanoseconds. The kernel
+// checks the bounds.
+type checkBody struct {
+	Steps    []fw.CheckStep `json:"steps"`
+	Timeout  checkTimeoutIn `json:"timeout"`
+	MaxBytes int            `json:"maxBytes"`
+}
+
+// checkTimeoutIn is the timeout of a check body.
+type checkTimeoutIn time.Duration
+
+func (d *checkTimeoutIn) UnmarshalJSON(b []byte) error {
+	v, err := parseDuration(b, "check.timeout")
+	*d = checkTimeoutIn(v)
+	return err
+}
+
+// check converts the body.
+func (c *checkBody) check() *fw.Check {
+	if c == nil {
+		return nil
+	}
+	return &fw.Check{Steps: c.Steps, Timeout: time.Duration(c.Timeout), MaxBytes: c.MaxBytes}
 }
 
 // fileBody is one attachment of a run or a message (section 7.10). Data is
@@ -502,7 +531,7 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 	if !s.decodeFiles(w, r, &body, func() int { return len(body.Files) }) {
 		return
 	}
-	if strings.TrimSpace(body.Input) == "" && len(body.Files) == 0 {
+	if strings.TrimSpace(body.Input) == "" && len(body.Files) == 0 && body.Check == nil {
 		problem(w, r, http.StatusBadRequest, "the field input is required and must not be empty")
 		return
 	}
@@ -557,6 +586,7 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 		Outcome:       body.Outcome,
 		Principal:     strings.TrimSpace(body.Principal),
 		PrincipalKind: strings.TrimSpace(body.PrincipalKind),
+		Check:         body.Check.check(),
 	}
 	run, ok := s.start(w, r, req)
 	if !ok {
@@ -640,8 +670,10 @@ func accepts(r *http.Request, mediaType string) bool {
 
 // listRuns lists the runs that the caller can view, newest first, or with
 // the query parameter parent the child runs of one run. The parameters
-// agent, state, and principal narrow the list; the state active matches
-// every run that is not finished. The parameter limit bounds the list.
+// agent, state, principal, batch, and kind narrow the list; the state
+// active matches every run that is not finished. Without kind, the list
+// leaves out the check runs, and kind=check lists them alone. The
+// parameter limit bounds the list.
 // else (others), as section 13.6 says. The answer also holds total and
 // glance, "At a glance", over every run that matches, before the limit
 // cuts the list.
@@ -671,7 +703,7 @@ func (s *server) listRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	matched := view.FilterBatch(view.Filter(runs, q.Get("agent"), q.Get("state"), q.Get("principal"), 0), q.Get("batch"))
+	matched := view.FilterKind(view.FilterBatch(view.Filter(runs, q.Get("agent"), q.Get("state"), q.Get("principal"), 0), q.Get("batch")), q.Get("kind"))
 	glance, total := view.GlanceOf(matched, time.Now()), len(matched)
 	if limit > 0 && len(matched) > limit {
 		matched = matched[:limit]

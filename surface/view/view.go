@@ -377,6 +377,20 @@ func FilterBatch(runs []*fw.Run, batch string) []*fw.Run {
 	return out
 }
 
+// FilterKind keeps the runs of one kind, by the metadata key fw.MetaKind
+// (fw.Run.Kind). An empty kind keeps the ordinary runs, so a list leaves
+// the check runs out unless it asks for fw.RunKindCheck.
+func FilterKind(runs []*fw.Run, kind string) []*fw.Run {
+	kind = strings.TrimSpace(kind)
+	out := make([]*fw.Run, 0, len(runs))
+	for _, r := range runs {
+		if r.Kind() == kind {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // EventLine is one event of a run as a short line that a person reads.
 type EventLine struct {
 	Seq  uint64    `json:"seq"`
@@ -412,6 +426,10 @@ func describe(e fw.Event) string {
 	case fw.EvRunStarted:
 		var d fw.RunStartedData
 		if e.Decode(&d) == nil {
+			if d.Model == "" {
+				// A check run calls no model.
+				return fmt.Sprintf("started with %d tools and no model", len(d.Tools))
+			}
 			return fmt.Sprintf("started with the model %s and %d tools", d.Model, len(d.Tools))
 		}
 	case fw.EvMessageReceived:

@@ -104,3 +104,18 @@ func TestLineOfAReaction(t *testing.T) {
 		}
 	}
 }
+
+// A check run starts with no model, and its line says so.
+func TestDescribeRunStarted(t *testing.T) {
+	for _, c := range []struct {
+		data fw.RunStartedData
+		want string
+	}{
+		{fw.RunStartedData{Model: "anthropic/claude-opus-5-5", Tools: []string{"a", "b"}}, "started with the model anthropic/claude-opus-5-5 and 2 tools"},
+		{fw.RunStartedData{Tools: []string{"a"}}, "started with 1 tools and no model"},
+	} {
+		if got := describe(fw.MustEvent("r1", fw.EvRunStarted, c.data)); got != c.want {
+			t.Errorf("describe = %q, want %q", got, c.want)
+		}
+	}
+}

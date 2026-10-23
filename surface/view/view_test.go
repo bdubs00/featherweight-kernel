@@ -249,3 +249,20 @@ func TestBuiltinDefaultAgent(t *testing.T) {
 		t.Fatalf("unknown agent = %v", err)
 	}
 }
+
+// FilterKind keeps the ordinary runs for an empty kind and the check runs
+// for fw.RunKindCheck.
+func TestFilterKind(t *testing.T) {
+	plain := &fw.Run{ID: "a"}
+	check := &fw.Run{ID: "b", Metadata: map[string]string{fw.MetaKind: fw.RunKindCheck}}
+	runs := []*fw.Run{plain, check}
+	if got := FilterKind(runs, ""); len(got) != 1 || got[0] != plain {
+		t.Errorf("no kind = %+v", got)
+	}
+	if got := FilterKind(runs, " check "); len(got) != 1 || got[0] != check {
+		t.Errorf("check = %+v", got)
+	}
+	if got := FilterKind(runs, "other"); len(got) != 0 {
+		t.Errorf("other = %+v", got)
+	}
+}
