@@ -66,8 +66,9 @@ func TestDecide(t *testing.T) {
 	}
 }
 
-// The routine runner asks the decider through this tool, so a shadow
-// routine records the answers of the server in fw.routine.decided.
+// The routine runner asks the decider through the same tool of the kernel,
+// so a shadow routine records the answers of the server in
+// fw.routine.decided, also without decide in the tools of the agent.
 func TestDecideServesTheRoutineRunner(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -85,10 +86,6 @@ func TestDecideServesTheRoutineRunner(t *testing.T) {
 	cfg := fw.DefaultConfig()
 	cfg.Model = "anthropic/claude-opus-5-5"
 	cfg.Deciders = map[string]fw.DeciderConfig{"clef": {BaseURL: srv.URL, Model: "clef"}}
-	decide, err := fw.NewBuiltinTool("decide", cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
 	routine := fw.Routine{Name: "outage", Version: 1, Standing: fw.RoutineShadow, Decider: "clef",
 		Questions: map[string]fw.RoutineQuestion{"down": {Question: fw.Question{Type: fw.QuestionNoul, Instructions: "Is a service down?"}, Act: 0.8, Expect: fw.Expect{"yes"},
 			Observe: &fw.Observe{Answer: `(?i)\bdown\b`}}},
@@ -97,7 +94,7 @@ func TestDecideServesTheRoutineRunner(t *testing.T) {
 		return &fw.Response{Content: []fw.Block{fw.Text("The checkout is down.")}, StopReason: fw.StopEndTurn}, nil
 	}}
 	a, err := fw.New(fw.WithoutDefaults(), fw.WithConfig(cfg), fw.WithLedger(fw.NewMemLedger()), fw.WithBus(fw.NewMemBus()), fw.WithAuthn(fw.NoAuthn{}),
-		fw.WithModel(model), fw.WithTools(decide), fw.WithProfile(fw.AgentProfile{Name: "ops", Routines: []fw.Routine{routine}}))
+		fw.WithModel(model), fw.WithProfile(fw.AgentProfile{Name: "ops", Routines: []fw.Routine{routine}}))
 	if err != nil {
 		t.Fatal(err)
 	}

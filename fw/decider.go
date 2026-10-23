@@ -9,6 +9,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -84,9 +85,9 @@ type DeciderConfig struct {
 // DefaultDeciderTimeout bounds a call to a decider that sets no timeout.
 const DefaultDeciderTimeout = 30 * time.Second
 
-// MaxDeciderQuestions is the most questions of one call to a decider. The
-// runner splits a larger set into several calls.
-const MaxDeciderQuestions = 64
+// maxDeciderQuestions is the most questions of one call to a decider. The
+// runner splits a larger set into several calls of the same decider.
+const maxDeciderQuestions = 64
 
 // Deciders returns the names of the deciders of the agent, sorted: the
 // keys of Config.Deciders and the names that WithDecider gave.
@@ -172,8 +173,8 @@ func (s *systemOne) Decide(ctx context.Context, state string, questions map[stri
 	if len(questions) == 0 {
 		return DecideResult{}, errors.New("fw: decider: no question")
 	}
-	if len(questions) > MaxDeciderQuestions {
-		return DecideResult{}, fmt.Errorf("fw: decider: %d questions; one call holds at most %d", len(questions), MaxDeciderQuestions)
+	if len(questions) > maxDeciderQuestions {
+		return DecideResult{}, fmt.Errorf("fw: decider: %d questions; one call holds at most %d", len(questions), maxDeciderQuestions)
 	}
 	body, err := json.Marshal(map[string]any{"model": s.model, "state": state, "questions": questions})
 	if err != nil {
@@ -373,4 +374,122 @@ func parseAnswer(id string, q Question, raw json.RawMessage) (Answer, error) {
 		return Answer{}, fmt.Errorf("fw: decider: the question %s has the type %q", id, q.Type)
 	}
 	return a, nil
+}
+
+const decideSchema = `{
+  "type": "object",
+  "description": "Ask typed questions about a state and get one answer per question, with probabilities.",
+  "properties": {
+    "decider": {
+      "type": "string",
+      "description": "The name of a decider of the configuration. Optional when the configuration has one."
+    },
+    "state": {
+      "type": "string",
+      "description": "The text to decide about. The input of the run by default."
+    },
+    "questions": {
+      "type": "object",
+      "description": "Question id to question, at most 64. A choice maps each option to a description in criteria, a score lists 2 to 10 ordered levels in criteria, and a noul asks for the probability of yes.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string", "enum": ["choice", "noul", "score"]},
+          "instructions": {"type": "string"},
+          "criteria": {}
+        },
+        "required": ["type"]
+      }
+    }
+  },
+  "required": ["questions"],
+  "additionalProperties": false
+}`
+
+const decideDescription = "Ask typed questions about a state and get one answer per question, with probabilities. " +
+	"A choice picks one of named options, a score picks one of ordered levels, and a noul gives the probability of yes. " +
+	"The answer never holds text beyond the options. Read the probabilities, not only the choice."
+
+// questionID is the shape of a question id that a System One server
+// accepts.
+var questionID = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
+
+// DecideTool returns the tool decide (docs/ROUTINES.md section 3.2). It
+// asks a decider of the agent in the context of the call, and its output
+// is the DecideResult as JSON, so the probabilities of every decision sit
+// in fw.tool.responded. Package builtin offers it to the model when the
+// configuration has a decider. The routine runner calls it for its own
+// decisions through the tool path, whatever tools.builtin holds.
+func DecideTool() Tool { return decideTool{} }
+
+type decideTool struct{}
+
+// Spec implements Tool.
+func (decideTool) Spec() ToolSpec {
+	return ToolSpec{Name: "decide", Title: "Answer typed questions with probabilities", Description: decideDescription,
+		InputSchema: json.RawMessage(decideSchema), ReadOnly: true, Idempotent: true, ParallelSafe: true, Source: "builtin", Trusted: true}
+}
+
+// Call implements Tool.
+func (decideTool) Call(ctx context.Context, input json.RawMessage) (ToolResult, error) {
+	var in struct {
+		Decider   string              `json:"decider"`
+		State     string              `json:"state"`
+		Questions map[string]Question `json:"questions"`
+	}
+	if len(bytes.TrimSpace(input)) > 0 {
+		if err := json.Unmarshal(input, &in); err != nil {
+			return ErrorResult("decide: the input is not valid JSON for this tool: " + err.Error()), nil
+		}
+	}
+	if len(in.Questions) == 0 {
+		return ErrorResult("decide: ask at least one question."), nil
+	}
+	if len(in.Questions) > maxDeciderQuestions {
+		return ErrorResult(fmt.Sprintf("decide: %d questions; one call asks at most %d.", len(in.Questions), maxDeciderQuestions)), nil
+	}
+	for id, q := range in.Questions {
+		if !questionID.MatchString(id) {
+			return ErrorResult(fmt.Sprintf("decide: the question id %q is not 1 to 100 of letters, digits, _, ., and -.", id)), nil
+		}
+		if _, err := QuestionOptions(q); err != nil {
+			return ErrorResult(fmt.Sprintf("decide: question %s: %v.", id, err)), nil
+		}
+	}
+	a := AgentFrom(ctx)
+	if a == nil {
+		return ErrorResult("decide: no agent in the context of the call."), nil
+	}
+	name := strings.TrimSpace(in.Decider)
+	if name == "" {
+		names := a.Deciders()
+		if len(names) != 1 {
+			return ErrorResult("decide: name a decider: " + strings.Join(names, ", ") + "."), nil
+		}
+		name = names[0]
+	}
+	state := in.State
+	if state == "" {
+		r, err := a.Get(ctx, RunInfoFrom(ctx).RunID)
+		if err != nil || r.Input == "" {
+			return ErrorResult("decide: give a state; this call has no run input to decide about."), nil
+		}
+		state = r.Input
+	}
+	d, err := a.DeciderNamed(ctx, name)
+	if err != nil {
+		return ErrorResult("decide: " + err.Error()), nil
+	}
+	res, err := d.Decide(ctx, state, in.Questions)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ErrorResult("decide: canceled"), fmt.Errorf("fw: decide: %w", context.Cause(ctx))
+		}
+		return ErrorResult("decide: " + strings.TrimPrefix(err.Error(), "fw: decider: ")), nil
+	}
+	b, err := json.Marshal(res)
+	if err != nil {
+		return ErrorResult("decide: " + err.Error()), nil
+	}
+	return TextResult(string(b)), nil
 }

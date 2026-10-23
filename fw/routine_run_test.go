@@ -46,31 +46,6 @@ func (f *fakeDecider) Decide(_ context.Context, state string, qs map[string]Ques
 	return out, nil
 }
 
-// decideFake is the tool decide of the builtin package, for this package:
-// the same input and output over Agent.DeciderNamed.
-func decideFake() Tool {
-	return NewTool(ToolSpec{Name: "decide", ReadOnly: true, Idempotent: true, Source: "builtin"}, func(ctx context.Context, in json.RawMessage) (ToolResult, error) {
-		var v struct {
-			Decider   string              `json:"decider"`
-			State     string              `json:"state"`
-			Questions map[string]Question `json:"questions"`
-		}
-		if err := json.Unmarshal(in, &v); err != nil {
-			return ErrorResult(err.Error()), nil
-		}
-		d, err := AgentFrom(ctx).DeciderNamed(ctx, v.Decider)
-		if err != nil {
-			return ErrorResult("decide: " + err.Error()), nil
-		}
-		res, err := d.Decide(ctx, v.State, v.Questions)
-		if err != nil {
-			return ErrorResult("decide: " + err.Error()), nil
-		}
-		b, _ := json.Marshal(res)
-		return TextResult(string(b)), nil
-	})
-}
-
 // helpdesk is a fake issue tracker: labels, writes, and a read that shows
 // the labels that the writes added.
 type helpdesk struct {
@@ -165,7 +140,7 @@ func withDeciders(o *options) {
 
 func routineAgent(t *testing.T, m Model, d Decider, h *helpdesk, routines []Routine, opts ...Option) *Agent {
 	t.Helper()
-	base := []Option{withDeciders, WithDecider("clef", d), WithTools(append(h.tools(), decideFake())...),
+	base := []Option{withDeciders, WithDecider("clef", d), WithTools(h.tools()...),
 		WithProfile(AgentProfile{Name: "triage", Routines: routines})}
 	return newTestAgent(t, m, append(base, opts...)...)
 }

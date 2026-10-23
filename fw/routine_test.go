@@ -120,7 +120,6 @@ func TestRoutineProblems(t *testing.T) {
 	}{
 		{"no decider", func(r *Routine, _ *Config) { r.Decider = "" }, "decider is empty"},
 		{"unknown decider", func(r *Routine, _ *Config) { r.Decider = "jev" }, `decider "jev" is not a key of deciders`},
-		{"no decide tool", func(_ *Routine, cfg *Config) { cfg.Tools.Builtin = []string{"bash"} }, "need the built-in tool decide"},
 		{"bad name", func(r *Routine, _ *Config) { r.Name = "Ack" }, `name "Ack"`},
 		{"bad standing", func(r *Routine, _ *Config) { r.Standing = "rehearsing" }, `standing "rehearsing"`},
 		{"bad version", func(r *Routine, _ *Config) { r.Version = 0 }, "version 0"},

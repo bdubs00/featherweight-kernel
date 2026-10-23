@@ -443,20 +443,19 @@ func (rr *routineRun) decide(ctx context.Context, routines []Routine, input stri
 }
 
 // ask calls the tool decide for the questions, in calls of at most
-// MaxDeciderQuestions. It returns the answers, the model, and the latency
+// maxDeciderQuestions. It returns the answers, the model, and the latency
 // of the calls together, or why the decider gave no decision.
 func (rr *routineRun) ask(ctx context.Context, decider, routines, input string, questions map[string]Question) (map[string]Answer, string, int64, string, error) {
-	tool := rr.a.builtinTool("decide")
-	if tool == nil {
-		return nil, "", 0, "the built-in tool decide is off; it needs decide in tools.builtin and a decider", nil
-	}
+	// The runner asks through the tool decide of the kernel, with the
+	// middleware of every tool, whatever tools.builtin holds.
+	tool := rr.a.wrapTool(DecideTool())
 	ids := slices.Sorted(maps.Keys(questions))
 	answers := map[string]Answer{}
 	var model string
 	var latency int64
-	for start := 0; start < len(ids); start += MaxDeciderQuestions {
+	for start := 0; start < len(ids); start += maxDeciderQuestions {
 		part := map[string]Question{}
-		for _, id := range ids[start:min(start+MaxDeciderQuestions, len(ids))] {
+		for _, id := range ids[start:min(start+maxDeciderQuestions, len(ids))] {
 			part[id] = questions[id]
 		}
 		in, err := json.Marshal(map[string]any{"decider": decider, "state": input, "questions": part})
@@ -481,18 +480,6 @@ func (rr *routineRun) ask(ctx context.Context, decider, routines, input string, 
 		model, latency = d.Model, latency+d.LatencyMS
 	}
 	return answers, model, latency, "", nil
-}
-
-// builtinTool returns the tool of the agent with that name, whatever the
-// tool list of the profile. The runner asks the decider through decide
-// even for an agent whose model does not get the tool.
-func (a *Agent) builtinTool(name string) Tool {
-	for _, t := range a.tools {
-		if t.Spec().Name == name {
-			return t
-		}
-	}
-	return nil
 }
 
 // apply runs the steps of a live routine, then its checks, then renders
