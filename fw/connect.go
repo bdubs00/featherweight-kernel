@@ -146,7 +146,7 @@ func (a *Agent) Connected(subject string, servers ...string) int {
 		if !ok {
 			continue
 		}
-		err := a.Decide(context.Background(), rs.id, ApprovalDecision{ApprovalID: p.ID, Decision: "allow", Decider: subject, Note: "connected"})
+		err := a.Decide(context.Background(), rs.id, ApprovalDecision{ApprovalID: p.ID, Decision: "allow", Decider: subject, DeciderKind: ActorPerson, Note: "connected"})
 		if err == nil {
 			n++
 		}

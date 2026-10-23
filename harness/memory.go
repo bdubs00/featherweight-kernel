@@ -282,26 +282,32 @@ func (r *run) systemText(server bool) string {
 // block for the start of the first prompt of the session, or "" when the
 // run has no memory tool or no note. When the index leaves notes out, its
 // last line says how many, and with the memory server, server true, which
-// tools find them.
+// tools find them. A walk that stopped at its bound adds memory.CutNote.
 func (r *run) memoryBlock(ctx context.Context, server bool) string {
 	if notes, _ := r.h.memoryTools(r.hr.Queued()); !notes {
 		return ""
 	}
 	info := r.info(r.dir)
-	lines, more, err := r.h.mem.Index(fw.WithRunInfo(fw.WithAgent(ctx, r.h.a), info), r.h.mem.Scope(info))
+	lines, more, cut, err := r.h.mem.Index(fw.WithRunInfo(fw.WithAgent(ctx, r.h.a), info), r.h.mem.Scope(info))
 	if err != nil {
 		r.h.log.Warn("harness: read the index of the notes", "run", r.hr.ID(), "error", err)
 		return ""
 	}
-	if len(lines) == 0 {
+	if len(lines) == 0 && !cut {
 		return ""
 	}
-	text := memory.ContextList + "\n" + strings.Join(lines, "\n")
+	text := memory.ContextList
+	for _, l := range lines {
+		text += "\n" + l
+	}
 	if more > 0 {
 		text += fmt.Sprintf("\n%d more notes are not listed.", more)
 		if server {
 			text += " The tool list of fw-memory shows every note, and its tool recall searches them."
 		}
+	}
+	if cut {
+		text += "\n" + memory.CutNote
 	}
 	return fw.ContextBlock("memory", text)
 }
@@ -1010,11 +1016,11 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		if err := decodeArgs(canon, &struct{}{}); err != nil {
 			return "Error: " + err.Error(), true
 		}
-		recs, err := store.List(ctx, scope)
+		recs, cut, err := store.List(ctx, scope)
 		if err != nil {
 			return "Error: " + err.Error(), true
 		}
-		if len(recs) == 0 {
+		if len(recs) == 0 && !cut {
 			return "No notes under " + memory.Prefix + ".", false
 		}
 		var sb strings.Builder
@@ -1025,6 +1031,9 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 				fmt.Fprintf(&sb, ": %s", memory.ClipLine(rec.Title))
 			}
 			fmt.Fprintf(&sb, " (%d bytes, %s)", rec.Size, rec.Updated.UTC().Format(time.RFC3339))
+		}
+		if cut {
+			sb.WriteString("\n" + memory.CutNote)
 		}
 		return sb.String(), false
 	}

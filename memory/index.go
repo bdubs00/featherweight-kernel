@@ -77,17 +77,19 @@ func walkNotes(ctx context.Context, dir string, titles int) (notes []note, cut b
 
 // Index returns the lines of the index of a scope, "- /memories/<path>:
 // <first line>", newest first, within IndexMaxNotes and IndexMaxBytes.
-// more counts the notes that do not fit. A path is escaped (EscapeName),
-// so a file that a person put in the directory with a newline in its name
-// cannot forge a line. It creates nothing.
-func (s *Store) Index(ctx context.Context, scope fw.MemoryScope) (lines []string, more int, err error) {
+// more counts the notes that do not fit. cut reports a walk that stopped
+// at its bound, so more is too low and notes can be missing (CutNote). A
+// path is escaped (EscapeName), so a file that a person put in the
+// directory with a newline in its name cannot forge a line. It creates
+// nothing.
+func (s *Store) Index(ctx context.Context, scope fw.MemoryScope) (lines []string, more int, cut bool, err error) {
 	dir, err := s.Dir(scope)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
-	notes, _, err := walkNotes(ctx, dir, IndexMaxNotes)
+	notes, cut, err := walkNotes(ctx, dir, IndexMaxNotes)
 	if err != nil {
-		return nil, 0, fmt.Errorf("memory: index of %s: %w", dir, err)
+		return nil, 0, false, fmt.Errorf("memory: index of %s: %w", dir, err)
 	}
 	size := 0
 	for _, n := range notes {
@@ -101,8 +103,12 @@ func (s *Store) Index(ctx context.Context, scope fw.MemoryScope) (lines []string
 		lines = append(lines, line)
 		size += len(line) + 1
 	}
-	return lines, len(notes) - len(lines), nil
+	return lines, len(notes) - len(lines), cut, nil
 }
+
+// CutNote is the sentence that ends a listing of the notes whose walk
+// stopped at its bound (walkScope), so notes can be missing from it.
+var CutNote = fmt.Sprintf("The list stopped after %d entries of the memory directory, so some notes are not listed.", maxWalk)
 
 // firstLine returns the line that says what a note holds: the description
 // of a front matter block, or else the first line with text, without its

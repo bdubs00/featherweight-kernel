@@ -805,14 +805,16 @@ func (s *Store) ForgetNote(ctx context.Context, scope fw.MemoryScope, ref string
 }
 
 // List returns the notes of a scope, newest first, without their bodies.
-func (s *Store) List(ctx context.Context, scope fw.MemoryScope) ([]fw.MemoryRecord, error) {
+// cut reports a walk that stopped at its bound, so notes can be missing
+// from the list (CutNote).
+func (s *Store) List(ctx context.Context, scope fw.MemoryScope) (_ []fw.MemoryRecord, cut bool, err error) {
 	dir, err := s.Dir(scope)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	notes, _, err := walkNotes(ctx, dir, -1)
+	notes, cut, err := walkNotes(ctx, dir, -1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	out := make([]fw.MemoryRecord, 0, len(notes))
 	for _, n := range notes {
@@ -828,36 +830,39 @@ func (s *Store) List(ctx context.Context, scope fw.MemoryScope) ([]fw.MemoryReco
 			Updated:     n.mod,
 		})
 	}
-	return out, nil
+	return out, cut, nil
 }
 
 // PrincipalNotes counts the notes of the principal scope of an agent:
 // the people who have a directory there, and their notes together. The
-// directories hold a hash of each subject, so the count names nobody.
-func (s *Store) PrincipalNotes(ctx context.Context, agent string) (people, notes int, err error) {
+// directories hold a hash of each subject, so the count names nobody. cut
+// reports a walk of a person that stopped at its bound, so the count of
+// the notes is too low.
+func (s *Store) PrincipalNotes(ctx context.Context, agent string) (people, notes int, cut bool, err error) {
 	if !ValidAgentName(agent) {
-		return 0, 0, fmt.Errorf("memory: the agent name %q cannot name a memory directory", agent)
+		return 0, 0, false, fmt.Errorf("memory: the agent name %q cannot name a memory directory", agent)
 	}
 	dir := filepath.Join(s.base, "principals", agent)
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return 0, 0, nil
+		return 0, 0, false, nil
 	}
 	if err != nil {
-		return 0, 0, fmt.Errorf("memory: %w", err)
+		return 0, 0, false, fmt.Errorf("memory: %w", err)
 	}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		list, _, err := walkNotes(ctx, filepath.Join(dir, e.Name()), 0)
+		list, c, err := walkNotes(ctx, filepath.Join(dir, e.Name()), 0)
 		if err != nil {
-			return 0, 0, fmt.Errorf("memory: %w", err)
+			return 0, 0, false, fmt.Errorf("memory: %w", err)
 		}
 		people++
 		notes += len(list)
+		cut = cut || c
 	}
-	return people, notes, nil
+	return people, notes, cut, nil
 }
 
 // getNote reads one note with its hash. The hash covers the whole file,

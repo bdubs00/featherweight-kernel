@@ -209,3 +209,58 @@ func TestCancelRecordsThePerson(t *testing.T) {
 		}
 	}
 }
+
+// The records of an approval and of a change of a budget name the kind of
+// the actor from the principal, never from the shape of the subject: a
+// person whose subject looks like a run id or a SPIFFE id stays a person.
+func TestRecordsNameTheKindOfTheActor(t *testing.T) {
+	ctx := testCtx(t)
+	var calls atomic.Int32
+	s := newScript(callTools(use("c1", "rm", `{"path":"x"}`)), endTurn("done"))
+	a := newTestAgent(t, s.Model(), WithTools(destructiveTool(&calls)))
+	r, err := a.Run(ctx, "clean up")
+	mustState(t, r, err, StateInputRequired)
+	token := WithPrincipal(ctx, &Principal{Subject: KindToken, Kind: KindToken})
+	relayed, err := WithActingFor(token, "spiffe://x/ada")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, c := range []context.Context{
+		WithPrincipal(ctx, &Principal{Subject: "spiffe://x/bob", Kind: KindUser}),
+		WithPrincipal(ctx, &Principal{Subject: "local:carol", Kind: KindUser}),
+		WithPrincipal(ctx, &Principal{Subject: "spiffe://x/front", Kind: KindWorkload}),
+		token,
+		relayed,
+		ctx,
+	} {
+		if _, err := a.ChangeBudget(c, r.ID, Budget{MaxTurns: 10 + i}, OriginHTTP); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dana := WithPrincipal(ctx, &Principal{Subject: NewID(), Kind: KindUser})
+	if err := a.Decide(dana, r.ID, ApprovalDecision{ApprovalID: r.Pending.ID, Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err = a.Wait(ctx, r.ID)
+	mustState(t, r, err, StateCompleted)
+
+	var decided ApprovalDecidedData
+	var kinds []string
+	for _, e := range ledgerEvents(t, a.Ledger(), r.ID) {
+		switch e.Type {
+		case EvApprovalDecided:
+			_ = e.Decode(&decided)
+		case EvBudgetChanged:
+			var d BudgetChangedData
+			_ = e.Decode(&d)
+			kinds = append(kinds, d.ByKind)
+		}
+	}
+	if decided.DeciderKind != ActorPerson {
+		t.Fatalf("decided = %+v, want the kind %s", decided, ActorPerson)
+	}
+	want := []string{ActorPerson, ActorPerson, KindWorkload, KindToken, ActorPerson, ""}
+	if strings.Join(kinds, ",") != strings.Join(want, ",") {
+		t.Fatalf("kinds of the budget changes = %q, want %q", kinds, want)
+	}
+}

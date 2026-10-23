@@ -82,3 +82,34 @@ func personOf(ctx context.Context) string {
 	}
 	return ""
 }
+
+// Kinds of the actor that a record names beside its subject
+// (ApprovalDecidedData.DeciderKind, BudgetChangedData.ByKind). An actor
+// that is a principal has the kind of the principal, KindToken, KindLocal,
+// KindWorkload, or KindAnonymous, with ActorPerson for KindUser.
+const (
+	ActorPerson = "person" // a person: a user, or the person for whom a trusted caller acts
+	ActorParent = "parent" // a run: the parent of a child, or the run that a grader grades
+	ActorKernel = "kernel" // the kernel itself
+)
+
+// actorKindOf returns the kind of the actor that personOf names: ActorPerson
+// for the person for whom the caller acts, else the kind of the principal,
+// or "" for the process itself and for a principal of no known kind. It
+// reads the principal, never the shape of a subject.
+func actorKindOf(ctx context.Context) string {
+	if ActingFor(ctx) != "" {
+		return ActorPerson
+	}
+	p := PrincipalFrom(ctx)
+	if p == nil {
+		return ""
+	}
+	switch p.Kind {
+	case KindUser:
+		return ActorPerson
+	case KindWorkload, KindToken, KindLocal, KindAnonymous:
+		return p.Kind
+	}
+	return ""
+}

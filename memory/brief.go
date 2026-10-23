@@ -28,19 +28,24 @@ const ContextList = "Notes under /memories, newest first:"
 
 // ContextText returns the index of the notes of a scope as data for the
 // first user message: every note as its path and its first line, newest
-// first, within IndexMaxNotes and IndexMaxBytes. No note gives "". It
-// creates nothing.
+// first, within IndexMaxNotes and IndexMaxBytes. A walk that stopped at
+// its bound ends the text with CutNote. No note gives "". It creates
+// nothing.
 func (s *Store) ContextText(ctx context.Context, scope fw.MemoryScope) (string, error) {
-	lines, more, err := s.Index(ctx, scope)
-	if err != nil || len(lines) == 0 {
+	lines, more, cut, err := s.Index(ctx, scope)
+	if err != nil || (len(lines) == 0 && !cut) {
 		return "", err
 	}
 	var sb strings.Builder
 	sb.WriteString(ContextList)
-	sb.WriteString("\n")
-	sb.WriteString(strings.Join(lines, "\n"))
+	for _, l := range lines {
+		sb.WriteString("\n" + l)
+	}
 	if more > 0 {
 		fmt.Fprintf(&sb, "\n%d more notes are not listed. Search them with the recall tool, or view %s to see every file.", more, Prefix)
+	}
+	if cut {
+		sb.WriteString("\n" + CutNote)
 	}
 	return sb.String(), nil
 }

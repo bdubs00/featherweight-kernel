@@ -1204,7 +1204,7 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 	// the message without the budget that came with it.
 	rs.emitMu.Lock()
 	if o.budget != nil {
-		if _, err := a.emitLocked(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: *o.budget, By: personOf(ctx), Origin: origin}); err != nil {
+		if _, err := a.emitLocked(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: *o.budget, By: personOf(ctx), ByKind: actorKindOf(ctx), Origin: origin}); err != nil {
 			rs.emitMu.Unlock()
 			return err
 		}
@@ -1264,7 +1264,7 @@ func (a *Agent) ChangeBudget(ctx context.Context, id string, change Budget, orig
 	if err := checkBudgetChange(change); err != nil {
 		return Budget{}, err
 	}
-	if _, err := a.emit(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: change, By: personOf(ctx), Origin: origin}); err != nil {
+	if _, err := a.emit(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: change, By: personOf(ctx), ByKind: actorKindOf(ctx), Origin: origin}); err != nil {
 		return Budget{}, err
 	}
 	a.budgetChanged(rs, change, origin)
@@ -1299,7 +1299,7 @@ func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error
 		return err
 	}
 	if d.Decider == "" {
-		d.Decider = personOf(ctx)
+		d.Decider, d.DeciderKind = personOf(ctx), actorKindOf(ctx)
 	}
 	rs, err := a.k.lookup(id)
 	if err != nil {
@@ -1338,7 +1338,7 @@ func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error
 	if err != nil {
 		return err
 	}
-	data := ApprovalDecidedData{ApprovalID: d.ApprovalID, Decision: verdict, Decider: d.Decider, Note: d.Note, Content: d.Content}
+	data := ApprovalDecidedData{ApprovalID: d.ApprovalID, Decision: verdict, Decider: d.Decider, DeciderKind: d.DeciderKind, Note: d.Note, Content: d.Content}
 
 	rs.emitMu.Lock()
 	rs.mu.Lock()

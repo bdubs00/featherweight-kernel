@@ -680,4 +680,7 @@ type ApprovalDecision struct {
 	Note       string          `json:"note,omitempty"`
 	Content    json.RawMessage `json:"content,omitempty"` // form answers when the approval carried a schema
 	Decider    string          `json:"decider,omitempty"`
+	// DeciderKind is the kind of Decider (see ActorPerson). The kernel
+	// sets both from the caller when Decider is empty.
+	DeciderKind string `json:"deciderKind,omitempty"`
 }

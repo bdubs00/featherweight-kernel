@@ -12,20 +12,27 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+// TestActorKind checks that the kind comes from the record, never from
+// the shape of the subject, and that a kind that the kernel does not
+// know, or a record without a kind, names no subject.
 func TestActorKind(t *testing.T) {
-	for subject, want := range map[string]string{
-		"":                               "none",
-		fw.OriginKernel:                  "kernel",
-		fw.KindToken:                     "token",
-		"cli":                            "local",
-		"local:bob":                      "local",
-		"spiffe://td/ns/prod/sa/rev":     "workload",
-		fw.NewID():                       "parent",
-		"alice@example.com":              "person",
-		"auth0|5f7c8ec7c33c6c004bbafe82": "person",
+	for _, c := range []struct{ subject, kind, want string }{
+		{"", "", "none"},
+		{fw.OriginKernel, fw.ActorKernel, "kernel"},
+		{fw.KindToken, fw.KindToken, "token"},
+		{"cli", fw.KindLocal, "local"},
+		{"spiffe://td/ns/prod/sa/rev", fw.KindWorkload, "workload"},
+		{fw.NewID(), fw.ActorParent, "parent"},
+		{"alice@example.com", fw.ActorPerson, "person"},
+		{"spiffe://td/ns/prod/sa/bob", fw.ActorPerson, "person"},
+		{fw.NewID(), fw.ActorPerson, "person"},
+		{"local:carol", fw.ActorPerson, "person"},
+		{"anonymous", fw.KindAnonymous, "anonymous"},
+		{"spiffe://td/ns/prod/sa/rev", "", "unknown"},
+		{"alice@example.com", "alice@example.com", "unknown"},
 	} {
-		if got := actorKind(subject); got != want {
-			t.Errorf("actorKind(%q) = %q, want %q", subject, got, want)
+		if got := actorKind(c.subject, c.kind); got != c.want {
+			t.Errorf("actorKind(%q, %q) = %q, want %q", c.subject, c.kind, got, c.want)
 		}
 	}
 }
@@ -55,10 +62,10 @@ func TestAttributesNameNoActor(t *testing.T) {
 	f := newFeed(fw.ObserverFunc(func(e fw.Event) { tr.Observe(e); logs.Observe(e) }), "run", "default")
 	f.emit(fw.EvRunStarted, fw.RunStartedData{})
 	f.emit(fw.EvApprovalRequested, fw.ApprovalRequestedData{ApprovalID: "ap1", Tool: "rm"})
-	f.emit(fw.EvApprovalDecided, fw.ApprovalDecidedData{ApprovalID: "ap1", Decision: "allow", Decider: person})
+	f.emit(fw.EvApprovalDecided, fw.ApprovalDecidedData{ApprovalID: "ap1", Decision: "allow", Decider: person, DeciderKind: fw.ActorPerson})
 	f.emit(fw.EvApprovalRequested, fw.ApprovalRequestedData{ApprovalID: "ap2", Tool: "rm"})
-	f.emit(fw.EvApprovalDecided, fw.ApprovalDecidedData{ApprovalID: "ap2", Decision: "deny", Decider: parent})
-	f.emit(fw.EvBudgetChanged, fw.BudgetChangedData{Budget: fw.Budget{MaxTurns: 3}, By: person, Origin: fw.OriginHTTP})
+	f.emit(fw.EvApprovalDecided, fw.ApprovalDecidedData{ApprovalID: "ap2", Decision: "deny", Decider: parent, DeciderKind: fw.ActorParent})
+	f.emit(fw.EvBudgetChanged, fw.BudgetChangedData{Budget: fw.Budget{MaxTurns: 3}, By: person, ByKind: fw.ActorPerson, Origin: fw.OriginHTTP})
 	f.emit(fw.EvOutcomeEvaluated, fw.OutcomeEvaluatedData{Verdict: fw.GradeSatisfied, Grader: grader})
 	fin := f.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeCompleted})
 	f.emit(fw.EvRunAnnotated, fw.QualityAnnotatedData{Quality: &fw.QualityObservation{ID: receipt, Completion: fin.Seq, Verification: "accepted"}, CostComplete: true})

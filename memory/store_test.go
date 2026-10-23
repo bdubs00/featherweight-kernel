@@ -123,9 +123,9 @@ func TestRememberGetForget(t *testing.T) {
 	if info.Mode().Perm() != 0o700 {
 		t.Fatalf("directory mode = %v", info.Mode())
 	}
-	list, err := s.List(ctx, scope)
-	if err != nil || len(list) != 1 || list[0].Ref != ref || list[0].Body != "" {
-		t.Fatalf("list = %+v, %v", list, err)
+	list, cut, err := s.List(ctx, scope)
+	if err != nil || cut || len(list) != 1 || list[0].Ref != ref || list[0].Body != "" {
+		t.Fatalf("list = %+v, %v, %v", list, cut, err)
 	}
 	if err := s.Forget(ctx, scope, ref); err != nil {
 		t.Fatal(err)
@@ -400,7 +400,8 @@ func testRecallRunsOfThePrincipal(t *testing.T, kind string) {
 // TestMaxNotesCountsNotesNotDirectories checks that directories do not use
 // up the bound of a walk: with many directories before the notes, the
 // count still reaches the limit of the notes, and the listing holds every
-// note. A walk that a bound cuts refuses a new note.
+// note. A walk that a bound cuts refuses a new note, and the listings and
+// the index say that they can miss notes.
 func TestMaxNotesCountsNotesNotDirectories(t *testing.T) {
 	ctx := context.Background()
 	s, home := newStore(t, "")
@@ -423,8 +424,8 @@ func TestMaxNotesCountsNotesNotDirectories(t *testing.T) {
 	if err := files.WriteFile("one-more.md", []byte("x")); !errors.Is(err, ErrLimit) {
 		t.Fatalf("a note past the limit behind 9000 directories = %v", err)
 	}
-	if list, err := s.List(ctx, scope); err != nil || len(list) != MaxNotes {
-		t.Fatalf("the listing holds %d notes, want %d: %v", len(list), MaxNotes, err)
+	if list, cut, err := s.List(ctx, scope); err != nil || cut || len(list) != MaxNotes {
+		t.Fatalf("the listing holds %d notes, want %d: %v, %v", len(list), MaxNotes, cut, err)
 	}
 
 	// Past the bound of other entries, the count cannot finish, so the
@@ -445,6 +446,19 @@ func TestMaxNotesCountsNotesNotDirectories(t *testing.T) {
 	}
 	if err := files.WriteFile("a0000/../a0000", []byte("x")); err == nil {
 		t.Fatal("a bad name was written")
+	}
+
+	// A note past the bound is missing from the listings, and each of
+	// them says that notes can be missing.
+	if err := os.WriteFile(filepath.Join(dir, "zz.md"), []byte("# Past the bound"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if list, cut, err := s.List(ctx, scope); err != nil || !cut || len(list) != 0 {
+		t.Fatalf("the listing after a cut walk = %+v, cut %v, %v", list, cut, err)
+	}
+	text, err := s.ContextText(ctx, scope)
+	if err != nil || !strings.Contains(text, CutNote) {
+		t.Fatalf("the index after a cut walk = %q, %v", text, err)
 	}
 }
 
@@ -668,9 +682,9 @@ func TestPrincipalNotes(t *testing.T) {
 			}
 		}
 	}
-	people, notes, err := s.PrincipalNotes(ctx, "default")
-	if err != nil || people != 2 || notes != 4 {
-		t.Fatalf("principal notes = %d people, %d notes, %v", people, notes, err)
+	people, notes, cut, err := s.PrincipalNotes(ctx, "default")
+	if err != nil || cut || people != 2 || notes != 4 {
+		t.Fatalf("principal notes = %d people, %d notes, cut %v, %v", people, notes, cut, err)
 	}
 }
 

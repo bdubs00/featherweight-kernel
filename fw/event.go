@@ -430,12 +430,15 @@ type ApprovalRequestedData struct {
 // ApprovalDecidedData is the payload of fw.approval.decided. Decider names
 // who decided: ApprovalDecision.Decider, else the person for whom the
 // caller acts (WithActingFor), else the subject of the principal.
+// DeciderKind is the kind of that actor (see ActorPerson), so a trace can
+// name the kind without the subject.
 type ApprovalDecidedData struct {
-	ApprovalID string          `json:"approvalId"`
-	Decision   string          `json:"decision"` // allow or deny
-	Decider    string          `json:"decider,omitempty"`
-	Note       string          `json:"note,omitempty"`
-	Content    json.RawMessage `json:"content,omitempty"` // form answers when a tool asked a question
+	ApprovalID  string          `json:"approvalId"`
+	Decision    string          `json:"decision"` // allow or deny
+	Decider     string          `json:"decider,omitempty"`
+	DeciderKind string          `json:"deciderKind,omitempty"`
+	Note        string          `json:"note,omitempty"`
+	Content     json.RawMessage `json:"content,omitempty"` // form answers when a tool asked a question
 }
 
 // ContextCompactedData is the payload of fw.context.compacted.
@@ -484,11 +487,12 @@ type BudgetExceededData struct {
 // budget of the run for the work that follows, and a zero field keeps the
 // field as it was. By is the subject of the person who changed it, or the
 // person for whom the caller acts (WithActingFor), and empty for the
-// process itself. Origin is the surface of the change, such as http or
-// mcp.
+// process itself. ByKind is the kind of that actor (see ActorPerson).
+// Origin is the surface of the change, such as http or mcp.
 type BudgetChangedData struct {
 	Budget Budget `json:"budget"`
 	By     string `json:"by,omitempty"`
+	ByKind string `json:"byKind,omitempty"`
 	Origin string `json:"origin,omitempty"`
 }
 

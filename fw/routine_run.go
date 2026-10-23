@@ -304,7 +304,7 @@ func (a *Agent) closeRoutine(ctx context.Context, rs *runState, c *cursor) error
 	// go to any more. The kernel denies it, so the answer of a person is
 	// refused, not lost.
 	if p := c.pending; p != nil && strings.HasPrefix(p.CallID, routineCallPrefix) {
-		d := ApprovalDecidedData{ApprovalID: p.ApprovalID, Decision: "deny", Decider: OriginKernel, Note: routineInterrupted}
+		d := ApprovalDecidedData{ApprovalID: p.ApprovalID, Decision: "deny", Decider: OriginKernel, DeciderKind: ActorKernel, Note: routineInterrupted}
 		if _, err := a.emit(ctx, rs, EvApprovalDecided, d); err != nil {
 			return err
 		}

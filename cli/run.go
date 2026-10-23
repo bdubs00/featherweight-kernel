@@ -332,7 +332,7 @@ func followRun(ctx context.Context, a *fw.Agent, id string, w io.Writer, ap appr
 			continue
 		}
 		d.ApprovalID = req.ApprovalID
-		d.Decider = deciderCLI
+		d.Decider, d.DeciderKind = deciderCLI, fw.KindLocal
 		if err := a.Decide(ctx, id, d); err != nil && !errors.Is(err, fw.ErrNoPendingApproval) && ctx.Err() == nil {
 			return nil, err
 		}

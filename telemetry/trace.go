@@ -175,7 +175,7 @@ func (t *Tracer) Observe(e fw.Event) {
 			if e.Type == fw.EvBudgetChanged {
 				var d fw.BudgetChangedData
 				_ = e.Decode(&d)
-				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(attribute.String("fw.budget.by_kind", actorKind(d.By)), attribute.String("fw.budget.origin", d.Origin)))
+				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(attribute.String("fw.budget.by_kind", actorKind(d.By, d.ByKind)), attribute.String("fw.budget.origin", d.Origin)))
 			} else if len(attrs) == 0 {
 				rt.current().AddEvent(e.Type, trace.WithTimestamp(ts))
 			}
@@ -292,7 +292,7 @@ func (t *Tracer) Observe(e fw.Event) {
 		var d fw.ApprovalDecidedData
 		_ = e.Decode(&d)
 		rt.current().AddEvent(e.Type, trace.WithTimestamp(ts), trace.WithAttributes(
-			attribute.String("fw.approval.id", d.ApprovalID), attribute.String("fw.approval.decision", d.Decision), attribute.String("fw.approval.decider_kind", actorKind(d.Decider))))
+			attribute.String("fw.approval.id", d.ApprovalID), attribute.String("fw.approval.decision", d.Decision), attribute.String("fw.approval.decider_kind", actorKind(d.Decider, d.DeciderKind))))
 	case fw.EvError:
 		var d fw.ErrorData
 		_ = e.Decode(&d)

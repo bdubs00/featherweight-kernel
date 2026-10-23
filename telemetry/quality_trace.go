@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"strings"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -43,37 +42,28 @@ func receiptHash(id string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Kinds of the actor of a decision or a budget change (actorKind).
+// Kinds of the actor of a decision or a budget change that the kernel
+// did not record (actorKind).
 const (
-	actorNone     = "none"     // no actor recorded
-	actorKernel   = "kernel"   // the kernel itself
-	actorToken    = "token"    // the static bearer token of the process
-	actorLocal    = "local"    // the local user, over stdio or fw run
-	actorWorkload = "workload" // a workload with a SPIFFE identity
-	actorParent   = "parent"   // a run: the parent of a child, or the run that a grader grades
-	actorPerson   = "person"   // any other subject, such as the subject of an OIDC token
+	actorNone    = "none"    // no actor recorded
+	actorUnknown = "unknown" // an actor without a kind, such as in the ledger of an older kernel
 )
 
-// actorKind returns the kind of the subject that decided an approval or
-// changed a budget, never the subject: a span attribute names no person
-// and no run.
-func actorKind(subject string) string {
-	switch {
-	case subject == "":
+// actorKind returns the kind of the actor that decided an approval or
+// changed a budget, as the kernel recorded it from the principal (see
+// fw.ActorPerson), never the subject: a span attribute names no person
+// and no run. It never guesses the kind from the shape of the subject, so
+// a person whose subject looks like a run id or a SPIFFE id stays a
+// person.
+func actorKind(subject, kind string) string {
+	switch kind {
+	case fw.ActorPerson, fw.ActorParent, fw.ActorKernel, fw.KindToken, fw.KindLocal, fw.KindWorkload, fw.KindAnonymous:
+		return kind
+	}
+	if subject == "" && kind == "" {
 		return actorNone
-	case subject == fw.OriginKernel:
-		return actorKernel
-	case subject == fw.KindToken:
-		return actorToken
-	case subject == "cli", strings.HasPrefix(subject, "local:"):
-		return actorLocal
-	case strings.HasPrefix(subject, "spiffe://"):
-		return actorWorkload
 	}
-	if _, ok := fw.IDTime(subject); ok {
-		return actorParent
-	}
-	return actorPerson
+	return actorUnknown
 }
 
 // receiptSpan correlates late receipts without retaining finished spans or

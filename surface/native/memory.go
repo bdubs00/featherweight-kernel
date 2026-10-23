@@ -171,13 +171,14 @@ func (s *server) searchMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // listNotes answers GET /v1/memory/notes?agent= with the notes of the
-// scope of the caller, newest first, without their text.
+// scope of the caller, newest first, without their text. cut true says
+// that the walk stopped at its bound, so notes can be missing.
 func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 	scope, ok := s.memoryScope(w, r, false)
 	if !ok {
 		return
 	}
-	notes, err := s.mem.List(r.Context(), scope)
+	notes, cut, err := s.mem.List(r.Context(), scope)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -185,7 +186,11 @@ func (s *server) listNotes(w http.ResponseWriter, r *http.Request) {
 	if notes == nil {
 		notes = []fw.MemoryRecord{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scope": scope.Kind, "notes": notes})
+	out := map[string]any{"scope": scope.Kind, "notes": notes}
+	if cut {
+		out["cut"] = true
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // noteRef returns the ref of the note that the path of the request names,

@@ -804,31 +804,37 @@ func (d *doctor) checkMemory(cfg *fw.Config) {
 		return
 	}
 	defer store.Close()
+	var cut bool
 	switch scope {
 	case fw.MemoryScopePrincipal:
-		people, notes, err := store.PrincipalNotes(ctx, "default")
+		people, notes, pcut, err := store.PrincipalNotes(ctx, "default")
 		if err != nil {
 			d.fail("memory: %v", err)
 			return
 		}
-		local, err := store.List(ctx, store.Scope(fw.RunInfo{}))
+		local, lcut, err := store.List(ctx, store.Scope(fw.RunInfo{}))
 		if err != nil {
 			d.fail("memory: %v", err)
 			return
 		}
+		cut = pcut || lcut
 		d.ok("memory: scope principal, index %s, %d %s of %d %s in the profile default, and %d %s of its runs without a principal",
 			memory.IndexDriver, notes, plural(notes, "note", "notes"), people, plural(people, "person", "people"), len(local), plural(len(local), "note", "notes"))
 	default:
-		notes, err := store.List(ctx, store.Scope(fw.RunInfo{}))
+		notes, lcut, err := store.List(ctx, store.Scope(fw.RunInfo{}))
 		if err != nil {
 			d.fail("memory: %v", err)
 			return
 		}
+		cut = lcut
 		what := plural(len(notes), "note", "notes") + " of the profile default"
 		if scope == fw.MemoryScopeShared {
 			what = plural(len(notes), "note that every profile shares", "notes that every profile shares")
 		}
 		d.ok("memory: scope %s, index %s, %d %s", scope, memory.IndexDriver, len(notes), what)
+	}
+	if cut {
+		d.warn("memory: a memory directory holds too many entries to count, so the counts are too low and the listings miss notes; remove what is not a note")
 	}
 	if inAX && scope == fw.MemoryScopeAgent {
 		d.warn("memory: tools.memory.scope is agent in an ax Task, so each person who runs a profile reads the notes that the runs of other people wrote; set principal unless one person uses the Task")

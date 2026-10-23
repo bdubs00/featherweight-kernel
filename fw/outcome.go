@@ -387,7 +387,7 @@ func (a *Agent) waitGrader(ctx context.Context, rs *runState, id string) (*Run, 
 			return r, err
 		}
 		denied = r.Pending.ID
-		err = a.Decide(ctx, id, ApprovalDecision{ApprovalID: denied, Decision: "deny", Decider: rs.id,
+		err = a.Decide(ctx, id, ApprovalDecision{ApprovalID: denied, Decision: "deny", Decider: rs.id, DeciderKind: ActorParent,
 			Note: "the grader of an outcome works without approvals and answers"})
 		if err != nil && !errors.Is(err, ErrNoPendingApproval) {
 			return r, err
