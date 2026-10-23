@@ -141,11 +141,15 @@ type Observe struct {
 }
 
 // RoutineStep is one tool call of a routine. Input renders to a JSON
-// object. As names the result text for the later templates.
+// object. As names the result text for the later templates. Compare names
+// the keys of the input that a replay compares with the call of the agent,
+// such as every key but a comment in words; empty compares every key of
+// the rendered input. The runner reads no Compare.
 type RoutineStep struct {
-	Tool  string `yaml:"tool" json:"tool"`
-	Input string `yaml:"input" json:"input"`
-	As    string `yaml:"as,omitempty" json:"as,omitempty"`
+	Tool    string   `yaml:"tool" json:"tool"`
+	Input   string   `yaml:"input" json:"input"`
+	As      string   `yaml:"as,omitempty" json:"as,omitempty"`
+	Compare []string `yaml:"compare,omitempty" json:"compare,omitempty"`
 }
 
 // RoutineCheck is one check afterward: a call, and the substrings that its
@@ -286,6 +290,11 @@ func routineProblems(cfg *Config, key string, r Routine) []string {
 	for i, s := range r.Steps {
 		skey := fmt.Sprintf("%s.steps[%d]", key, i)
 		call(skey, s.Tool, s.Input)
+		for j, k := range s.Compare {
+			if strings.TrimSpace(k) == "" {
+				p = append(p, fmt.Sprintf("%s.compare[%d] is empty", skey, j))
+			}
+		}
 		if s.As != "" {
 			switch {
 			case !routineField.MatchString(s.As) || slices.Contains(routineReserved, s.As):
@@ -468,10 +477,24 @@ func routineFind(text any, pattern string) (string, error) {
 	}
 	v, ok := firstMatch(re, fmt.Sprint(text))
 	if !ok || v == "" {
-		return "", fmt.Errorf("hole %s empty", pattern)
+		return "", emptyHole(pattern)
 	}
 	return v, nil
 }
+
+// ErrEmptyHole marks the error of a find that matched nothing, whose text
+// reads "hole <pattern> empty". The routine then does not act: a replay
+// counts such a run as one that the routine hands to the agent.
+var ErrEmptyHole = errors.New("fw: a find of a routine matched nothing")
+
+type emptyHole string
+
+func (e emptyHole) Error() string        { return "hole " + string(e) + " empty" }
+func (e emptyHole) Is(target error) bool { return target == ErrEmptyHole }
+
+// freeValue finds a value that a proposal leaves to a person,
+// {{/* free <place> */}} (package routine).
+var freeValue = regexp.MustCompile(`\{\{/\* free (.*?) \*/\}\}`)
 
 // firstMatch returns the first capture group of the first match of re in
 // text, or the whole match when re has no group, and whether it matched.
@@ -530,6 +553,9 @@ func RenderRoutine(text string, data map[string]any) (string, error) {
 // RenderRoutineInput renders the input of a step or a check and checks
 // that it is a JSON object. It returns the object in compact form.
 func RenderRoutineInput(text string, data map[string]any) (json.RawMessage, error) {
+	if m := freeValue.FindStringSubmatch(text); m != nil {
+		return nil, fmt.Errorf("the routine cannot fill the value %s yet", m[1])
+	}
 	s, err := RenderRoutine(text, data)
 	if err != nil {
 		return nil, err

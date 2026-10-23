@@ -389,3 +389,15 @@ func TestCheckRoutineName(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderRoutineHolesAndFreeValues(t *testing.T) {
+	data := RoutineData("no number here", nil)
+	_, err := RenderRoutineInput(`{"n": {{ find .input "#(\\d+)" }}}`, data)
+	if !errors.Is(err, ErrEmptyHole) || err.Error() != `hole #(\d+) empty` {
+		t.Errorf("empty hole = %v", err)
+	}
+	_, err = RenderRoutineInput(`{"labels": {{/* free step 2 labels */}}}`, data)
+	if err == nil || err.Error() != "the routine cannot fill the value step 2 labels yet" {
+		t.Errorf("free value = %v", err)
+	}
+}
