@@ -467,7 +467,7 @@ func (rr *routineRun) ask(ctx context.Context, decider, routines, input string, 
 		if err != nil || why != "" {
 			return nil, "", 0, why, err
 		}
-		text := resultText(res)
+		text := TextOf(res.Content)
 		if res.IsError {
 			return nil, "", 0, clipLine(strings.TrimPrefix(text, "decide: "), 300), nil
 		}
@@ -526,9 +526,9 @@ func (rr *routineRun) apply(ctx context.Context, r Routine, q RunQueuedData, sai
 		case why != "":
 			return "", label + ": " + why, nil
 		case res.IsError:
-			return "", label + ": error: " + clipLine(resultText(res), 200), nil
+			return "", label + ": error: " + clipLine(TextOf(res.Content), 200), nil
 		}
-		return resultText(res), "", nil
+		return TextOf(res.Content), "", nil
 	}
 	for i, s := range r.Steps {
 		label := fmt.Sprintf("step %d %s", i+1, s.Tool)
@@ -627,40 +627,9 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 	default:
 		return ToolResult{}, "denied by policy: " + d.Reason, nil
 	}
-	if _, err := a.emit(ctx, rs, EvToolRequested, ToolRequestedData{Tool: spec.Name, CallID: callID, Input: input, Idempotent: spec.Idempotent, Source: spec.Source, Routine: routine}); err != nil {
-		return ToolResult{}, "", err
-	}
 	rr.calls++
-	var aborted atomic.Bool
-	got := a.invoke(ctx, rs, plannedCall{use: use, tool: t, spec: spec, run: true}, &aborted)
-	if ctx.Err() != nil || aborted.Load() {
-		return ToolResult{}, "", errStopped
-	}
-	res := got.res
-	content := res.Content
-	if len(content) == 0 && len(res.Structured) > 0 {
-		content = []Block{Text(string(res.Structured))}
-	}
-	if _, err := a.emit(ctx, rs, EvToolResponded, ToolRespondedData{
-		CallID:    callID,
-		Tool:      spec.Name,
-		Content:   validJSONBlocks(content),
-		IsError:   res.IsError,
-		ExitCode:  res.ExitCode,
-		LatencyMS: got.ms,
-	}); err != nil {
-		return ToolResult{}, "", err
-	}
-	return res, "", nil
-}
-
-// resultText returns the text of a result, or its structured content when
-// it has no text.
-func resultText(res ToolResult) string {
-	if text := TextOf(res.Content); text != "" {
-		return text
-	}
-	return string(res.Structured)
+	res, err := a.runOne(ctx, rs, plannedCall{use: use, tool: t, spec: spec, run: true, routine: routine})
+	return res, "", err
 }
 
 // compareLocked appends one fw.routine.compared per observed question of
