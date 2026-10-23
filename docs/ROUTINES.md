@@ -1,25 +1,26 @@
 # Routines: the muscle memory of an agent
 
-This document is the contract between the kernel, the workbench, the page
-(bossmode), and the lab for routines. It names one word for one thing, the
-data shape, the events, the routes, and the words on the screen. Each part
-builds against it in its own worktree. The design behind it is "memory as a
-build": the ledger is the only memory of record, and a routine is a compiled
-view of verified runs that the kernel can run again without a model.
+This document is the contract for routines between the kernel, the
+workbench, the page (bossmode), and the lab. It names one word for one
+thing. It gives the data shape, the events, the routes, and the words on
+the screen. Each part builds against it in its own worktree. The design
+behind it is "memory as a build". The ledger is the only memory of record.
+A routine is a compiled view of verified runs, and the kernel can run it
+again without a model.
 
 ## 1. One word for one thing
 
 | Thing | The word | Never |
 |---|---|---|
-| A vetted sequence of tool calls with typed holes, a decision schema, and a check afterward, that the kernel runs under the policy of the run | routine | procedure, skill, playbook, macro, checkpoint |
+| A vetted sequence of tool calls with typed holes, a decision schema, and a check afterward. The kernel runs it under the policy of the run. | routine | procedure, skill, playbook, macro, checkpoint |
 | A hole that a decision model fills from the input | question, with its answers | slot, classifier label, feature |
 | A hole that copies a value from the input or from an earlier result | a template (`{{ }}`) | data flow, binding |
 | The model that answers typed questions with probabilities | decider | classifier, Clef, Jev (those are deciders) |
 | The run of a routine beside the agent, without acting, to compare the two | rehearsal (standing `rehearsing`, kernel standing `shadow`) | shadow mode, dry run, canary |
-| A live routine's sampled runs that the agent still handles, for comparison | canary (a number, never a standing word on screen) | |
-| A person's decision that a routine may act on its own | sign off (verb), signed off | promote, approve, activate |
+| The sampled runs of a live routine that the agent still handles, for comparison | canary (a number, never a standing word on screen) | |
+| The decision of a person that a routine can act on its own | sign off (verb), signed off | promote, approve, activate |
 | What the world said afterward: a quality receipt of `rejected` | sent back | failure, negative receipt |
-| A run handled by a routine with no model call | by a routine | rung 3, compiled |
+| A run that a routine handled with no model call | by a routine | rung 3, compiled |
 
 Words that never appear on a screen or in a document for an operator:
 procedure, rung, shadow, decider, calibration, receipt, template, hole,
@@ -27,11 +28,11 @@ memory, compile, anti-unification, Clef, Jev.
 
 ## 2. The routine
 
-A routine is data: YAML in a file, JSON on the wire, one struct in the
+A routine is data: YAML in a file, JSON on the wire, and one struct in the
 kernel (`fw.Routine`). A profile carries its routines in
-`AgentProfile.Routines []Routine`, so the resolved profile of every run pins
-the exact routines that the run saw (the kernel already pins the profile in
-`fw.run.queued`).
+`AgentProfile.Routines []Routine`. The resolved profile of every run
+therefore pins the exact routines that the run saw. The kernel already
+pins the profile in `fw.run.queued`.
 
 ```yaml
 name: acknowledge-a-new-ticket      # [a-z0-9-]{1,64}, unique per agent
@@ -84,30 +85,33 @@ answer: 'TRIAGE {"number": {{ find .input `#(\d+)` }}, "type": "type/{{ .type }}
 Semantics:
 
 - `input`, `answer`, and the strings of `contains` and `lacks` are Go
-  `text/template` texts. The data is `.input` (the input of the run as
-  text), `.json` (the input parsed as JSON, when it parses; else nil),
-  `.meta` (the metadata of the run, a string map), one field per question
-  with the chosen option or `yes`/`no` (`.type`, `.beyond`), and one field
-  per step that has `as`, holding the text of its result. The functions
-  are `find text pattern` (the first capture group of the first match, or
-  an empty string), `json value` (the value as a JSON string literal), and
-  `lower`. Nothing else: a routine is a record of what an agent did, not a
-  program.
-- The output of an `input` template must parse as a JSON object; otherwise
-  the routine fails before any call, with the step and the parse error in
-  the event.
-- A rendered `find` that finds nothing fails the routine at that step
-  (reason `hole <name> empty`), so a routine never calls a tool with a
-  missing value.
-- `steps` run in order, each as a normal tool call of the run: the policy
-  applies (allow, ask, deny), the limits apply, the budget counts it, and
-  the ledger records it as `fw.tool.requested` and `fw.tool.responded`
-  with the field `routine: <name>` on the request. An error result, a
-  denied call, or a failed check ends the routine (section 3.3).
-- `after` runs after the steps. Each entry calls its tool and checks the
-  result text for every rendered `contains` and against every rendered
+  `text/template` texts. The data holds these fields:
+  - `.input`, the input of the run as text
+  - `.json`, the input parsed as JSON, or nil for an input that does not parse
+  - `.meta`, the metadata of the run, a string map
+  - one field per question, with the chosen option or `yes` or `no`, such as `.type` and `.beyond`
+  - one field per step with `as`, with the text of its result
+- The functions are `find text pattern`, `json value`, and `lower`.
+  `find` gives the first capture group of the first match. `json` gives
+  the value as a JSON string literal. The built-in functions of
+  `text/template`, such as `printf`, `if`, and `eq`, stay. The kernel adds
+  nothing else: a routine is a record of what an agent did, not a program.
+- The output of an `input` template must parse as a JSON object.
+  Otherwise the routine fails before any call, with the step and the parse
+  error in the event.
+- A rendered `find` that finds nothing fails the routine at that step,
+  with the reason `hole "<pattern>" empty`. A routine therefore never
+  calls a tool with a missing value. A missing field fails the step too.
+- The `steps` run in order. Each one is a normal tool call of the run.
+  The policy applies (allow, ask, deny), the limits apply, and the budget
+  counts the call. The ledger records it as `fw.tool.requested` and
+  `fw.tool.responded`, with the field `routine: <name>` on the request.
+  An error result, a denied call, or a failed check ends the routine
+  (section 3.3).
+- `after` runs after the steps. Each entry calls its tool. Then it checks
+  the result text for every rendered `contains` and against every rendered
   `lacks`, as substrings. The check is honest, not clever.
-- `answer` is the output of the run when the routine completes.
+- After a routine that completes, `answer` is the output of the run.
 
 ## 3. The kernel
 
@@ -126,12 +130,13 @@ deciders:
     timeout: 30s
 ```
 
-`Config.Deciders map[string]DeciderConfig` mirrors `Providers`. No decider
-is configured by default. A routine with questions and no decider, or a
-decider name that the configuration lacks, is a configuration error at
-load, named in the error (no silent default, no silent skip). The token
-never enters the ledger, a log line, or an event; the redactor already
-strips the values of the environment, and the client sends it only as the
+`Config.Deciders map[string]DeciderConfig` mirrors `Providers`. The
+configuration has no decider by default, and a decider has no default
+model. A routine with questions and no decider is a configuration error at
+load. So is a decider name that the configuration lacks. The error names
+the problem: no silent default, and no silent skip. The token never
+enters the ledger, a log line, or an event. The redactor already strips
+the values of the environment. The client sends the token only as the
 `Authorization` header.
 
 ### 3.2 The decider and the `decide` tool
@@ -141,7 +146,7 @@ strips the values of the environment, and the client sends it only as the
 // question, with probabilities. It is the only model-shaped thing a routine
 // touches, and it never generates text.
 type Decider interface {
-    Decide(ctx context.Context, state string, questions map[string]Question) (Decision, error)
+    Decide(ctx context.Context, state string, questions map[string]Question) (DecideResult, error)
 }
 type Question struct {
     Type         string `json:"type"`                   // choice | noul | score
@@ -155,7 +160,7 @@ type Answer struct {
     Probabilities map[string]float64 `json:"probabilities,omitempty"` // choice and score: every option
     Confidence    float64            `json:"confidence,omitempty"`
 }
-type Decision struct {
+type DecideResult struct {
     Model       string            `json:"model"`      // the model the server reports
     Answers     map[string]Answer `json:"answers"`
     InputTokens int               `json:"inputTokens,omitempty"`
@@ -163,67 +168,89 @@ type Decision struct {
 }
 ```
 
-The one implementation is the System One HTTP client (request `{model,
-state, questions}`, the shapes of TypeSafe's API, which Clef and Jev both
-speak; up to 64 questions per call). It parses `choice` (`answer`,
-`probabilities`, `confidence`), `noul` (`probability`), and `score`
-(`answer`, `probabilities`) answers. Any other server shape is an error that
+The kernel names the result `fw.DecideResult`, not `fw.Decision`. The
+policy of the kernel already has the name `fw.Decision`. The JSON shape
+stays the same.
+
+The one implementation is the System One HTTP client. Its request is
+`{model, state, questions}`, the shapes of the API of TypeSafe, which Clef
+and Jev both speak. One call holds up to 64 questions. The client reads
+both spellings of the answers. Clef and Workers AI send a `choice` with
+`probabilities` and `confidence`, a `noul`, and a `score` with a `legend`
+and `probabilities`. TypeSafe sends `answer` in place of `choice`, and
+`probability` in place of `noul`. Any other server shape is an error that
 names the field.
 
-`decide` is a built-in tool, present in a run only when the configuration
-has at least one decider and the profile allows the tool as it allows any
-built-in tool. Input: `{"decider": "<name, optional when one exists>",
-"state": "<optional, default the input of the run>", "questions": {...}}`.
-Output: the `Decision` as JSON text. The ledger records it as any tool call,
-so the probabilities behind every decision sit in `fw.tool.responded`. The
-routine runner asks the decider through the same path, so a model's
-decision and a routine's decision look the same in the ledger.
+`decide` is a built-in tool. A run has it only under two conditions: the
+configuration has at least one decider, and the profile allows the tool as
+it allows any built-in tool. The input is this:
+
+```json
+{"decider": "<name, optional with one decider>", "state": "<optional, default the input of the run>", "questions": {}}
+```
+
+The output is the `fw.DecideResult` as JSON text. The ledger records it as
+any tool call, so the probabilities behind every decision sit in
+`fw.tool.responded`. The routine runner asks the decider through the same
+path, also for a profile whose tool list leaves `decide` out. A decision
+of a model and a decision of a routine therefore look the same in the
+ledger.
 
 ### 3.3 The runner
 
 The runner acts once per run, after `fw.run.started` and before the first
-model turn, for the routines of the resolved profile whose standing is
-`shadow` or `live`. It never acts on a follow-up turn, a resumed run, or a
-replay.
+model turn. It acts on the routines of the resolved profile with the
+standing `shadow` or `live`. It never acts on a follow-up turn or a
+replay. It never acts twice: after a restart, it does not run a routine
+again.
 
-1. It asks the decider every question of every such routine in one call
-   (question ids `<routine>.<question>`), with the input of the run as the
-   state. Routines that share a decider share the call; one call per
-   decider otherwise. A decider error records `fw.routine.decided` with
-   `applies: false` and the reason for every routine, and the run goes on
-   to the model as if no routine existed.
-2. For each routine it decides `applies`: every question passes its `act`
-   band and its `expect`. It records one `fw.routine.decided` per routine
-   (section 3.4), with `mode` `shadow` for a shadow routine, `canary` for a
-   live routine on a run that the canary share picked (a stable hash of the
-   run id against `canary`, so the pick is reproducible), and `live`
-   otherwise.
-3. The first routine, in profile order, with `mode: live` and `applies:
-   true` runs: its steps, then its `after` checks. A step that fails (an
-   error result, a denied call, a template error, an empty hole) or a
-   check that fails ends the routine. The runner records
-   `fw.routine.applied` with `ok` and the reason.
-4. When the routine completed, the run finishes with the rendered `answer`
-   as its output and no model call. When it did not complete, or no live
-   routine applies, the run goes to the model. On a live routine that did
-   not apply or did not complete, the first user message gets one
-   `<context source="routine">` block, the data of the decision and of what
-   the routine did (the answers with their probabilities, the steps that
-   ran and their results in brief, the reason it stopped), so the model
-   starts warm. A shadow or canary run gets no block: the model must not
-   see the routine's answers, or the comparison is worthless.
-5. At the end of a run in which the model acted and a routine was decided
-   in `shadow` or `canary` mode, the runner compares the answers with what
-   the agent did (section 3.5) and records one `fw.routine.compared` per
-   question that has `observe`, before `fw.run.finished`. If the kernel
-   cannot append before the finish in its current shape, append after it
-   and add `fw.routine.compared` to `LeavesFinished`, with a test that a
-   finished run stays finished.
+1. The runner asks the decider every question of every such routine in
+   one call. The question ids are `<routine>.<question>`, and the state is
+   the input of the run. Routines that share a decider share the call.
+   Each other decider gets a call of its own. On a decider error, the
+   runner records `fw.routine.decided` with `applies: false` and the
+   reason for every routine of that decider. The run then goes on to the
+   model, as a run without routines does.
+2. For each routine, the runner decides `applies`: every question passes
+   its `act` band and its `expect`. It records one `fw.routine.decided`
+   per routine (section 3.4). A shadow routine has the `mode` `shadow`. A
+   live routine has the mode `canary` on a run that the canary share
+   picked, and `live` otherwise. The pick is a stable hash of the run id
+   against `canary`, so the pick is reproducible (`fw.CanaryPick`).
+3. The first routine in profile order with `mode: live` and `applies:
+   true` runs. It runs its steps, then its `after` checks. A step that
+   fails ends the routine: an error result, a denied call, a template
+   error, or an empty hole. A check that fails ends it too. The runner
+   records `fw.routine.applied` with `ok` and the reason.
+4. After a routine that completed, the run finishes with the rendered
+   `answer` as its output and no model call. In every other case, the run
+   goes to the model: the routine did not complete, or no live routine
+   applies. For a live routine that did not apply or did not complete, the
+   first user message gets one `<context source="routine">` block. The
+   block holds the data of the decision and of what the routine did: the
+   answers with their probabilities, the steps that ran with their results
+   in brief, and the reason it stopped. The model therefore starts warm. A
+   shadow or canary run gets no block. The model must not see the answers
+   of the routine, or the comparison is worthless.
+5. At the end of a run that the model completed, the runner compares the
+   answers with what the agent did (section 3.5). It does so for each
+   routine in the mode `shadow` or `canary`, and for each live routine
+   that did not complete. It records one `fw.routine.compared` per
+   question that has `observe`, before `fw.run.finished`. A finished run
+   therefore stays finished, and `LeavesFinished` needs no change. A run
+   that fails gets no comparison.
 
-The runner's tool calls go through the same policy, limits, and budget as a
-model's. A policy `ask` parks the run in the same approval flow; a person's
-deny ends the routine. A run without a model still refuses (`ErrNoModel`):
-the fall-through needs a model, and the lab profiles have one.
+The tool calls of the runner go through the same policy, limits, and
+budget as those of a model. A policy `ask` parks the run in the same
+approval flow, and a deny by a person ends the routine. A run without a
+model still refuses (`ErrNoModel`). The fall-through needs a model, and
+the lab profiles have one.
+
+A restart can cut a live routine off. At the next start, the runner
+records `fw.routine.applied` with `ok: false` and the reason `the process
+stopped during the routine`. The model then starts with the block. A
+follow-up message that arrives during a routine also goes to the model
+with the block, even after a routine that completed.
 
 ### 3.4 The events
 
@@ -251,6 +278,7 @@ type RoutineAppliedData struct {
     Steps      int    `json:"steps"`                  // steps that ran, failed one included
     FailedStep int    `json:"failedStep,omitempty"`   // 1-based, among steps then after
     Reason     string `json:"reason,omitempty"`
+    Answer     string `json:"answer,omitempty"`       // the rendered answer of a routine that completed
 }
 type RoutineComparedData struct {
     Routine  string `json:"routine"`
@@ -263,67 +291,92 @@ type RoutineComparedData struct {
 }
 ```
 
-`ToolRequestedData` gains `Routine string json:"routine,omitempty"`, set on
-every call the runner makes. Nothing else in the existing events changes.
+`ToolRequestedData` gains `Routine string json:"routine,omitempty"`. The
+runner sets it on every call that it makes. A decide call that serves
+several routines names them all, separated by commas. `RoutineAppliedData`
+also carries `answer`. A restart between `fw.routine.applied` and
+`fw.run.finished` can therefore still finish the run. Nothing else in the
+existing events changes.
 
 ### 3.5 Observing what the agent did
 
-`observe` reads the agent's answer to a question out of the run it just
-made. Two forms: `{answer: <regex>}` runs the regex over the output text of
-the run; `{tool: <name>, match: <regex>}` runs it over the JSON text of
-each `fw.tool.requested` input of that tool by the model, first match wins.
-The first capture group is the observed value. For `noul` questions the
-observed value is `yes` when the regex matches and `no` otherwise.
+`observe` reads the answer of the agent to a question out of the run that
+it just made. It has two forms. `{answer: <regex>}` runs the regex over
+the output text of the run. `{tool: <name>, match: <regex>}` runs it over
+the JSON text of each `fw.tool.requested` input of that tool by the model,
+and the first match wins. The first capture group is the observed value.
+For a `noul` question, the observed value is `yes` for a regex that
+matches, and `no` otherwise.
 
 ### 3.6 Replay and propose
 
 Package `routine` offers two pure functions and the verb `fw routine`.
 
-`Replay(r Routine, runs [][]Event, opts) ReplayResult`: for each recorded
-run, it reads the agent's answers with `observe`, renders the steps with
-those answers and the recorded results of the earlier steps (matched by
-tool name and position among the agent's calls of that tool), and compares
-each rendered step input with the agent's recorded call to the same tool,
-as canonical JSON (key order ignored). A run matches when every step and
-every `after` check matches. The result lists matched, diverged (with the
-first diverging step, the rendered input, and the recorded input, bounded
-to 200 bytes each), and unreadable runs. With `--decide`, it also asks the
-configured decider on each run's input and reports per question the
-agreement with the observed answer, the Brier score, and a reliability
-table at the bands 0.5, 0.7, 0.85, 0.95. `fw routine replay --routine
-r.yaml --ledger <dir> [--agent name] [--decide] [--json]`.
+`Replay(r Routine, runs [][]Event, opts) ReplayResult` works as follows.
+For each recorded run, it reads the answers of the agent with `observe`.
+It renders the steps with those answers and with the recorded results of
+the earlier steps. A recorded result belongs to a step by tool name and by
+place among the calls of the agent to that tool. Replay compares each
+rendered step input with the recorded call of the agent to the same tool.
+It compares canonical JSON, with the order of the keys ignored. For a match, every
+step and every `after` check of the run must match. The result lists the
+matched runs and the diverged runs. A diverged run comes with the first
+diverging step, the rendered input, and the recorded input, each bounded
+to 200 bytes. The result also lists the unreadable runs. With `--decide`,
+Replay also asks the configured decider on the input of each run. It
+reports per question the agreement with the observed answer, the Brier
+score, and a reliability table at the bands 0.5, 0.7, 0.85, and 0.95.
 
-`Propose(runs [][]Event, opts) (Routine, Proposal)`: anti-unification of
+```
+fw routine replay --routine r.yaml --ledger <dir> [--agent name] [--decide] [--json]
+```
+
+`Propose(runs [][]Event, opts) (Routine, Proposal)` is anti-unification of
 the tool calls of verified runs. It takes the sequence of tool names of
-each run; the most common sequence is the template, and runs with another
-sequence are listed as divergent. For each call position and each leaf of
-the input JSON, across runs: equal everywhere is a constant; a value that
-appears in the run input or in an earlier result text becomes a `find`
-template over that source, with the shortest unambiguous context; a value
-from a small set (at most 8 distinct values over at least 10 runs) becomes
-a question with those values as options plus `other`, and `observe` from
-the tool and context that revealed it; anything else is a free hole, left
-as `{{ /* free */ }}` and named in the proposal, which makes the routine
-incomplete until a person templates it or hands that step to the agent.
-The proposal lists runs used, sequence agreement, and every hole with its
-kind and value counts. `fw routine propose --ledger <dir> --agent name
-[--runs ids] [--out r.yaml]`. Replay before propose if time is short.
+each run. The most common sequence is the template, and the runs with
+another sequence are listed as divergent. For each call position and each
+leaf of the input JSON, across runs, it decides the kind of the leaf:
+
+- A value that is equal everywhere is a constant.
+- A value that appears in the run input or in an earlier result text
+  becomes a `find` template over that source, with the shortest
+  unambiguous context.
+- A value from a small set becomes a question, with those values as
+  options plus `other`. A small set holds at most 8 distinct values over
+  at least 10 runs. The `observe` of the question comes from the tool and
+  the context that revealed the value.
+- Anything else is a free hole, `{{/* free <place> */}}`, and the proposal
+  names it. A free hole makes the routine incomplete. A person then
+  templates it, or hands that step to the agent. Go does not parse the
+  form `{{ /* free */ }}` with the spaces inside.
+
+The proposal lists the runs used, the agreement of the sequence, and every
+hole with its kind and its value counts.
+
+```
+fw routine propose --ledger <dir> --agent name [--runs ids] [--out r.yaml]
+```
+
+With little time, build Replay before Propose.
 
 ### 3.7 Bounds and what stays out
 
 - The kernel does not store routines, compute evidence over days, judge
   readiness, or change a standing. The workbench does. The kernel runs
   what the profile says and records what happened.
-- No new scheduler, no background work, no second ledger. The runner is a
-  function at the start of a run and a function at its end.
-- A routine with more than 16 steps, more than 16 questions, or a template
-  over 4 KiB is refused at profile load with a clear error.
-- Tests: the runner on a fake tool server and a fake decider (applies,
-  below band, expect, canary pick, step failure, check failure, policy
-  deny, warm fall-through block present or absent, compared events,
-  finished stays finished), the System One client against a recorded
-  response, the templates (find, json, missing hole), replay on a recorded
-  ledger, propose on a synthetic set. `go test ./...` and `go vet` pass.
+- No new scheduler, no background work, and no second ledger. The runner
+  is a function at the start of a run and a function at its end.
+- At profile load, the kernel refuses a routine with more than 16 steps,
+  more than 16 questions, or a template over 4 KiB, with a clear error.
+- The tests cover the runner on a fake tool server and a fake decider, in
+  these cases:
+  - applies, below band, expect, and canary pick
+  - step failure, check failure, and policy deny
+  - the warm fall-through block, present or absent
+  - compared events, and a finished run that stays finished
+- The tests also cover the System One client against a recorded response,
+  the templates (find, json, missing hole), replay on a recorded ledger,
+  and propose on a synthetic set. `go test ./...` and `go vet` pass.
 
 ## 4. The workbench
 
@@ -347,171 +400,208 @@ Bucket `<stream>_ROUTINES` (as pages and pools keep theirs), key
 
 Standings of the workbench: `proposed`, `rehearsing`, `live`, `paused`,
 `retired`. Only `rehearsing` (as kernel `shadow`) and `live` reach a
-profile. The allowed moves: proposed to rehearsing or retired; rehearsing
-to live (sign off), paused, or retired; live to paused or retired; paused
-to rehearsing or live; retired to nothing. Every move records who and when
-in `history`; a move to `live` also sets `signedOff`. The body of a
-routine changes only through PUT, which bumps `version` and resets
-`ready`; a change of the body of a live routine puts it back to
-`rehearsing` (a new version rehearses again).
+profile. The allowed moves are these:
+
+- `proposed` to `rehearsing` or `retired`
+- `rehearsing` to `live` (sign off), `paused`, or `retired`
+- `live` to `paused` or `retired`
+- `paused` to `rehearsing` or `live`
+- `retired` to nothing
+
+Every move records in `history` who made it and at what time. A move to
+`live` also sets `signedOff`. The body of a routine changes only through
+PUT, which bumps `version` and resets `ready`. A change of the body of a
+live routine puts it back to `rehearsing`: a new version rehearses again.
 
 ### 4.2 Reaching the runs
 
-The front merges the routines of an agent into the profile its workers
-run: the pool overlay gains `routines` (as it carries skills, tools, and
-the policy), with `rehearsing` sent as standing `shadow` and `live` as
-`live`, and the overlay pass ships them to every Task of the pool. Where
-the front starts a run itself with an inline profile (the quick chat, a
-bridge seat, `enqueue`), the inline profile carries them too. A run of an
-agent therefore always sees the routines the store holds at that moment,
-pinned by the kernel in `fw.run.queued`.
+The front merges the routines of an agent into the profile that its
+workers run. The pool overlay gains `routines`, as it carries skills,
+tools, and the policy. It sends `rehearsing` as standing `shadow` and
+`live` as `live`, and the overlay pass ships them to every Task of the
+pool. In some places the front starts a run itself with an inline profile:
+the quick chat, a bridge seat, and `enqueue`. There the inline profile
+carries the routines too. A run of an agent therefore always sees the
+routines that the store holds at that moment, pinned by the kernel in
+`fw.run.queued`.
 
 ### 4.3 Evidence
 
 The front already consumes the egress stream of every run. A small
-projection keeps, per routine, in the bucket under `<agent>/<name>/evidence`:
+projection keeps these figures per routine, in the bucket under
+`<agent>/<name>/evidence`:
 
-- per day (UTC): `decided` (shadow and canary runs), `acted` (the routine
-  would have acted: `applies`), `agreed` (every compared question agreed),
-  `disagreed`, `handed` (applies false), `applied` (live, ok), `failed`
-  (live, not ok);
-- per question: a reliability table over the bands of `act`: for each
-  band, the number of compared runs whose probability fell in it and how
-  many agreed;
-- the last 50 disagreements: run id, the first line of the input, per
-  question said and observed, and, when the run has a quality receipt, its
-  verification;
-- `sentBack`: runs with a `rejected` receipt, split into those the
-  routine applied to and those where it agreed with the agent;
-- `replay`: the result of the last `Replay`, when the workbench ran one
+- per day (UTC):
+  - `decided`: shadow and canary runs
+  - `acted`: the routine applies, so it is ready to act
+  - `agreed`: every compared question agreed
+  - `disagreed`
+  - `handed`: applies false
+  - `applied`: live, ok
+  - `failed`: live, not ok
+- per question: a reliability table over the bands of `act`. For each
+  band, the table counts the compared runs whose probability fell in it,
+  and how many of them agreed.
+- the last 50 disagreements: the run id, the first line of the input, what
+  each question said and observed, and, for a run with a quality receipt,
+  its verification.
+- `sentBack`: the runs with a `rejected` receipt. They split into the runs
+  that the routine applied to and the runs in which it agreed with the
+  agent.
+- `replay`: the result of the last `Replay` that the workbench ran
   (matched, total, at).
 
-`ready` is true for a `rehearsing` routine when, over its current version,
-`acted >= readyAfter` (default 200), `agreed / acted >= readyAgreement`
-(default 0.95), and `sentBack.agreed == 0`. The thresholds live in
-`workbench.routines` of the front's configuration. `ready` is what the page
-shows as `needs you`.
+A `rehearsing` routine is `ready` under three conditions over its current
+version:
+
+- `acted >= readyAfter` (default 200)
+- `agreed / acted >= readyAgreement` (default 0.95)
+- `sentBack.agreed == 0`
+
+The thresholds live in `workbench.routines` of the configuration of the
+front. The page shows `ready` as `needs you`.
 
 ### 4.4 Routes and tools
 
-All under the front, with the permissions of the agent: reading a routine
-needs the right to view the agent; changing a body or a standing needs the
-right to edit the agent (the same as `agent_put`).
+All routes are under the front, with the permissions of the agent. To
+read a routine, a person needs the right to view the agent. To change a
+body or a standing, a person needs the right to edit the agent, the same
+as `agent_put`.
 
 | Route | What |
 |---|---|
 | `GET /v1/routines?agent=<name>` | `{"routines": [record...]}` without evidence, newest change first |
 | `GET /v1/routines/{agent}/{name}` | the record with `evidence` |
-| `PUT /v1/routines/{agent}/{name}` | create or replace the body; body `{"routine": {...}, "standing": "proposed", "source": {...}}`; a new routine starts `proposed` unless the caller may edit the agent and says `rehearsing` |
-| `POST /v1/routines/{agent}/{name}/standing` | `{"standing": "...", "note": "..."}`; 409 on a move the table forbids, with the allowed moves |
-| `GET /v1/routines/summary?agent=<name>&days=7` | `{"runs": n, "byRoutine": n, "byAgent": n, "withPerson": n, "costUSD": {"routine": x, "agent": y}, "sentBack": n}`; a run is by a routine when it finished with `fw.routine.applied ok`, with a person when a person decided an approval in it, by the agent otherwise |
+| `PUT /v1/routines/{agent}/{name}` | create or replace the body. The body is `{"routine": {...}, "standing": "proposed", "source": {...}}`. A new routine starts as `proposed`. A caller with the right to edit the agent can say `rehearsing` instead. |
+| `POST /v1/routines/{agent}/{name}/standing` | `{"standing": "...", "note": "..."}`. A move that the table forbids gets 409, with the allowed moves. |
+| `GET /v1/routines/summary?agent=<name>&days=7` | `{"runs": n, "byRoutine": n, "byAgent": n, "withPerson": n, "costUSD": {"routine": x, "agent": y}, "sentBack": n}`. A run that finished with `fw.routine.applied ok` is by a routine. A run in which a person decided an approval is with a person. Every other run is by the agent. |
 
-The bossmode stream carries `{"kind": "routine", "agent": "...", "name":
-"..."}` on every change of a record or its evidence (coalesced, at most one
-per routine per 2 s). MCP tools for the manager: `routines_list` and
-`routine_standing`, the same permissions.
+The bossmode stream carries `{"kind": "routine", "agent": "...", "name": "..."}`
+on every change of a record or its evidence. The stream coalesces them, at
+most one per routine per 2 s. The MCP tools for the manager are
+`routines_list` and `routine_standing`, with the same permissions.
 
 On a move to `live`, the front writes the runbook page
-`agents/<agent>/routines/<name>.md` in the wiki: the routine rendered as
-prose (what it decides, the steps in words with the tool names as meta,
-the check afterward, where it comes from, who signed it off and when),
-with the writer `bossmode` and the run id empty. The Runbook tab of the
-page shows that page. Confluence is a later change.
+`agents/<agent>/routines/<name>.md` in the wiki. The page renders the
+routine as prose: what it decides, the steps in words with the tool names
+as meta, the check afterward, and where it comes from. It also names who
+signed it off, with the time. The writer is `bossmode`, and the run id is
+empty. The Runbook tab of the page shows that page. Confluence is a later
+change.
 
 ### 4.5 Bounds
 
-- At most 64 routines per agent; a PUT past that answers 409.
-- The evidence projection is a consumer of the stream the front already
-  reads; no second subscription, no scan of every ledger on a request.
-- `go test ./...` and `go vet` pass; tests cover the store moves, the
+- At most 64 routines per agent. A PUT past that answers 409.
+- The evidence projection is a consumer of the stream that the front
+  already reads. It needs no second subscription, and no request scans
+  every ledger.
+- `go test ./...` and `go vet` pass. The tests cover the store moves, the
   overlay merge, the projection on a recorded sequence of events, the
   routes, and the readiness rule.
 
 ## 5. The page
 
-The place `Routines` in the app bar, between Skills and Wiki, with the
-three panes of the page. The design reference is the canvas of 2026-10-23
-(three artboards, exported as `.dc.html` beside this document in the
-scratchpad of the session: `routines/project/Main.dc.html`,
-`Evidence.dc.html`, `Runbook.dc.html`). Follow `docs/DESIGN.md` and
-`docs/COPY.md` of the page: build from the primitives, add no color,
-radius, shadow, or type size, and keep the three motions.
+The place `Routines` sits in the app bar, between Skills and Wiki, with
+the three panes of the page. The design reference is the canvas of
+2026-10-23, with three artboards. They are exported as `.dc.html` beside
+this document in the scratchpad of the session:
+`routines/project/Main.dc.html`, `Evidence.dc.html`, and
+`Runbook.dc.html`. Follow `docs/DESIGN.md` and `docs/COPY.md` of the page.
+Build from the primitives. Add no color, radius, shadow, or type size, and
+keep the three motions.
 
-The user's rules for this screen, in their words: every element purposeful
-and not duplicative; treat the person with the utmost respect, their time
-is valuable; the interface is immediately approachable; focus on UX. In
-practice: the sign-off card is the first thing on a routine that needs
-you, with two keys; the evidence is one click away and says what happened,
-not why; a fact appears once on the screen (the details pane shows the
-agent's week, never the routine's own figures; "signed off by" lives on
-the routine, not in the details pane; "made from" lives on the Evidence
-tab only); no explanation sentence in the chrome; a definition sits behind
-a question mark. Drop the word `matched`: the past-tickets line reads
-`212 of 212 past tickets, handled the same way` with the key `Open the
-tickets`. Scrollbars are part of the instrument: thin, a thumb of
-`--line` with the 4-pixel radius that turns `--muted` under the pointer,
-no track, in both themes, on every scrolling pane.
+The rules of the user for this screen:
+
+- every element purposeful and not duplicative
+- treat the person with the utmost respect, because their time counts
+- the interface is immediately approachable
+- focus on UX
+
+In practice:
+
+- The sign-off card is the first thing on a routine that needs you, with
+  two keys.
+- The evidence is one click away and says what happened, not why.
+- A fact appears once on the screen. The details pane shows the week of
+  the agent, never the figures of the routine itself. "Signed off by"
+  lives on the routine, not in the details pane. "Made from" lives on the
+  Evidence tab only.
+- No explanation sentence in the chrome. A definition sits behind a
+  question mark.
+- Drop the word `matched`. The line of past tickets reads `212 of 212 past
+  tickets, handled the same way`, with the key `Open the tickets`.
+- Scrollbars are part of the instrument. They are thin, with a thumb of
+  `--line` and the 4-pixel radius, which turns `--muted` under the
+  pointer. They have no track, in both themes, on every scrolling pane.
 
 | Pane | Content |
 |---|---|
-| List | `Routines` with its count chip and a `N live` chip; `Find a routine`; groups in attention order: Needs you (ready), Live, Rehearsing, Proposed, Paused, then Retired behind a toggle; a row holds the name, the status word with its light, and one meta line (`triage, rehearsed 1,480 tickets`, `identity desk, 96 this week`, `triage, 84% agreed over 120 tickets`, `triage, from 212 tickets`) |
-| Main | header: the name as the title, the status word with its light, the tabs Steps, Evidence, Runbook, and More (Pause, Resume, Retire); the groove; the body of the tab |
-| Steps | the card that needs you (`Needs your sign-off` with the three figures and the keys `Not yet` and `Sign off`; for a proposed routine `Proposed from 212 tickets` with the keys `Retire` and `Rehearse`), then Steps (numbered, the tool name as meta), What it decides (question, answers as slots, acts when), Afterward |
-| Evidence | Rehearsal (per-day bars of agreed, disagreed, handed to the agent, with the three totals), Past tickets, How sure it was (the reliability table in words), Where it disagreed (the last disagreements, with what happened afterward), Sent back, Made from |
-| Runbook | the wiki page of the routine; before sign-off, the routine rendered the same way by the page, with the line `Not yet signed off` |
-| Details | `Triage` with the chip `agent` and the key `Profile`; the mark, the tagline; This week (the share bar by routines, by the agent, with a person, and the three counts); Per run (cost by a routine, by the agent); Sent back (the count of the week) |
+| List | `Routines` with its count chip and a `N live` chip. `Find a routine`. Groups in attention order: Needs you (ready), Live, Rehearsing, Proposed, Paused, then Retired behind a toggle. A row holds the name, the status word with its light, and one meta line. Examples of a meta line: `triage, rehearsed 1,480 tickets`, `identity desk, 96 this week`, `triage, 84% agreed over 120 tickets`, `triage, from 212 tickets`. |
+| Main | header: the name as the title, the status word with its light, the tabs Steps, Evidence, Runbook, and More (Pause, Resume, Retire). Then the groove, then the body of the tab. |
+| Steps | the card that needs you, then Steps, What it decides, and Afterward. The card says `Needs your sign-off`, with the three figures and the keys `Not yet` and `Sign off`. For a proposed routine, it says `Proposed from 212 tickets`, with the keys `Retire` and `Rehearse`. Steps are numbered, with the tool name as meta. What it decides shows the question, the answers as slots, and the band of its act. |
+| Evidence | Rehearsal: per-day bars of agreed, disagreed, and handed to the agent, with the three totals. Past tickets. How sure it was: the reliability table in words. Where it disagreed: the last disagreements, with what happened afterward. Sent back. Made from. |
+| Runbook | the wiki page of the routine. Before sign-off, the page renders the routine the same way, with the line `Not yet signed off`. |
+| Details | `Triage` with the chip `agent` and the key `Profile`. The mark, the tagline. This week: the share bar by routines, by the agent, and with a person, and the three counts. Per run: the cost by a routine and by the agent. Sent back: the count of the week. |
 
 Status words of a routine: `needs you` (amber, breathes), `live` (green),
 `rehearsing`, `proposed`, `paused` (grey), `retired` (grey, struck). The
 sign-off key says `Sign off`, the quiet card afterward says `Signed off`,
-the list row says `live`. One name through the flow.
+and the list row says `live`. One name runs through the flow.
 
-The fake server gains `fake/routes-d.mjs` with the routes of section 4.4
-and data that tells the three stories of the canvas (one needs you, four
-live, one rehearsing, one proposed, two retired). Tests beside the files.
+The fake server gains `fake/routes-d.mjs` with the routes of section 4.4.
+Its data tells the three stories of the canvas: one needs you, four live,
+one rehearsing, one proposed, and two retired. Tests sit beside the files.
 `npm run build` and `npm test` pass. `docs/DESIGN.md` gains the section
-for the screen and `docs/COPY.md` its rows. Screenshots at 1440 in both
-themes as the other screens have them.
+for the screen, and `docs/COPY.md` gains its rows. The screen gets
+screenshots at 1440 in both themes, as the other screens have them.
 
 ## 6. The lab
 
-- `e2e/fleet/tickets/routines/`: the routine of triage (section 2, with
-  the real labels and tools of the helpdesk), the deciders block for the
-  front configuration (Clef on the workstation; the token from a Secret;
-  the egress host), and `clef_eval.py`: the questions of the routine over
+- `e2e/fleet/tickets/routines/` holds the routine of triage (section 2,
+  with the real labels and tools of the helpdesk). It also holds the
+  deciders block for the configuration of the front: Clef on the
+  workstation, the token from a Secret, and the egress host. Last, it
+  holds `clef_eval.py`. That script asks the questions of the routine over
   every template of `corpus.py`, normal and adversarial, with a few fills
-  each; accuracy per question against the expected labels, the recall of
-  the escalation on the adversarial kinds, the Brier score, and a
-  reliability table; the summary committed as `CLEF.md`, the raw results
-  under `e2e/results`.
-- A local stack for the test of the night, so the shared cluster and the
-  standing helpdesk stay untouched: Gitea and gitea-mcp in containers,
-  seeded with the corpus; the kernel of the worktree with a configuration
-  that names Clef as its decider (the token from the environment, never a
-  file of the repository) and reaches Claude Haiku through a port-forward
-  to the proxy of the fleet (the key stays in the cluster); the front of
-  the worktree where it runs locally; the page against the front, or
-  against its fake server where the front does not run locally.
-- Checks, each with a row in `RESULTS.md` under `e2e/results/routines-<ts>/`:
-  rehearsal records a decision and a comparison per ticket and the model
-  never sees the answers; the agreement over the corpus; sign-off through
-  the page in a headless Chrome; a live routine labels and comments with
-  no model call, and the ledger shows `applied ok`; the canary share goes
-  to the agent; a step failure (gitea-mcp stopped) falls through warm;
-  an adversarial ticket is handed to the agent; the summary counts a run
-  by a routine; screenshots of every screen the walk saw.
+  each. It reports the accuracy per question against the expected labels
+  and the recall of the escalation on the adversarial kinds. It also
+  reports the Brier score and a reliability table. The summary is
+  committed as `CLEF.md`, and the raw results go under `e2e/results`.
+- A local stack serves the test of the night, so the shared cluster and
+  the standing helpdesk stay untouched. It has Gitea and gitea-mcp in
+  containers, seeded with the corpus. It runs the kernel of the worktree
+  with a configuration that names Clef as its decider. The token comes
+  from the environment, never from a file of the repository. The kernel
+  reaches Claude Haiku through a port-forward to the proxy of the fleet,
+  and the key stays in the cluster. The front of the worktree runs
+  locally where it can. The page runs against the front, or against its
+  fake server where the front does not run locally.
+- Checks, each with a row in `RESULTS.md` under
+  `e2e/results/routines-<ts>/`:
+  - rehearsal records a decision and a comparison per ticket, and the
+    model never sees the answers
+  - the agreement over the corpus
+  - sign-off through the page in a headless Chrome
+  - a live routine labels and comments with no model call, and the ledger
+    shows `applied ok`
+  - the canary share goes to the agent
+  - a step failure (gitea-mcp stopped) falls through warm
+  - an adversarial ticket goes to the agent
+  - the summary counts a run by a routine
+  - screenshots of every screen that the walk saw
 
 ## 7. Working rules
 
-- Worktrees under the scratchpad of the session, one per repository, on
-  the branches `routines/kernel`, `routines/workbench`, `routines/page`,
-  and `routines/lab`. Commit there, never push, never touch the main
-  checkouts or the worktrees of other sessions.
+- Worktrees live under the scratchpad of the session, one per repository,
+  on the branches `routines/kernel`, `routines/workbench`,
+  `routines/page`, and `routines/lab`. Commit there. Never push, and never
+  touch the main checkouts or the worktrees of other sessions.
 - No token, key, or secret enters a file of a repository, a ledger event,
   a log line, or a report. Reports say `[token]`.
-- No paid default: a model, a decider, or a price is named in a
-  configuration, never assumed.
-- Documents and comments in the plain style of the repositories: short
-  sentences, one word for one thing, no explanation in the chrome.
+- No paid default: a configuration names a model, a decider, or a price,
+  and nothing assumes one.
+- Documents and comments follow the plain style of the repositories:
+  short sentences, one word for one thing, and no explanation in the
+  chrome.
 - Each part ends with a report: what landed (commits), what the tests
   prove, what was left out and why, and what the person must decide.

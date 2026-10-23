@@ -78,7 +78,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.turn.started` | turn number |
 | `fw.model.requested` | provider, model, effort (`default` when the provider chooses it, section 6.1), estimated input tokens, and `report` for the final report call at a limit (section 5.2). `systemNotes` names the sentences of the kernel at the end of the system prompt, in their order. `context` stands for `fw.ContextNote` (section 7.8.2), and `message` for `fw.MessageNote` (section 5.5). It holds the names only, never the text of the prompt. A hosted harness records no `systemNotes`. |
 | `fw.model.responded` | content blocks, raw provider blocks, stop reason, usage, latency |
-| `fw.tool.requested` | tool, call id, input, idempotent classification at invocation |
+| `fw.tool.requested` | tool, call id, input, idempotent classification at invocation, and `routine` for a call of the routine runner (section 22.3) |
 | `fw.tool.responded` | call id, output, `is_error`, latency |
 | `fw.tool.progress` | call id, progress, total, message |
 | `fw.file.changed` | call id, tool, operation, path, old path, size, SHA-256 (section 7.9) |
@@ -95,6 +95,9 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.run.suspended` | reason, totals (the usage of the run so far, section 8.2) |
 | `fw.run.resumed` | from seq |
 | `fw.run.finished` | outcome (`completed`, `failed`, `canceled`), output, error, totals (the usage of the run so far, section 8.2) |
+| `fw.routine.decided` | the decision on one routine at the start of a run: routine, version, standing, and mode (`shadow`, `live`, or `canary`). Then `applies`, the reason, the answers of the decider, the decider, the model, and the latency (section 22.3) |
+| `fw.routine.applied` | a live routine that ran: routine, version, `ok`, the steps that ran, the failed step, the reason, and the answer of a routine that completed (section 22.3) |
+| `fw.routine.compared` | the end of a run that the model completed: routine, version, mode, question, what the routine said, what the agent did, and `agree` (section 22.3) |
 | `fw.outcome.evaluated` | verdict (`satisfied`, `needs_revision`, `max_iterations`, `unparsed`, `skipped`), notes, iteration, iterations, the grader run, whether the loop continues, reason (section 20) |
 | `fw.harness.event` | kind and a compact payload of one event of a hosted harness, with the markers of its session (section 19) |
 | `fw.env.ready`, `fw.env.failed`, `fw.env.changed` | the state of the environment of the durable volume: the digest, the versions, the time, or the failed step and its output. These belong to the agent, not to a run, so they go to the bus subject `fw.environment` and to the log, not to a ledger (section 18) |
@@ -497,6 +500,7 @@ type ToolSource interface {
 | `spawn_task` | Start a child run with its own task, prompt, tools, and budget | parallel-safe |
 | `await_task` | Wait for a child run and return its output | read-only, parallel-safe |
 | `send` | Publish a message to a bus subject | none |
+| `decide` | Ask a decider typed questions and get the answers with their probabilities. Without an entry in `deciders`, the tool does not exist (section 22.2). | read-only, idempotent, parallel-safe |
 
 The workbench adds the built-in tool `propose_agent` (the workbench architecture, section 6.4).
 
@@ -511,7 +515,7 @@ Four built-in tools set `Action`:
 | `spawn_task` | Hand off task |
 | `send` | Send message |
 
-The other built-in tools have no label. `files` and `memory` read, write, and delete, so no one label fits them. `ask_user` asks a question and does not act. `clock`, `recall`, `skill`, and `await_task` change nothing, so a person seldom allows their calls.
+The other built-in tools have no label. `files` and `memory` read, write, and delete, so no one label fits them. `ask_user` asks a question and does not act. `clock`, `decide`, `recall`, `skill`, and `await_task` change nothing, so a person seldom allows their calls.
 
 The `files` tool never opens a path under the paths that `Config.Reserved` lists: the home directory of `fw`, the directory of the file ledger, and the configuration file. The check uses the real path, after symbolic links. A change there changes what `fw` allows at its next start. For example, a profile file under `$FW_HOME/agents` can grant its agent access and read secrets from the environment through `${VAR}`. Every other path under the root needs no approval, except the paths that the rules of the workspace refuse (section 7.9).
 
@@ -1666,7 +1670,7 @@ Instructions reach the model in three layers, and every layer is a plain text:
 
 After the three layers, the system prompt lists the skills that the profile allows (see below). Last come the sections that tools add at the start of the run, such as the memory section (section 7.8), the sentence `fw.ContextNote` when a tool added data to the first user message (section 7.8.2), and the sentence `fw.MessageNote` from the first message from another agent on (section 5.5). The digests below cover the text of the profile alone, so none of these parts changes them.
 
-A request can also carry an inline profile in the field `profile`. It overlays the named profile for that run. A set system prompt, model, effort, or time zone replaces the value. Its instructions follow the instructions of the named profile. A tool or skill list replaces the list. The policy becomes the stricter of the two, and the budget and the block `compaction` take the set fields. The kernel stores the inline profile and the instructions in `fw.run.queued`, so a replay sees the same inline profile and the same instructions. A tool list in an inline profile can give a run tools that the tool list of its agent leaves out. The kernel names them in `extraTools` of `fw.run.queued` and of the run object, and leaves out a tool that an ancestor does not allow. Every surface tells the person. Under the first message, the conversation says "For this run only, reviewer can also run shell commands". The result of the MCP `run` tool ends with the same fact, and `fw run` prints it on standard error. The command line builds an inline profile from flags such as `--system`, `--tools`, and `--max-turns`.
+A request can also carry an inline profile in the field `profile`. It overlays the named profile for that run. A set system prompt, model, effort, or time zone replaces the value. Its instructions follow the instructions of the named profile. A tool, skill, or routine list replaces the list. The policy becomes the stricter of the two, and the budget and the block `compaction` take the set fields. The kernel stores the inline profile and the instructions in `fw.run.queued`, so a replay sees the same inline profile and the same instructions. A tool list in an inline profile can give a run tools that the tool list of its agent leaves out. The kernel names them in `extraTools` of `fw.run.queued` and of the run object, and leaves out a tool that an ancestor does not allow. Every surface tells the person. Under the first message, the conversation says "For this run only, reviewer can also run shell commands". The result of the MCP `run` tool ends with the same fact, and `fw run` prints it on standard error. The command line builds an inline profile from flags such as `--system`, `--tools`, and `--max-turns`.
 
 The kernel resolves the profile of a run once, when it queues the run, and records it in `fw.run.queued` as `resolved`, next to the inline profile of the request. The kernel reads the profile set once for the request, so a change in the middle of the start cannot split a run between two versions. The run uses the resolved profile for its life: in every turn, after a follow-up, after an approval, after a suspend, after a restart, and in a branch. A change to the profile through `Agent.SetProfiles`, in a file under `$FW_HOME/agents`, or in `fw.yaml` therefore reaches new runs only, and each run names the configuration that it ran with. The fields are these:
 
@@ -1679,6 +1683,7 @@ The kernel resolves the profile of a run once, when it queues the run, and recor
 | budget | the budget of the overlay, with each zero field taken from `budget:` in `fw.yaml`; the budget of the request stays in its own field and wins over it |
 | compaction | the block `compaction` of the overlay over the block of the configuration: `at`, the size that starts a compaction, `off` when the run never compacts, and `model` as a selector, empty for the model of the run (section 5.4) |
 | policy | the rules of the overlay, with the rules of the named profile now on top as a tightening (section 7.5) |
+| routines | the routines of the overlay, whole (section 22.1) |
 | system prompt, instructions | not the text, only its digests, `systemDigest` and `instructionsDigest` (below) |
 | description, access | never part of it |
 
@@ -1923,6 +1928,8 @@ The command line mirrors the API. Each command is one verb.
 | `fw env` | Print every configuration variable, and the value of each one that is set |
 | `fw agents [name]` | List the profiles or print one. `put` and `delete` come with `fw-workbench`. |
 | `fw whoami` | Print the local principal that the commands use |
+| `fw routine replay --routine r.yaml [--ledger dir] [--agent name] [--decide] [--json]` | Check a routine against the runs of a ledger (section 22.4) |
+| `fw routine propose --agent name [--ledger dir] [--runs ids] [--out r.yaml] [--name n] [--decider d] [--json]` | Make a routine from the runs of an agent (section 22.4) |
 
 `fw-workbench` takes every verb above. It adds `fw-workbench mcp`, which serves the MCP server over stdio (the workbench architecture, section 3). In `fw`, the verb `mcp` fails with a message that names `fw-workbench mcp`.
 
@@ -2124,9 +2131,10 @@ model/anthropic/        default adapter
 model/gemini/           Gemini adapter
 model/openai/           OpenAI-compatible adapter
 tools/builtin/          bash, files, http, memory, recall, skill, clock, ask_user,
-                        send, spawn_task, await_task
+                        send, spawn_task, await_task, decide
 memory/                 the memory store: notes, scopes, limits, audit, recall,
                         and the optional FTS5 index (tag memory_sqlite)
+routine/                replay and propose of routines over recorded runs (section 22.4)
 tools/mcp/              MCP client as a ToolSource, a decision point, and a Connector
 tools/a2a/              A2A peers as a ToolSource
 bus/nats/ bus/redis/
@@ -2750,3 +2758,93 @@ ok    ax durable: FW_HOME /workspace/.fw is writable on the volume at /workspace
 ```
 
 The trust bundle line counts the certificates once an ax patch mounts the SystemInfo volume at that path. The line of the kernel `tools user` names the default of ax only for root with the capabilities of section 7.12, as `ax.ApplyToConfig` does, and the `ax tools user` line adds whether the user is a separate one.
+
+## 22. Routines
+
+A routine is a vetted sequence of tool calls that the kernel runs in place of the model. It has a decision schema, steps, checks afterward, and an answer. `docs/ROUTINES.md` is the contract between the kernel, the workbench, the page, and the lab. The workbench stores the routines, collects the evidence, and changes the standing. The kernel runs what the profile says and records what happened.
+
+### 22.1 The routine and the profile
+
+A profile carries its routines in `routines`, as `fw.Routine` values. A routine has these fields:
+
+| Field | Meaning |
+|---|---|
+| `name`, `version` | 1 to 64 of `a-z`, `0-9`, and `-`, unique per agent, and a positive integer |
+| `standing` | `shadow` or `live` |
+| `canary` | for a live routine, the share of the runs that the agent handles anyway. Without it, the share is 0.05. |
+| `decider` | a key of `deciders`, for a routine with questions |
+| `questions` | the decision schema: a type (`choice`, `noul`, or `score`), instructions, criteria, the band `act`, the expected answers `expect`, and `observe` |
+| `steps` | the tool calls in order, each with an input and an optional `as` |
+| `after` | the checks afterward: a call, with the substrings that its result holds (`contains`) and lacks (`lacks`) |
+| `answer` | after a routine that completes, the output of the run |
+
+The inputs, the answer, and the strings of `contains` and `lacks` are Go `text/template` texts. The data holds `.input`, `.json`, `.meta`, one field per question, and one field per step with `as`. The functions are `find`, `json`, and `lower`. The built-in functions of `text/template`, such as `printf`, `if`, and `eq`, stay. A missing field is an error. A `find` that matches nothing is an error too, so a routine never calls a tool with a missing value.
+
+An inline profile with a `routines` list replaces the routines of the named profile, as a tool list does. An empty list leaves the run without routines. The resolved profile holds the routines, so a run keeps the routines that it was queued with (section 12.5).
+
+When the kernel loads a profile, it checks the routines. It also checks the routines of each inline profile. It refuses these:
+
+- more than 16 steps, more than 16 checks, more than 16 questions, or a template over 4 KiB
+- a routine with questions and no decider, or a decider that `deciders` does not have
+- questions in a configuration whose `tools.builtin` leaves out `decide`
+- a template that does not parse, or a regular expression that does not compile
+- a name that is not valid, or a name that an earlier routine has
+
+Each error names the key, such as `agents.triage.routines[0] (ack).steps[1].input`.
+
+### 22.2 Deciders
+
+The block `deciders` names the System One servers that routines and the tool `decide` ask:
+
+```yaml
+deciders:
+  clef:
+    baseUrl: http://127.0.0.1:5100   # POST {baseUrl}/v1/systemone
+    apiKeyEnv: CLEF_API_KEY          # the secret of the bearer token; empty sends no token
+    model: clef                      # required; the response names the model served
+    timeout: 30s                     # one call; 0 is 30s
+```
+
+No decider exists by default, and a decider has no default model. The client posts `{model, state, questions}`, with at most 64 questions in one call. It reads the answers of Clef and Workers AI: `choice`, `noul`, and a `score` with a legend. It also reads the answers of TypeSafe: `answer`, `probability`, and a score by level. Any other shape is an error that names the field. The token comes from `Secrets` at each call and goes only in the `Authorization` header. The redactor knows the token, so no event and no log line holds it. A tool process never gets the variable of `apiKeyEnv` (section 7.12).
+
+### 22.3 The runner
+
+The runner acts once per run, after `fw.run.started` and before the first model turn. It acts on the routines with the standing `shadow` or `live`. It never acts on a replay or a branch. After a restart, it never runs a routine again.
+
+1. The runner asks each decider once for the routines that share it. It calls the tool `decide` through the tool path of the model, so the call and the probabilities are in `fw.tool.requested` and `fw.tool.responded`. The question ids are `<routine>.<question>`, and the state is the input of the run.
+2. It records one `fw.routine.decided` per routine, in the order of the profile. A shadow routine has the mode `shadow`. If the canary share picks the run, a live routine has the mode `canary`. Otherwise it has the mode `live`. The pick is a stable hash of the run id, `fw.CanaryPick`. If every question passes its band and its expected answers, the routine applies. When a decider fails, each of its routines does not apply, with the reason.
+3. The first routine in the mode `live` that applies runs its steps and then its checks. Each call goes through the path of a call of the model: the budget of the run and of its tree, the policy with its approval flow, and the limits of the tool. Each call records its events with `routine` set. An error result, a policy deny, the deny of a person, a template error, or a failed check ends the routine. The runner records `fw.routine.applied`.
+4. When the routine completes, the run finishes with the rendered answer and makes no model call. Otherwise the model runs. When the run has a decision in the mode `live`, the first user message starts with one block of data, as below. A run in the mode `shadow` or `canary` gets no block, because the model must not see the answers of the routine.
+5. At the end of a run that the model completed, the runner compares. It takes each routine in the mode `shadow` or `canary`, and each live routine that did not complete. For each question with `observe`, it records one `fw.routine.compared` before `fw.run.finished`. A finished run therefore stays finished. A run that fails is not compared.
+
+A restart can cut a live routine off. At the next start, the runner records `fw.routine.applied` with the reason "the process stopped during the routine", and the model starts with the block. A pending approval of a routine stays pending after a restart, and its decision then reaches no step.
+
+The block names the source `routine`, so the sentence `fw.ContextNote` of the system prompt covers it (section 7.8.2):
+
+```
+<context source="routine">
+A routine of this agent looked at this run before you and did not complete it, so the run is yours. What it decided and did:
+- Routine ack, version 2: applies. Answers: beyond: the probability of yes is 0.01; type: bug with probability 0.93.
+Calls of routine ack:
+1. gitea.label_read, ok: [{"id":11,"name":"type/bug"},...]
+2. gitea.issue_write, ok: ok
+3. gitea.issue_write, error: gitea: 503 Service Unavailable
+It stopped: step 3 gitea.issue_write: error: gitea: 503 Service Unavailable.
+</context>
+```
+
+A run that section 19 hosts gets no routine.
+
+### 22.4 Replay and propose
+
+Package `routine` reads recorded runs. `routine.Replay` checks a routine against them. For each run, it reads the answers of the agent with `observe` and renders each step with them. Then it compares each input with the call of the agent to the same tool at the same place, as canonical JSON. A check matches the next call of its tool and the recorded result. With a decider, Replay also scores the decider per question: the agreement, the Brier score, and a table of reliability at the bands 0.5, 0.7, 0.85, and 0.95.
+
+`routine.Propose` makes a routine from the runs that completed and that nobody sent back. The most common sequence of tool names gives the steps. Each value of an input, and of a JSON answer, gets one kind:
+
+- A value that every run shares is a constant.
+- A value from the input or from an earlier result is a `find` with the shortest context that reads every run. The context can hold the value of a question, through `printf`.
+- A value from a small set, at most 8 values over at least 10 runs, is a question with the option `other`.
+- A text made of such values is a `printf` template.
+- Any other value is free, `{{/* free <place> */}}`. The routine stays incomplete until a person writes it.
+
+The verbs `fw routine replay` and `fw routine propose` run both over a ledger (section 12.9).
