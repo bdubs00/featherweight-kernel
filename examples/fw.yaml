@@ -329,6 +329,7 @@ mcp:                            # the MCP server of the workbench at /mcp (POST 
 ax:
   server: ax-server.ax-system.svc.cluster.local:8080   # for spawn_task
   router: atenet-router.ate-system.svc.cluster.local   # for ax: peers
+  childRetention: 24h           # how long a child Task of spawn.driver ax stays after its runs ended; negative keeps them. FW_AX_CHILD_RETENTION
 
 telemetry:
   metrics: /metrics

@@ -91,6 +91,7 @@ func TestEnvOverrides(t *testing.T) {
 		{"absent pointer stays nil", map[string]string{"FW_BUS_URL": "x"}, func(c *fw.Config) any { return c.Policy.External == nil }, true},
 		{"empty value is unset", map[string]string{"FW_LISTEN": "  "}, func(c *fw.Config) any { return c.Listen }, ":8080"},
 		{"ax server", map[string]string{"FW_AX_SERVER": "ax:1"}, func(c *fw.Config) any { return c.AX.Server }, "ax:1"},
+		{"ax child retention", map[string]string{"FW_AX_CHILD_RETENTION": "6h"}, func(c *fw.Config) any { return c.AX.ChildRetention }, 6 * time.Hour},
 		{"spawn", map[string]string{"FW_SPAWN_MAX_DEPTH": "1", "FW_SPAWN_MAX_CHILDREN": "2", "FW_SPAWN_MAX_DESCENDANTS": "5", "FW_SPAWN_MAX_RUNNING": "3"}, func(c *fw.Config) any { return c.Spawn }, fw.SpawnConfig{MaxDepth: 1, MaxChildren: 2, MaxDescendants: 5, MaxRunning: 3}},
 		{"spawn exhausted", map[string]string{"FW_SPAWN_DISABLED": "true", "FW_SPAWN_MAX_DEPTH": "0"}, func(c *fw.Config) any { return c.Spawn }, fw.SpawnConfig{Disabled: true, MaxDepth: 0, MaxChildren: 16, MaxDescendants: 32, MaxRunning: 8}},
 		{"budget shape", map[string]string{"FW_BUDGET_MAX_TOOL_CALLS": "9", "FW_BUDGET_MAX_CALLS_PER_TURN": "3", "FW_BUDGET_MAX_REPEATS": "2"}, func(c *fw.Config) any {

@@ -755,10 +755,14 @@ type MCPSurfaceAuthConfig struct {
 	Audience             string   `yaml:"audience,omitempty" json:"audience,omitempty"`
 }
 
-// AXConfig configures the ax integration.
+// AXConfig configures the ax integration. ChildRetention is how long a
+// child Task of spawn.driver ax stays after its runs ended, 24 hours when
+// zero; a negative value keeps every child Task (docs/ARCHITECTURE.md
+// section 11.9).
 type AXConfig struct {
-	Server string `yaml:"server" json:"server"`
-	Router string `yaml:"router" json:"router"`
+	Server         string        `yaml:"server" json:"server"`
+	Router         string        `yaml:"router" json:"router"`
+	ChildRetention time.Duration `yaml:"childRetention,omitempty" json:"childRetention,omitempty"`
 }
 
 // TelemetryConfig configures metrics and logs.
