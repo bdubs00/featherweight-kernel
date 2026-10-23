@@ -51,10 +51,11 @@ type ReactionData struct {
 
 // React records the reaction of a person on an event of a run, or on the
 // run as a whole, as fw.run.reacted. With a principal in ctx, the caller
-// needs the operator role on the run, as for Annotate. By is the subject
-// of the principal in ctx when d leaves it empty. Only the process itself,
-// the static token, or a workload names another person in By, so the
-// front of a fleet records the reaction of a person on a run of a Task;
+// needs the operator role on the run, as for Annotate. By is the person in
+// ctx when d leaves it empty: the person for whom the caller acts
+// (WithActingFor), or the subject of the principal. Only the process
+// itself, the static token, or a workload names another person in By, so
+// the front of a fleet records the reaction of a person on a run of a Task;
 // any other principal gets ErrForbidden. A Seq past the latest event of
 // the run, an unknown reaction, and a note longer than
 // MaxReactionNoteBytes are ErrInvalidRequest.
@@ -91,7 +92,7 @@ func (a *Agent) React(ctx context.Context, id string, d ReactionData) error {
 	if !utf8.ValidString(d.Note) {
 		return fmt.Errorf("%w: the note of a reaction is not UTF-8", ErrInvalidRequest)
 	}
-	switch subject := subjectOf(ctx); {
+	switch subject := personOf(ctx); {
 	case d.By == "":
 		d.By = subject
 	case d.By != subject && !speaksForOthers(ctx):

@@ -1107,9 +1107,10 @@ func WithMessagePinned() SendOption { return func(o *sendOptions) { o.pinned = t
 // model call, after the tool results. A run that waits for an approval holds
 // the message until the decision. WithSendBudget changes the budget of the
 // run in the same step, before the message, so the turn that the message
-// starts has the new limits. The message records the subject of the
-// principal in ctx as its sender (MessageReceivedData.By), and
-// WithMessageFrom the party that the sender relays it for.
+// starts has the new limits. The message records the person in ctx as its
+// sender (MessageReceivedData.By): the person for whom the caller acts
+// (WithActingFor), or the subject of the principal. WithMessageFrom names
+// the party that the sender relays it for.
 func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string, opts ...SendOption) error {
 	if err := a.k.writeError(); err != nil {
 		return err
@@ -1187,12 +1188,12 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 	// the message without the budget that came with it.
 	rs.emitMu.Lock()
 	if o.budget != nil {
-		if _, err := a.emitLocked(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: *o.budget, By: subjectOf(ctx), Origin: origin}); err != nil {
+		if _, err := a.emitLocked(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: *o.budget, By: personOf(ctx), Origin: origin}); err != nil {
 			rs.emitMu.Unlock()
 			return err
 		}
 	}
-	_, err = a.emitLocked(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin, By: subjectOf(ctx), From: o.from, Pinned: o.pinned})
+	_, err = a.emitLocked(nil, rs, EvMessageReceived, MessageReceivedData{Role: msg.Role, Content: content, Origin: origin, By: personOf(ctx), From: o.from, Pinned: o.pinned})
 	rs.emitMu.Unlock()
 	if err != nil {
 		return err
@@ -1221,9 +1222,10 @@ func (a *Agent) Send(ctx context.Context, id string, msg Message, origin string,
 // change count against the new limits. The budget of the parent of a child
 // run still caps the child.
 //
-// The kernel records the change as fw.budget.changed, with the subject of
-// the principal in ctx. With a principal, the caller needs the operator
-// role on the run, as for a decision. ChangeBudget returns the effective
+// The kernel records the change as fw.budget.changed, with the person in
+// ctx: the person for whom the caller acts (WithActingFor), or the subject
+// of the principal. With a principal, the caller needs the operator role
+// on the run, as for a decision. ChangeBudget returns the effective
 // budget of the run after the change (see RunBudget). A child in another
 // process changes its budget in its own process.
 func (a *Agent) ChangeBudget(ctx context.Context, id string, change Budget, origin string) (Budget, error) {
@@ -1246,7 +1248,7 @@ func (a *Agent) ChangeBudget(ctx context.Context, id string, change Budget, orig
 	if err := checkBudgetChange(change); err != nil {
 		return Budget{}, err
 	}
-	if _, err := a.emit(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: change, By: subjectOf(ctx), Origin: origin}); err != nil {
+	if _, err := a.emit(nil, rs, EvBudgetChanged, BudgetChangedData{Budget: change, By: personOf(ctx), Origin: origin}); err != nil {
 		return Budget{}, err
 	}
 	a.budgetChanged(rs, change, origin)
@@ -1273,19 +1275,15 @@ func (a *Agent) budgetChanged(rs *runState, change Budget, origin string) {
 	a.log.Info("run budget changed", "run", rs.id, "origin", origin, "change", BudgetText(change))
 }
 
-// subjectOf returns the subject of the principal in ctx, or "".
-func subjectOf(ctx context.Context) string {
-	if p := PrincipalFrom(ctx); p != nil {
-		return p.Subject
-	}
-	return ""
-}
-
 // Decide answers a pending approval. The decider is d.Decider, or the
-// principal in ctx.
+// person in ctx: the person for whom the caller acts (WithActingFor), or
+// the subject of the principal.
 func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error {
 	if err := a.k.writeError(); err != nil {
 		return err
+	}
+	if d.Decider == "" {
+		d.Decider = personOf(ctx)
 	}
 	rs, err := a.k.lookup(id)
 	if err != nil {
@@ -1324,13 +1322,7 @@ func (a *Agent) Decide(ctx context.Context, id string, d ApprovalDecision) error
 	if err != nil {
 		return err
 	}
-	decider := d.Decider
-	if decider == "" {
-		if p := PrincipalFrom(ctx); p != nil {
-			decider = p.Subject
-		}
-	}
-	data := ApprovalDecidedData{ApprovalID: d.ApprovalID, Decision: verdict, Decider: decider, Note: d.Note, Content: d.Content}
+	data := ApprovalDecidedData{ApprovalID: d.ApprovalID, Decision: verdict, Decider: d.Decider, Note: d.Note, Content: d.Content}
 
 	rs.emitMu.Lock()
 	rs.mu.Lock()
@@ -1380,11 +1372,13 @@ func normalizeDecision(d ApprovalDecision) (string, error) {
 }
 
 // Cancel cancels a run. It stops the model call or the tools in flight and
-// appends fw.run.finished with outcome canceled. Then it cancels every run
-// under it that is still open, at any depth, in this process and in other
-// processes, also below a child that finished. Cancel on a finished run
-// appends nothing to it, and cancels the runs under it that are still
-// open. A branch is a run of its own, and Cancel leaves it alone.
+// appends fw.run.finished with outcome canceled and the person in ctx in
+// RunFinishedData.By: the person for whom the caller acts (WithActingFor),
+// or the subject of the principal. Then it cancels every run under it that
+// is still open, at any depth, in this process and in other processes,
+// also below a child that finished. Cancel on a finished run appends
+// nothing to it, and cancels the runs under it that are still open. A
+// branch is a run of its own, and Cancel leaves it alone.
 func (a *Agent) Cancel(ctx context.Context, id string) error {
 	return a.cancelRun(ctx, id, "canceled")
 }
@@ -1433,7 +1427,7 @@ func (a *Agent) cancelRun(ctx context.Context, id, reason string) error {
 	if err := a.authorizeRun(ctx, rs, ActionRunOperate); err != nil {
 		return err
 	}
-	if err := a.cancelOne(rs, reason); err != nil {
+	if err := a.cancelOne(rs, reason, personOf(ctx)); err != nil {
 		return err
 	}
 	// A canceled run takes the runs under it along, so no run works for a
@@ -1443,9 +1437,10 @@ func (a *Agent) cancelRun(ctx context.Context, id, reason string) error {
 }
 
 // cancelOne cancels the run rs alone: it stops what the run does and
-// appends fw.run.finished with outcome canceled and the reason. A run that
-// finished stays as it is.
-func (a *Agent) cancelOne(rs *runState, reason string) error {
+// appends fw.run.finished with outcome canceled, the reason, and by, the
+// person who canceled it, empty for a run that a cancel above it takes
+// along. A run that finished stays as it is.
+func (a *Agent) cancelOne(rs *runState, reason, by string) error {
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
 	rs.mu.Lock()
@@ -1459,7 +1454,7 @@ func (a *Agent) cancelOne(rs *runState, reason string) error {
 	if cancel != nil {
 		cancel()
 	}
-	_, err := a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: reason})
+	_, err := a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: reason, By: by})
 	rs.mu.Lock()
 	rs.canceling = false
 	rs.mu.Unlock()

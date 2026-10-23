@@ -612,6 +612,9 @@ func summarize(e fw.Event, tools map[string]string) string {
 		var d fw.RunFinishedData
 		if e.Decode(&d) == nil {
 			add("outcome=%s", d.Outcome)
+			if d.By != "" {
+				add("by=%s", d.By)
+			}
 			if d.Error != "" {
 				add("error=%s", oneLine(d.Error))
 			}

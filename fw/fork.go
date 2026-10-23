@@ -56,12 +56,14 @@ type ForkRequest struct {
 // events of src up to req.Seq, then the message of req.Input when there is
 // one. The branch has a new id, the metadata MetaForkOf and MetaForkSeq,
 // and no parent; the children of the source stay with the source. The
-// person in ctx is the person of the branch. A branch whose kept events end
-// a run stays finished unless a message follows them; every other branch
-// goes on at once, as a resumed run does: a model request without an
-// answer is sent again, a pending approval waits for its decision. The
-// caller needs ActionRunOperate on the source and ActionAgentRun on its
-// agent.
+// person in ctx is the person of the branch: the person for whom the
+// caller acts (WithActingFor), with the kind KindUser, or else the
+// principal. A branch whose kept events end a run stays finished unless a
+// message follows them; every other branch goes on at once, as a resumed
+// run does: a model request without an answer is sent again, a pending
+// approval waits for its decision. The caller needs ActionRunOperate on
+// the source and ActionAgentRun on its agent, also when it acts for a
+// person.
 //
 // With req.Spawn, the branch runs in another process: the Forker places it,
 // the source records it as a child with its member, and Fork returns the
@@ -405,7 +407,10 @@ func (a *Agent) branchOf(ctx context.Context, src string, q RunQueuedData, evs [
 	meta[MetaForkSeq] = strconv.FormatUint(req.Seq, 10)
 	q.Metadata = meta
 	q.Parent, q.Depth = "", 0
-	if p := PrincipalFrom(ctx); p != nil && p.Subject != "" {
+	if person := ActingFor(ctx); person != "" {
+		// A trusted relay names a person, whose kind is a user.
+		q.Principal, q.PrincipalKind = person, KindUser
+	} else if p := PrincipalFrom(ctx); p != nil && p.Subject != "" {
 		q.Principal, q.PrincipalKind = p.Subject, p.Kind
 	}
 	if req.Origin != "" {

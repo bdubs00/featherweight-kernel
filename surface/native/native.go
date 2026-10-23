@@ -47,6 +47,17 @@ const KeepAlive = 15 * time.Second
 // HeaderIdempotencyKey makes POST /v1/runs safe to retry.
 const HeaderIdempotencyKey = "Idempotency-Key"
 
+// HeaderOnBehalfOf names the person for whom a trusted caller acts, by the
+// subject of the person (fw.WithActingFor). The front of a fleet decides
+// the action of a person, then relays it with the static token and this
+// header, so the ledger records the person: the decider of an approval,
+// the by of a follow-up, of a change of the budget, of a cancel, and of a
+// reaction, and the person of a branch. The kernel still authorizes the
+// caller alone. A person who names another subject gets a 403, and an
+// empty header or the subject of the caller changes nothing. A start names
+// its person in the body, not here.
+const HeaderOnBehalfOf = "Fw-On-Behalf-Of"
+
 func init() {
 	fw.RegisterSurface(Name, func(*fw.Config) (fw.Surface, error) { return New(), nil })
 }
@@ -133,12 +144,15 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 // protect puts a handler behind the agent's Authn. When the Authn writes a
 // 401 with no body, the response gets a problem document. When an
 // extension signs a person in, the document names its route in the field
-// signin.
+// signin. After the authentication, the header HeaderOnBehalfOf names the
+// person for whom the caller acts (onBehalfOf).
 func (s *server) protect(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cw := &challengeWriter{ResponseWriter: w}
 		fw.RequireAuth(s.a, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-			next(w, r)
+			if r, ok := s.onBehalfOf(w, r); ok {
+				next(w, r)
+			}
 		})).ServeHTTP(cw, r)
 		if cw.problem && !cw.wrote {
 			p := newProblem(r, http.StatusUnauthorized, "the request carries no valid credential")
@@ -148,6 +162,31 @@ func (s *server) protect(next http.HandlerFunc) http.Handler {
 			_ = json.NewEncoder(w).Encode(p)
 		}
 	})
+}
+
+// onBehalfOf puts the person of the header HeaderOnBehalfOf in the context
+// of the request (fw.WithActingFor) and returns the request. A request
+// without the header passes as it is. On failure it writes the problem and
+// returns false.
+func (s *server) onBehalfOf(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
+	values := r.Header.Values(HeaderOnBehalfOf)
+	if len(values) == 0 {
+		return r, true
+	}
+	if len(values) > 1 {
+		problem(w, r, http.StatusBadRequest, "the "+HeaderOnBehalfOf+" header names one person, and the request has it more than once")
+		return nil, false
+	}
+	ctx, err := fw.WithActingFor(r.Context(), values[0])
+	switch {
+	case errors.Is(err, fw.ErrInvalidRequest):
+		problem(w, r, http.StatusBadRequest, fmt.Sprintf("the %s header holds more than %d bytes or a control character, or is not UTF-8", HeaderOnBehalfOf, fw.MaxActingForBytes))
+		return nil, false
+	case err != nil:
+		s.fail(w, r, err)
+		return nil, false
+	}
+	return r.WithContext(ctx), true
 }
 
 // challengeWriter sees the response of a failed authentication.
@@ -753,7 +792,8 @@ func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
 // the run, 0 for the run as a whole, the reaction, up, down, or heart, a
 // note, and the person. Only a trusted caller, the static token or a
 // workload, names the person in by, as for the sender of a message;
-// anyone else reacts as the principal of the request.
+// anyone else reacts as the principal of the request. Without by, the
+// reaction names the person of HeaderOnBehalfOf, or the caller.
 type reactionBody struct {
 	Seq      uint64 `json:"seq"`
 	Reaction string `json:"reaction"`
@@ -877,14 +917,13 @@ func (s *server) decide(w http.ResponseWriter, r *http.Request) {
 		problem(w, r, http.StatusBadRequest, `the field decision must be "allow" or "deny"`)
 		return
 	}
+	// The kernel names the decider: the person of HeaderOnBehalfOf, or the
+	// caller.
 	d := fw.ApprovalDecision{
 		ApprovalID: r.PathValue("approval"),
 		Decision:   decision,
 		Note:       body.Note,
 		Content:    json.RawMessage(content),
-	}
-	if p := fw.PrincipalFrom(r.Context()); p != nil {
-		d.Decider = p.Subject
 	}
 	id := r.PathValue("id")
 	if err := s.a.Decide(r.Context(), id, d); err != nil {

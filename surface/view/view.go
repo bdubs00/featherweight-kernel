@@ -632,6 +632,9 @@ func describe(e fw.Event) string {
 		var d fw.RunFinishedData
 		if e.Decode(&d) == nil {
 			s := "finished: " + d.Outcome
+			if d.By != "" {
+				s += " by " + oneLine(d.By, 60)
+			}
 			if d.Error != "" && d.Error != d.Outcome {
 				s += " (" + oneLine(d.Error, 160) + ")"
 			}

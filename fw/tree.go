@@ -757,7 +757,7 @@ func (a *Agent) cancelLocalBelow(rs *runState, reason string) []remoteKid {
 	var walk func(r *runState, depth int)
 	walk = func(r *runState, depth int) {
 		for _, c := range k.localChildren(r.id) {
-			if err := a.cancelOne(c, reason); err != nil {
+			if err := a.cancelOne(c, reason, ""); err != nil {
 				a.log.Warn("cancel a run under a canceled or spent run", "run", c.id, "error", err)
 			}
 			if depth < maxTreeDepth {

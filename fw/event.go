@@ -241,7 +241,8 @@ type MessageReceivedData struct {
 	Role    Role    `json:"role"`
 	Content []Block `json:"content"`
 	Origin  string  `json:"origin"`
-	// By is the subject of the principal that sent the message, as
+	// By is the subject of the principal that sent the message, or the
+	// person for whom that caller acts (WithActingFor), as
 	// BudgetChangedData.By records it. It is empty for a message of the
 	// kernel and for a caller without a principal.
 	By string `json:"by,omitempty"`
@@ -416,7 +417,9 @@ type ApprovalRequestedData struct {
 	Connect *ConnectRequest `json:"connect,omitempty"`
 }
 
-// ApprovalDecidedData is the payload of fw.approval.decided.
+// ApprovalDecidedData is the payload of fw.approval.decided. Decider names
+// who decided: ApprovalDecision.Decider, else the person for whom the
+// caller acts (WithActingFor), else the subject of the principal.
 type ApprovalDecidedData struct {
 	ApprovalID string          `json:"approvalId"`
 	Decision   string          `json:"decision"` // allow or deny
@@ -469,9 +472,10 @@ type BudgetExceededData struct {
 // BudgetChangedData is the payload of fw.budget.changed. Budget holds the
 // fields that the change sets; each one replaces the same field of the
 // budget of the run for the work that follows, and a zero field keeps the
-// field as it was. By is the subject of the person who changed it, and
-// empty for the process itself. Origin is the surface of the change, such
-// as http or mcp.
+// field as it was. By is the subject of the person who changed it, or the
+// person for whom the caller acts (WithActingFor), and empty for the
+// process itself. Origin is the surface of the change, such as http or
+// mcp.
 type BudgetChangedData struct {
 	Budget Budget `json:"budget"`
 	By     string `json:"by,omitempty"`
@@ -542,6 +546,11 @@ type RunFinishedData struct {
 	// that ran the calls, and UnpricedTokens counts the tokens that it had
 	// no price for. An event of an older kernel has no totals.
 	Totals *RunUsage `json:"totals,omitempty"`
+	// By names who canceled the run (Agent.Cancel): the subject of the
+	// principal, or the person for whom that caller acts (WithActingFor).
+	// It is empty for a cancel of the process itself, for a run that a
+	// cancel of a run above it takes along, and for every other outcome.
+	By string `json:"by,omitempty"`
 }
 
 // IDTime returns the time that an id from NewID holds, to the
