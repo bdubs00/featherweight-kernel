@@ -221,7 +221,7 @@ func writeReplay(w io.Writer, r fw.Routine, res routine.ReplayResult) {
 	}
 	fmt.Fprintf(w, "\nAnswers of the model %s on the input of each run:\n", r.Decider)
 	if res.DeciderErrors > 0 {
-		fmt.Fprintf(w, "  %d runs failed. The first error: %s\n", res.DeciderErrors, strings.TrimPrefix(res.DeciderError, "fw: decider: "))
+		fmt.Fprintf(w, "  %d runs failed. The first error: %s\n", res.DeciderErrors, res.DeciderError)
 	}
 	for _, name := range r.QuestionNames() {
 		s := res.Questions[name]

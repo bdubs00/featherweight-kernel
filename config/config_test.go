@@ -836,6 +836,7 @@ deciders:
   clef: {baseUrl: "http://127.0.0.1:5100", apiKeyEnv: CLEF_API_KEY, model: clef, timeout: 30s}
   nomodel: {baseUrl: "http://127.0.0.1:5100"}
   nourl: {baseUrl: "127.0.0.1:5100", model: x}
+  nodriver: {driver: nowhere, baseUrl: "http://127.0.0.1:5100", model: x}
 agents:
   triage:
     routines:
@@ -868,6 +869,7 @@ agents:
 	wants := []string{
 		"deciders.nomodel.model is empty; a decider has no default model",
 		`deciders.nourl.baseUrl "127.0.0.1:5100" is not an http:// or https:// URL`,
+		`deciders.nodriver.driver "nowhere" is not linked into this binary`,
 		`agents.shadow.routines[0] (ack): no model answers questions under the name "jev"`,
 		"agents.shadow.routines[0] (ack).steps[0].input: template:",
 	}

@@ -477,12 +477,20 @@ func profileProblems(c *fw.Config, name string, prof fw.AgentProfile) []string {
 }
 
 // checkDecider lists the problems of one entry of deciders: a name that a
-// routine can name, an http or https base URL, a model, since a decider
-// has no default model, and a timeout that is not negative.
+// routine can name, a driver that the binary links when the entry names
+// one, an http or https base URL, a model, since a decider has no default
+// model, and a timeout that is not negative.
 func checkDecider(key, name string, d fw.DeciderConfig) []string {
 	var p []string
 	if !deciderName.MatchString(name) {
 		p = append(p, fmt.Sprintf("%s: a decider name is 1 to 64 of a-z, 0-9, _, and -", key))
+	}
+	if strings.TrimSpace(d.Driver) != "" && !slices.Contains(fw.RegisteredDeciders(), d.DriverName()) {
+		known := strings.Join(fw.RegisteredDeciders(), ", ")
+		if known == "" {
+			known = "none"
+		}
+		p = append(p, fmt.Sprintf("%s.driver %q is not linked into this binary; the decider drivers are %s", key, d.Driver, known))
 	}
 	if u, err := url.Parse(strings.TrimSpace(d.BaseURL)); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		p = append(p, fmt.Sprintf("%s.baseUrl %q is not an http:// or https:// URL", key, d.BaseURL))
