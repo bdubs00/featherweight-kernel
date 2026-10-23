@@ -1,9 +1,11 @@
 package fw
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -286,5 +288,77 @@ func TestForkEventsNeedsAQueuedEvent(t *testing.T) {
 	a := newTestAgent(t, newScript(endTurn("x")).Model())
 	if _, err := a.ForkEvents(testCtx(t), []Event{{Type: EvRunStarted}}, ForkRequest{}); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("ForkEvents without queued = %v", err)
+	}
+}
+
+// flakyAbandon is an otherSpawner whose Abandon fails its first fails
+// tries, and that paces the tries of a test in milliseconds.
+type flakyAbandon struct {
+	*otherSpawner
+	fails int
+
+	mu    sync.Mutex
+	tries int
+}
+
+func (s *flakyAbandon) Abandon(ctx context.Context, member string) error {
+	s.mu.Lock()
+	s.tries++
+	fail := s.tries <= s.fails
+	s.mu.Unlock()
+	if fail {
+		return errors.New("the ax API is not reachable yet")
+	}
+	return s.otherSpawner.Abandon(ctx, member)
+}
+
+func (s *flakyAbandon) lookPace() (time.Duration, time.Duration) {
+	return time.Millisecond, time.Millisecond
+}
+
+func (s *flakyAbandon) triesSoFar() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.tries
+}
+
+// A rebuild abandons the process of a lost branch before the start of the
+// kernel returns, tries again after a failure, and names a process that
+// it could not remove in the record of the branch.
+func TestLostBranchAbandonsBeforeTheStart(t *testing.T) {
+	ctx := testCtx(t)
+	for _, c := range []struct {
+		fails     int
+		tries     int
+		abandoned int
+		reason    string
+	}{
+		{fails: 2, tries: 3, abandoned: 1},
+		{fails: lookTries, tries: lookTries, abandoned: 0, reason: "its process could not be removed: the ax API is not reachable yet"},
+	} {
+		ledger := NewMemLedger()
+		other := newTestAgent(t, newScript(endTurn("elsewhere")).Model())
+		stuck := &otherSpawner{other: other, branchWait: make(chan struct{})}
+		a := newTestAgent(t, newScript(endTurn("here")).Model(), WithLedger(ledger), WithSpawner(stuck))
+		src, err := a.Run(ctx, "hello")
+		mustState(t, src, err, StateCompleted)
+		lost, err := a.Fork(ctx, src.ID, ForkRequest{Input: "never sent", Spawn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.k.cancel()
+		sp := &flakyAbandon{otherSpawner: &otherSpawner{other: other}, fails: c.fails}
+		b := newTestAgent(t, newScript().Model(), WithLedger(ledger), WithSpawner(sp))
+		// No wait: the start of the kernel has done both.
+		if got := sp.triesSoFar(); got != c.tries || len(sp.abandonedMembers()) != c.abandoned {
+			t.Fatalf("after the start: %d tries, abandoned %v; want %d tries and %d abandoned", got, sp.abandonedMembers(), c.tries, c.abandoned)
+		}
+		got, err := b.Get(ctx, lost.ID)
+		if err != nil || got.State != StateFailed || !strings.Contains(got.Error, "restarted before other took the branch") {
+			t.Fatalf("the lost branch = %+v, %v", got, err)
+		}
+		if c.reason == "" && strings.Contains(got.Error, "could not be removed") || !strings.Contains(got.Error, c.reason) {
+			t.Fatalf("the reason of the lost branch = %q, want %q", got.Error, c.reason)
+		}
 	}
 }

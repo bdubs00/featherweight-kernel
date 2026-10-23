@@ -293,21 +293,50 @@ func (a *Agent) recordBranchEnd(id, parent string, q RunQueuedData, outcome, rea
 
 // recordLostBranch records, after a restart, a branch that this process
 // placed in another process but never sent, from the facts in the
-// fw.run.child event of its source, and abandons the process. The source is
-// the run state of the source run.
+// fw.run.child event of its source. It abandons the process first and
+// records the branch after, both before the start of the kernel goes on,
+// so a restart between the two abandons again, and a process that it
+// cannot remove is named in the reason of the record. The source is the
+// run state of the source run.
 func (a *Agent) recordLostBranch(src *runState, d RunChildData) {
 	q := src.queuedData()
 	q.Parent, q.Depth = "", 0
 	q.Principal, q.PrincipalKind, q.Metadata = d.Principal, d.PrincipalKind, d.Metadata
 	reason := "this process restarted before " + d.Member + " took the branch"
-	a.log.Warn("branch lost in a restart", "branch", d.Child, "member", d.Member, "run", src.id)
-	a.recordBranchEnd(d.Child, src.id, q, "failed", reason)
 	if forker, ok := a.spawner.(Forker); ok {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-			defer cancel()
-			a.abandon(ctx, forker, d.Child, d.Member)
-		}()
+		if err := a.abandonLost(forker, d.Child, d.Member); err != nil {
+			reason += "; its process could not be removed: " + err.Error()
+		}
+	}
+	a.log.Warn("branch lost in a restart", "branch", d.Child, "member", d.Member, "run", src.id, "reason", reason)
+	a.recordBranchEnd(d.Child, src.id, q, "failed", reason)
+}
+
+// abandonLost removes the process of a branch that a restart lost. It
+// tries lookTries times, first after a second and then with a wait that
+// doubles, for at most placedAbandonWait, because under ax a Task boots
+// before its egress policy takes effect. It returns the last error.
+func (a *Agent) abandonLost(ab abandoner, id, member string) error {
+	ctx, cancel := context.WithTimeout(a.k.ctx, placedAbandonWait)
+	defer cancel()
+	wait := time.Second
+	if p, ok := ab.(lookPacer); ok {
+		if first, _ := p.lookPace(); first > 0 {
+			wait = first
+		}
+	}
+	for try := 1; ; try++ {
+		err := ab.Abandon(ctx, member)
+		if err == nil || try == lookTries {
+			return err
+		}
+		a.log.Warn("abandon the process of a lost branch", "branch", id, "member", member, "retryIn", wait, "error", err)
+		select {
+		case <-time.After(wait):
+			wait *= 2
+		case <-ctx.Done():
+			return err
+		}
 	}
 }
 
