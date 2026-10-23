@@ -84,7 +84,7 @@ func waitChild(ctx context.Context, a *fw.Agent, tool, id string) (*fw.Run, erro
 // that says why.
 func relay(ctx context.Context, a *fw.Agent, tool, parent string, child *fw.Run) error {
 	p := child.Pending
-	d := fw.ApprovalDecision{ApprovalID: p.ID, Decider: parent}
+	d := fw.ApprovalDecision{ApprovalID: p.ID, Decider: parent, DeciderKind: fw.ActorParent}
 	question := len(p.Schema) > 0
 	var answer []byte
 	var err error

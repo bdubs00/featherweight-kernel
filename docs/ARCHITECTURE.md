@@ -85,10 +85,10 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.run.child` | child, member, `started`, and for a child whose start is open its kind (`spawn` or `branch`) and its facts: person, metadata, profile name, input, idempotency key, and the runs of the tree that it reserved; for a start that ended without a child for its caller, the outcome and the reason; and why a look kept a child that can still run (sections 4.7 and 11.9) |
 | `fw.child.reported` | child, member, state, the usage of the tree of the child, its open runs and its working runs, and `lost` when the parent no longer reaches it: what a child in another process last reported (section 11.9) |
 | `fw.approval.requested` | approval id, tool, call id, input, reason, form schema of a question, connect request (section 7.11) |
-| `fw.approval.decided` | approval id, decision, decider (the subject of the caller, or the person that a trusted relay names, section 8.2), note |
+| `fw.approval.decided` | approval id, decision, decider (the subject of the caller, or the person that a trusted relay names, section 8.2), `deciderKind`, the kind of the decider (section 10.2), note |
 | `fw.context.compacted` | epoch, summary block, kept messages, usage of the summary calls |
 | `fw.budget.exceeded` | limit name, value, the limit, for a limit of a tree the scope `tree` and the run whose budget holds it, and `report` when the final report call follows (section 5.2) |
-| `fw.budget.changed` | the fields of the budget that the change sets, the subject of the person who changed it, origin (section 5.2) |
+| `fw.budget.changed` | the fields of the budget that the change sets, the subject of the person who changed it, `byKind`, the kind of that person (section 10.2), origin (section 5.2) |
 | `fw.loop.detected` | tool, count, period, action (`warned`, `failed`) |
 | `fw.error` | message, retryable |
 | `fw.turn.finished` | turn number |
@@ -1413,12 +1413,12 @@ A span names its run in `gen_ai.conversation.id`, and the run span also in `fw.r
 
 | Attribute | Where | Value |
 |---|---|---|
-| `fw.approval.decider_kind` | event `fw.approval.decided` | `person`, `parent` (a run: the parent of a child, or the run that a grader grades), `token` (the static token), `workload` (a SPIFFE identity), `local` (the local user or `fw run`), `kernel`, or `none` |
+| `fw.approval.decider_kind` | event `fw.approval.decided` | `person` (a user, or the person that a trusted relay names), `parent` (a run: the parent of a child, or the run that a grader grades), `token` (the static token), `workload` (a SPIFFE identity), `local` (the local user or `fw run`), `anonymous`, `kernel`, `none` (no decider), or `unknown` (a decider without a kind, such as in the ledger of an older kernel) |
 | `fw.budget.by_kind` | event `fw.budget.changed` | the same kinds |
 | `fw.outcome.graded` | event `fw.outcome.evaluated` | true when a grader run started; the id of the grader run stays in the ledger |
 | `fw.quality.receipt_sha256` | event `fw.run.annotated` and span `fw.quality.observation` | the SHA-256 of the receipt id in hex, so a trace store matches one receipt without reading its id |
 
-The kind comes from the shape of the subject: a SPIFFE URI is a workload, a run id is a run, and any other subject that is not a fixed word of the kernel is a person. The ledger keeps the subject itself.
+The kind comes from the principal, never from the shape of the subject. The kernel records it in the event beside the subject, as `deciderKind` and `byKind`: the kind of the principal of the caller, with `person` for a user, `person` for the person that a trusted relay names, `parent` for a run that decides for its child or its grader, `local` for `fw run`, and `kernel` for the kernel. So a person whose subject looks like a run id or a SPIFFE URI stays a person. A principal of no known kind records no kind. The ledger keeps the subject itself.
 
 ### 10.3 Logs
 
