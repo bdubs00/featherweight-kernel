@@ -82,9 +82,10 @@ type Agent struct {
 
 	decisionPoints []external // policy.external and the points of linked packages, see external.go
 
-	services   []io.Closer // what stops the services, see service.go
-	runner     Runner      // drives the runs in place of the turn loop, see runner.go
-	accessMode string      // AccessModeRules, AccessModeExternal, or AccessModeCustom
+	services   []io.Closer        // what stops the services, see service.go
+	runner     Runner             // drives the runs in place of the turn loop, see runner.go
+	deciders   map[string]Decider // the deciders that WithDecider gave, see decider.go
+	accessMode string             // AccessModeRules, AccessModeExternal, or AccessModeCustom
 
 	k *kernel // runtime state, see kernel.go
 }
@@ -161,6 +162,7 @@ func New(opts ...Option) (*Agent, error) {
 		models:     map[string]Model{},
 		slots:      modelSlots(cfg),
 		noResume:   o.noResume,
+		deciders:   o.deciders,
 	}
 	// Before the kernel starts, only resources opened by this constructor
 	// belong to it. In particular, a failed setup must release the file
