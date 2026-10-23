@@ -4,8 +4,12 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Surface mounts routes on the shared mux.
@@ -92,7 +96,25 @@ func MatchesAny(entries []string, p *Principal) bool {
 }
 
 // ErrUnauthorized is returned when a request carries no valid credential.
+// An Authn wraps it with a reason in words and no token material, such as
+// "fw: unauthorized: oidc: token expired".
 var ErrUnauthorized = errors.New("fw: unauthorized")
+
+// refusalReason returns the reason of an error of Authenticate without the
+// words of ErrUnauthorized, such as "oidc: token expired", or "" when the
+// error names none.
+func refusalReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	s = strings.ReplaceAll(s, ErrUnauthorized.Error()+": ", "")
+	s = strings.ReplaceAll(s, ": "+ErrUnauthorized.Error(), "")
+	if s == ErrUnauthorized.Error() {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
 
 // Authn authenticates HTTP requests for every surface.
 type Authn interface {
@@ -105,17 +127,27 @@ type Authn interface {
 // ChainAuthn tries several authenticators in order and accepts the first
 // principal. The configuration builds one from auth.mode with several
 // modes separated by commas, for example "oidc,spiffe,token". The first
-// authenticator writes the challenge.
+// authenticator writes the challenge. A refusal names the reason of each
+// authenticator, such as "oidc: token expired; token: the bearer token is
+// not the static token".
 type ChainAuthn []Authn
 
 // Authenticate implements Authn.
 func (c ChainAuthn) Authenticate(r *http.Request) (*Principal, error) {
+	var reasons []string
 	for _, a := range c {
-		if p, err := a.Authenticate(r); err == nil && p != nil {
+		p, err := a.Authenticate(r)
+		if err == nil && p != nil {
 			return p, nil
 		}
+		if why := refusalReason(err); why != "" && !slices.Contains(reasons, why) {
+			reasons = append(reasons, why)
+		}
 	}
-	return nil, ErrUnauthorized
+	if len(reasons) == 0 {
+		return nil, ErrUnauthorized
+	}
+	return nil, fmt.Errorf("%w: %s", ErrUnauthorized, strings.Join(reasons, "; "))
 }
 
 // Challenge implements Authn.
@@ -150,11 +182,11 @@ func (t TokenAuthn) Authenticate(r *http.Request) (*Principal, error) {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(h, prefix) {
-		return nil, ErrUnauthorized
+		return nil, fmt.Errorf("%w: token: no bearer token", ErrUnauthorized)
 	}
 	got := strings.TrimSpace(h[len(prefix):])
 	if subtle.ConstantTimeCompare([]byte(got), []byte(t.Token)) != 1 {
-		return nil, ErrUnauthorized
+		return nil, fmt.Errorf("%w: token: the bearer token is not the static token", ErrUnauthorized)
 	}
 	return &Principal{Subject: KindToken, Kind: KindToken}, nil
 }
@@ -182,11 +214,13 @@ func PrincipalFrom(ctx context.Context) *Principal {
 
 // RequireAuth wraps a handler with the agent's Authn. It stores the
 // principal in the request context, and the bearer credential of the
-// request too (see WithCredential).
+// request too (see WithCredential). A refused request gets the challenge
+// of the Authn, and the log a line about it (logRefusal).
 func RequireAuth(a *Agent, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, err := a.Authn().Authenticate(r)
 		if err != nil {
+			a.logRefusal(r, err)
 			a.Authn().Challenge(w, r)
 			return
 		}
@@ -224,4 +258,93 @@ func bearerHeader(r *http.Request) string {
 		return ""
 	}
 	return h
+}
+
+// refusalEvery is the shortest time between two log lines of refused
+// requests with the same method, route, and reason. A client that loops on
+// a refusal writes one line a minute, and that line counts the refusals
+// that the log left out before it.
+const refusalEvery = time.Minute
+
+// maxRefusalKeys bounds the methods, routes, and reasons that the log of
+// refusals keeps. The routes of a process and the reasons of its Authn are
+// few, so the bound only guards the memory.
+const maxRefusalKeys = 512
+
+// refusalLog bounds the log lines of refused requests (logRefusal). The
+// zero value is ready.
+type refusalLog struct {
+	mu   sync.Mutex
+	seen map[string]*refusalMark
+}
+
+// refusalMark is the time of the last line of one key and the refusals of
+// the key that the log left out since that line.
+type refusalMark struct {
+	at      time.Time
+	skipped int
+}
+
+// note reports whether a refusal of key gets a line at now, and how many
+// refusals of key the log left out since the last line.
+func (l *refusalLog) note(key string, now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.seen == nil {
+		l.seen = map[string]*refusalMark{}
+	}
+	m, ok := l.seen[key]
+	if ok && now.Sub(m.at) < refusalEvery {
+		m.skipped++
+		return false, 0
+	}
+	if !ok && len(l.seen) >= maxRefusalKeys {
+		for k, old := range l.seen {
+			if now.Sub(old.at) >= refusalEvery {
+				delete(l.seen, k)
+			}
+		}
+		if len(l.seen) >= maxRefusalKeys {
+			return false, 0
+		}
+	}
+	skipped := 0
+	if ok {
+		skipped = m.skipped
+	}
+	l.seen[key] = &refusalMark{at: now}
+	return true, skipped
+}
+
+// logRefusal writes the line of a request that RequireAuth refused, at
+// level info: the method, the route pattern, the path, the reason, and
+// the node of the process, so the log of several replicas says which one
+// refused. The reason is "no credential" for a request without an
+// Authorization header and without a client certificate, else the reason
+// of the Authn, such as "oidc: token expired". No token and no other value
+// of a header enters the line. Per method, route, and reason, at most one
+// line goes out per refusalEvery, and the next line counts the refusals
+// that the log left out in skipped.
+func (a *Agent) logRefusal(r *http.Request, err error) {
+	reason := refusalReason(err)
+	if r.Header.Get("Authorization") == "" && (r.TLS == nil || len(r.TLS.PeerCertificates) == 0) {
+		reason = "no credential"
+	}
+	if reason == "" {
+		reason = "the credential was refused"
+	}
+	// The pattern of the mux, such as GET /v1/runs/{id}, without its method.
+	route := r.Pattern
+	if _, rest, ok := strings.Cut(route, " "); ok {
+		route = strings.TrimSpace(rest)
+	}
+	ok, skipped := a.refusals.note(r.Method+" "+route+"\n"+reason, a.clock.Now())
+	if !ok {
+		return
+	}
+	attrs := []any{"method", r.Method, "route", route, "path", r.URL.Path, "reason", reason, "node", a.node}
+	if skipped > 0 {
+		attrs = append(attrs, "skipped", skipped)
+	}
+	a.log.Info("request refused without a valid credential", attrs...)
 }
