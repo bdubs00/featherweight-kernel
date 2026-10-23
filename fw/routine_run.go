@@ -645,7 +645,11 @@ func resultText(res ToolResult) string {
 // It runs once per run. The caller holds rs.emitMu and appends
 // fw.run.finished next.
 func (a *Agent) compareLocked(ctx context.Context, rs *runState, output string) error {
-	for _, d := range RoutineComparisons(a.profileOf(rs.queuedData()).Routines, rs.events, output) {
+	routines := a.profileOf(rs.queuedData()).Routines
+	if len(routines) == 0 {
+		return nil
+	}
+	for _, d := range RoutineComparisons(routines, rs.events, output) {
 		if _, err := a.emitLocked(ctx, rs, EvRoutineCompared, d); err != nil {
 			return err
 		}
