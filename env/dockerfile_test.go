@@ -4,6 +4,8 @@ package env
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -60,5 +62,22 @@ func TestDockerfile(t *testing.T) {
 	b.Reset()
 	if err := writeDockerfile(img.cfg, "debian", &b); err != nil || !strings.Contains(b.String(), "/opt/agent-env/src/tools/pixi.toml") || strings.Contains(b.String(), "uv sync") {
 		t.Errorf("image block: %v\n%s", err, b.String())
+	}
+}
+
+// Dockerfile.toolbox installs uv and pixi with the step of fw env
+// dockerfile, so both carry the same versions and checksums.
+func TestToolboxManagers(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "Dockerfile.toolbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), managersStep()) {
+		t.Fatalf("Dockerfile.toolbox lacks the step of env/dockerfile.go:\n%s", managersStep())
+	}
+	for _, pkg := range []string{"python3", "iproute2", "dnsutils", "iputils-ping", "netcat-openbsd", "unzip", "xz-utils", "less", "file", "lsof", "rsync"} {
+		if !strings.Contains(string(b), " "+pkg+" ") && !strings.Contains(string(b), " "+pkg+"\n") && !strings.Contains(string(b), " "+pkg+" \\") {
+			t.Errorf("Dockerfile.toolbox lacks the package %s", pkg)
+		}
 	}
 }

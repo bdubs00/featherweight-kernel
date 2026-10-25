@@ -33,6 +33,32 @@ var checksums = map[string]map[string]string{
 	},
 }
 
+// managersStep returns the steps of a Dockerfile that install uv and
+// pixi into /usr/local/bin from their release archives, after a check of
+// the sha256 of each archive. Dockerfile.toolbox holds the same text, and
+// a test compares the two. The image needs /bin/sh, curl, tar, and
+// sha256sum.
+func managersStep() string {
+	var b strings.Builder
+	p := func(format string, args ...any) { fmt.Fprintf(&b, format, args...) }
+	p("ARG TARGETARCH\n")
+	p("RUN set -eu; \\\n")
+	p("    case \"${TARGETARCH:-amd64}\" in \\\n")
+	for _, a := range []struct{ docker, rust string }{{"amd64", "x86_64"}, {"arm64", "aarch64"}} {
+		p("      %s) arch=%s; uv_sha=%s; pixi_sha=%s ;; \\\n", a.docker, a.rust, checksums[a.rust]["uv"], checksums[a.rust]["pixi"])
+	}
+	p("      *) echo \"fw env: no uv and pixi for $TARGETARCH\" >&2; exit 1 ;; \\\n")
+	p("    esac; \\\n")
+	p("    curl -fsSL -o /tmp/uv.tar.gz \"https://github.com/astral-sh/uv/releases/download/%s/uv-${arch}-unknown-linux-musl.tar.gz\"; \\\n", uvVersion)
+	p("    echo \"${uv_sha}  /tmp/uv.tar.gz\" | sha256sum -c -; \\\n")
+	p("    tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 \"uv-${arch}-unknown-linux-musl/uv\" \"uv-${arch}-unknown-linux-musl/uvx\"; \\\n")
+	p("    curl -fsSL -o /tmp/pixi.tar.gz \"https://github.com/prefix-dev/pixi/releases/download/v%s/pixi-${arch}-unknown-linux-musl.tar.gz\"; \\\n", pixiVersion)
+	p("    echo \"${pixi_sha}  /tmp/pixi.tar.gz\" | sha256sum -c -; \\\n")
+	p("    tar -xzf /tmp/pixi.tar.gz -C /usr/local/bin pixi; \\\n")
+	p("    rm /tmp/uv.tar.gz /tmp/pixi.tar.gz\n")
+	return b.String()
+}
+
 // buildCache is the cache of the managers while the image builds. It is a
 // cache mount of BuildKit, so it stays out of the image.
 const buildCache = "/root/.cache/fw-env"
@@ -90,21 +116,8 @@ func (s *spec) dockerfile(from string) (string, error) {
 	p("#   environment:\n#     placement: image\n#     dir: %s\n", img.dir)
 	p("# The digest of the manifests, the lock files, and the prepare commands:\n# %s\n", digest)
 	p("FROM %s\n\n", from)
-	p("ARG TARGETARCH\n")
-	p("RUN set -eu; \\\n")
-	p("    case \"${TARGETARCH:-amd64}\" in \\\n")
-	for _, a := range []struct{ docker, rust string }{{"amd64", "x86_64"}, {"arm64", "aarch64"}} {
-		p("      %s) arch=%s; uv_sha=%s; pixi_sha=%s ;; \\\n", a.docker, a.rust, checksums[a.rust]["uv"], checksums[a.rust]["pixi"])
-	}
-	p("      *) echo \"fw env: no uv and pixi for $TARGETARCH\" >&2; exit 1 ;; \\\n")
-	p("    esac; \\\n")
-	p("    curl -fsSL -o /tmp/uv.tar.gz \"https://github.com/astral-sh/uv/releases/download/%s/uv-${arch}-unknown-linux-musl.tar.gz\"; \\\n", uvVersion)
-	p("    echo \"${uv_sha}  /tmp/uv.tar.gz\" | sha256sum -c -; \\\n")
-	p("    tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 \"uv-${arch}-unknown-linux-musl/uv\" \"uv-${arch}-unknown-linux-musl/uvx\"; \\\n")
-	p("    curl -fsSL -o /tmp/pixi.tar.gz \"https://github.com/prefix-dev/pixi/releases/download/v%s/pixi-${arch}-unknown-linux-musl.tar.gz\"; \\\n", pixiVersion)
-	p("    echo \"${pixi_sha}  /tmp/pixi.tar.gz\" | sha256sum -c -; \\\n")
-	p("    tar -xzf /tmp/pixi.tar.gz -C /usr/local/bin pixi; \\\n")
-	p("    rm /tmp/uv.tar.gz /tmp/pixi.tar.gz\n\n")
+	b.WriteString(managersStep())
+	p("\n")
 
 	// The variables of the environment, as every tool process gets them.
 	// The caches stay out: while the image builds they are in the cache

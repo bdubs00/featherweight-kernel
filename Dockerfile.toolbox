@@ -17,15 +17,40 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -tags "${TAGS}" -ldflags "-s -w 
  && ln -s fw /out/usr/local/bin/ax-task-runner
 
 FROM debian:bookworm-slim
+# The programs of a shell: git, the network (ss and ip of iproute2, dig of
+# dnsutils, ping, and nc), and files (unzip, xz, less, file, lsof, and
+# rsync). python3 serves uv for the Python packages of an environment.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash ca-certificates curl git jq openssh-client procps \
+    python3 iproute2 dnsutils iputils-ping netcat-openbsd \
+    unzip xz-utils less file lsof rsync \
  && rm -rf /var/lib/apt/lists/*
+# uv and pixi, the static builds, after a check of the sha256 of each
+# archive. They install the packages of the block environment on the
+# durable volume (docs/ARCHITECTURE.md section 18). This step is the text
+# of fw env dockerfile, and a test of env/dockerfile_test.go compares the
+# two, so a new version changes env/dockerfile.go first.
+ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) arch=x86_64; uv_sha=6c86040a8f045ab9adc9e3ec4cdafa03fd00e9a988ed2bf28971c7fc2d0debd0; pixi_sha=d305406a7630aab6484419833f9204b2fe9ea40632da8bb536496f123ca86e7f ;; \
+      arm64) arch=aarch64; uv_sha=345a8308e4d1835cdfaadf692836fd3137a6d45864773f05ad7bf59442b1ba16; pixi_sha=b18dadba196c0c77781533184ec3e7757422c0ae9bed0047ff7ca1c688c0f62b ;; \
+      *) echo "fw env: no uv and pixi for $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/0.13.1/uv-${arch}-unknown-linux-musl.tar.gz"; \
+    echo "${uv_sha}  /tmp/uv.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/uv.tar.gz -C /usr/local/bin --strip-components=1 "uv-${arch}-unknown-linux-musl/uv" "uv-${arch}-unknown-linux-musl/uvx"; \
+    curl -fsSL -o /tmp/pixi.tar.gz "https://github.com/prefix-dev/pixi/releases/download/v0.82.0/pixi-${arch}-unknown-linux-musl.tar.gz"; \
+    echo "${pixi_sha}  /tmp/pixi.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/pixi.tar.gz -C /usr/local/bin pixi; \
+    rm /tmp/uv.tar.gz /tmp/pixi.tar.gz
 # The tool user: under ax, fw starts the shell and the stdio MCP servers as
 # nonroot, uid and gid 65532, the user of the distroless base of fw:static
 # (tools.user, docs/ARCHITECTURE.md section 7.12). fw itself stays root, so
 # it can start a process as that user and keep /workspace/.fw to itself.
-# The tool user cannot install packages: an agent that needs a toolchain
-# gets it in an image built FROM this one.
+# The tool user cannot install apt packages. An agent gets Python packages
+# and programs of conda-forge through the block environment, and a heavy
+# toolchain in an image built FROM this one.
 RUN groupadd --gid 65532 nonroot \
  && useradd --uid 65532 --gid 65532 --create-home --home-dir /home/nonroot --shell /bin/bash nonroot
 COPY --from=build /out/ /
