@@ -965,11 +965,19 @@ Root also needs these capabilities in its effective set, which `fw.MissingToolCa
 
 A sandbox can take these capabilities from root. The gVisor sandbox of Agent Substrate leaves root `CAP_KILL`, `CAP_NET_BIND_SERVICE`, and `CAP_AUDIT_WRITE` only, so a chown fails there, even in `/tmp`. If a capability is missing, an explicit `tools.user` stops the start with an error that names the capabilities. The ax default then gives the user of `fw`, with a warning that names them. On such a sandbox a shell can read FW_HOME, so a Task that reads untrusted input gets no shell. `fw` never falls back to its own user without a word. `fw doctor` names the tool user on the line `tools user`.
 
-A tool process of a tool user runs with the uid and the gid of that user and with no other group. It gets the `HOME`, `USER`, and `LOGNAME` of the user. The home comes from `/etc/passwd`, and it is `/` for a `uid:gid` without an entry. The process cannot read the memory of `fw`, its environment in `/proc/<pid>/environ`, or its open files, because the kernel of the sandbox checks the user for each of them. The `fw` binary also makes its process non-dumpable at start (`prctl PR_SET_DUMPABLE 0`), for every verb. Then a process of the same user without `CAP_SYS_PTRACE` cannot read these entries either, and `fw` writes no core file. A debugger therefore attaches only to an `fw` that it starts.
+A tool process of a tool user runs with the uid and the gid of that user and with no other group. It gets the `HOME`, `USER`, and `LOGNAME` of the user. If `tools.userHome` is set, the home comes from it. Else it comes from `/etc/passwd`, and it is `/` for a `uid:gid` without an entry. The process cannot read the memory of `fw`, its environment in `/proc/<pid>/environ`, or its open files. The kernel of the sandbox checks the user for each of them. The `fw` binary also makes its process non-dumpable at start (`prctl PR_SET_DUMPABLE 0`), for every verb. Then a process of the same user without `CAP_SYS_PTRACE` cannot read these entries either, and `fw` writes no core file. A debugger therefore attaches only to an `fw` that it starts.
 
 A stdio MCP server of a tool user also gets the environment of a tool process and starts in the root of the workspace, so a server such as `server-filesystem` cannot read the state of `fw` either. Such a server gets no secret from the environment of `fw`. Give a credential to an MCP server over HTTP instead, through `auth.bearer` or `auth.oauth`: the kernel calls that server and keeps the credential. Without a tool user, a stdio server keeps the whole environment of `fw`, as before.
 
 The images create the user. `fw:static` has `nonroot`, uid and gid 65532, from its distroless base, and `Dockerfile.toolbox` creates the same user with the home `/home/nonroot`. The tool user cannot install system packages, and a bootstrap goal (section 11.3) cannot install them either. An agent gets Python packages and programs of conda-forge through the block `environment` (section 18). A heavy toolchain goes into an image built from `fw:toolbox`.
+
+#### The home of the tool user and the root directory
+
+`tools.userHome`, `FW_TOOLS_USER_HOME` in the environment, names the home of the tool user: an absolute path. At the start, `fw` creates the directory and gives it to the tool user with the mode `0700`. A link or a file in its place goes first, because the tool user can put one there in an earlier start. The home must not overlap FW_HOME, the file ledger, or the configuration file, and it must not hold a directory that stays with `fw`. Each part of the kernel that starts a process as the tool user reads the user through `fw.ToolUserOf`. The shell, a stdio MCP server, and the managers of section 18 therefore get the same `HOME`. The hosted programs of section 19 keep their own home.
+
+Under ax, with a tool user, `tools.userHome` is `/workspace/.home` by default, on the durable volume beside FW_HOME. The home of the image loses each write at the next suspend. Agent Substrate also shows a file of the image as a file of root (agent-substrate/substrate#2036), so the tool user cannot write `/home/nonroot`.
+
+Agent Substrate gives the root directory `/` the mode `0700` at every boot (agent-substrate/substrate#2035). The tool user then reaches no workspace, and the start stops with `/ has the mode 700`. With a tool user and `fw` as root, the ax boot therefore opens `/`. It adds the read and search bits for the group and for other users, and it logs the change once. Root owns `/`, so the change needs no capability. Without a tool user, as in a sandbox that lacks the capabilities above, the boot changes nothing: `/`, `HOME`, and the owners of the files stay as they are.
 
 #### The home of fw and the workspace
 
@@ -1472,7 +1480,7 @@ Two images are built. `fw:static` is `gcr.io/distroless/static` plus the binary,
 1. Read `AX_TASK_YAML` and `AX_WORKSPACES_YAML`. Set `FW_HOME` to `/workspace/.fw`.
 2. Listen on port 80. Answer `/healthz` with 200. Serve the metadata endpoints on `127.0.0.1:8099`, or on the port of `--metadata-port`. If the Task sets `spec.debug: true`, start the guest services of `ax ssh` (section 11.12).
 3. For each workspace binding, in order, write `spec.files`, clone `spec.git`, and create `spec.skills.path`. Skip a binding whose marker exists.
-4. Write the marker at `$FW_HOME/ax/initialized-<path>`. With a tool user, the next step builds the agent, which gives the prepared files to that user once and keeps `$FW_HOME` to `fw` (section 7.12).
+4. Write the marker at `$FW_HOME/ax/initialized-<path>`. With a tool user, the next step builds the agent. The agent gives the prepared files to that user once and keeps `$FW_HOME` to `fw` (section 7.12). Before that, the boot opens the root directory for the tool user, and the agent creates the home of the tool user (section 7.12).
 5. If the binding has a `goal` and a model credential is present, run the `bootstrap` profile with that goal. The time limit comes from `AX_BOOTSTRAP_TIMEOUT`, default 10 minutes. The marker is written first, so a container killed during the goal does not run the goal again on resume.
 6. Answer `/readyz` with 200.
 7. Resume unfinished runs (section 4.5).
@@ -2396,6 +2404,10 @@ The package `env/pkglist` holds the checks of a list and of a mirror. It has no 
 | `<cache>/uv`, `<cache>/pixi` | tool user | `UV_CACHE_DIR`, `PIXI_CACHE_DIR` |
 
 Without a tool user, as under Agent Substrate today (section 7.12), every path belongs to the user of fw, and nothing changes owner. With a tool user, a state file that fw does not own counts as absent, because the tool user could have written it.
+
+The managers run as the tool user with the `HOME` of section 7.12, which is `/workspace/.home` under ax. When a Task turns the tool user on, the walk of the workspace gives the files under `dir` to that user. A state file then counts as absent. The next start therefore installs the environment once more, from the cache, and a list loses its local changes. `fw` takes `dir` and `<dir>/src` back at each install.
+
+The tool user can put a link in place of an entry that it owns under `dir`. `fw` therefore writes a manifest and the `config.toml` of pixi through an `os.Root` of `dir`. No link then leads a write or a read of `fw` out of `dir`. A state file gets a temporary file with a random name before its rename. `fw` opens the lock file without a follow of a link. A directory of a manifest that is a link becomes a real directory again.
 
 ### 18.4 The install
 
