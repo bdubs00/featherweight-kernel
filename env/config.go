@@ -1,10 +1,11 @@
 // Package env gives an agent a package environment on the durable volume
 // (docs/ARCHITECTURE.md section 18). It claims the block environment of
 // fw.yaml. The block names a uv project for Python and a pixi manifest for
-// other tools, each with its lock file. The package installs them once per
-// digest of the manifests, the lock files, and the prepare commands, in
-// the background, as the tool user, and gives every tool process the
-// variables of the environment. It adds the tool env, which adds and
+// other tools, each with its lock file, or it names the packages in plain
+// lists, and the package writes the manifests and the lock files itself.
+// The package installs them once per digest, in the background, as the
+// tool user, and gives every tool process the variables of the
+// environment. It adds the tool env, which adds and
 // removes packages through the managers, the Environment section of the
 // system prompt, a line of fw doctor, and the verb fw env dockerfile.
 //
@@ -21,6 +22,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bdubs00/featherweight-kernel/env/pkglist"
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
@@ -61,11 +63,42 @@ type Config struct {
 	Prepare   []string `yaml:"prepare" json:"prepare,omitempty"`
 	Placement string   `yaml:"placement" json:"placement,omitempty"`
 	Brief     *bool    `yaml:"brief" json:"brief,omitempty"`
+	Packages  *Lists   `yaml:"packages" json:"packages,omitempty"`
+	Mirrors   *Mirrors `yaml:"mirrors" json:"mirrors,omitempty"`
+}
+
+// Lists is the key packages of the block: the packages in plain lists.
+// A list takes the place of a manifest. The kernel writes the manifest
+// and its lock file under dir, and it owns both. A nil list means that
+// the key is absent. An empty list is valid: the tool env can then add a
+// package.
+type Lists struct {
+	// Python holds requirements for uv, such as "pyyaml>=6".
+	Python *[]string `yaml:"python" json:"python,omitempty"`
+	// Tools holds packages of conda-forge for pixi, such as "nodejs>=22".
+	Tools *[]string `yaml:"tools" json:"tools,omitempty"`
+}
+
+// Mirrors is the key mirrors of the block: the package index of each
+// manager, such as a cache inside the cluster.
+type Mirrors struct {
+	// Python is the index of uv and pip: UV_DEFAULT_INDEX and
+	// PIP_INDEX_URL of every tool process and every install.
+	Python string `yaml:"python" json:"python,omitempty"`
+	// Tools is the mirror of https://conda.anaconda.org/conda-forge in
+	// the configuration of pixi.
+	Tools string `yaml:"tools" json:"tools,omitempty"`
 }
 
 // keys are the keys of the block. Another key is an error, so a typo stops
 // the process.
-var keys = []string{"dir", "cache", "python", "tools", "prepare", "placement", "brief"}
+var keys = []string{"dir", "cache", "python", "tools", "prepare", "placement", "brief", "packages", "mirrors"}
+
+// subKeys are the keys of the mappings in the block.
+var subKeys = map[string][]string{
+	"packages": {pkglist.Python, pkglist.Tools},
+	"mirrors":  {pkglist.Python, pkglist.Tools},
+}
 
 // spec is the resolved block: every path is absolute.
 type spec struct {
@@ -78,6 +111,12 @@ type spec struct {
 	placement string
 	brief     bool
 	user      *fw.ToolUser // the tool user, or nil for the user of fw
+	// inline holds the configured lists of environment.packages by
+	// manager (pkglist.Python, pkglist.Tools). A manager without its key
+	// is absent from the map, and a manager with an empty list is present.
+	inline map[string][]string
+	// mirrors holds the URLs of environment.mirrors by manager.
+	mirrors map[string]string
 }
 
 // load resolves the block of cfg. It returns nil and no error when cfg has
@@ -92,8 +131,18 @@ func load(cfg *fw.Config) (*spec, error) {
 	}
 	if n.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			if k := n.Content[i].Value; !slices.Contains(keys, k) {
+			k := n.Content[i].Value
+			if !slices.Contains(keys, k) {
 				return nil, fmt.Errorf("env: %s.%s is not a key; the keys are %s", Block, k, strings.Join(keys, ", "))
+			}
+			sub, v := subKeys[k], n.Content[i+1]
+			if sub == nil || v.Kind != yaml.MappingNode {
+				continue
+			}
+			for j := 0; j+1 < len(v.Content); j += 2 {
+				if kk := v.Content[j].Value; !slices.Contains(sub, kk) {
+					return nil, fmt.Errorf("env: %s.%s.%s is not a key; the keys are %s", Block, k, kk, strings.Join(sub, ", "))
+				}
 			}
 		}
 	}
@@ -148,6 +197,9 @@ func resolve(cfg *fw.Config, c Config) (*spec, error) {
 		}
 		s.prepare = append(s.prepare, p)
 	}
+	if err := s.lists(c); err != nil {
+		return nil, err
+	}
 	if err := s.check(cfg, onVolume); err != nil {
 		return nil, err
 	}
@@ -155,6 +207,56 @@ func resolve(cfg *fw.Config, c Config) (*spec, error) {
 		return nil, fmt.Errorf("env: %w", err)
 	}
 	return s, nil
+}
+
+// lists checks the keys packages and mirrors of c and fills inline and
+// mirrors. A list takes the place of the manifest of its manager, so the
+// two cannot both exist. A list or a mirror that does not fit stops the
+// start.
+func (s *spec) lists(c Config) error {
+	if c.Packages != nil {
+		for _, l := range []struct {
+			manager, file string
+			list          *[]string
+		}{{pkglist.Python, c.Python, c.Packages.Python}, {pkglist.Tools, c.Tools, c.Packages.Tools}} {
+			if l.list == nil {
+				continue
+			}
+			if l.file != "" {
+				return fmt.Errorf("env: %s.packages.%s and %s.%s cannot both exist; name the packages in the list or in the manifest", Block, l.manager, Block, l.manager)
+			}
+			if err := pkglist.Check(*l.list); err != nil {
+				return fmt.Errorf("env: %s.packages.%s %w", Block, l.manager, err)
+			}
+			list := make([]string, 0, len(*l.list))
+			for _, req := range *l.list {
+				list = append(list, strings.TrimSpace(req))
+			}
+			if s.inline == nil {
+				s.inline = map[string][]string{}
+			}
+			s.inline[l.manager] = list
+		}
+		if s.inline != nil && s.placement == PlacementImage {
+			return fmt.Errorf("env: %s.packages needs placement durable; for placement image, name a manifest with its lock file", Block)
+		}
+	}
+	if c.Mirrors != nil {
+		for _, m := range []struct{ manager, url string }{{pkglist.Python, c.Mirrors.Python}, {pkglist.Tools, c.Mirrors.Tools}} {
+			u := strings.TrimSpace(m.url)
+			if u == "" {
+				continue
+			}
+			if err := pkglist.CheckMirror(u); err != nil {
+				return fmt.Errorf("env: %s.mirrors.%s %w", Block, m.manager, err)
+			}
+			if s.mirrors == nil {
+				s.mirrors = map[string]string{}
+			}
+			s.mirrors[m.manager] = strings.TrimRight(u, "/")
+		}
+	}
+	return nil
 }
 
 // path makes p absolute against the root of the workspace, or returns def
