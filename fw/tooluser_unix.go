@@ -258,11 +258,30 @@ func makeToolHome(u *ToolUser, home string, reserved, guards []string) (bool, er
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return false, fmt.Errorf("fw: tools.userHome %s: %w", home, err)
 	}
-	if err := os.Lchown(home, int(u.UID), int(u.GID)); err != nil {
-		return false, fmt.Errorf("fw: tools.userHome: give %s to %s: %w", home, u, err)
-	}
-	if err := os.Chmod(home, 0o700); err != nil {
+	// Without CAP_FOWNER, which the tool user does not need, root changes
+	// the mode of its own files only. The mode therefore comes first,
+	// while fw owns the directory, and a home of the tool user with the
+	// mode 0700 stays as it is, as at the next start.
+	info, err = os.Lstat(home)
+	if err != nil {
 		return false, fmt.Errorf("fw: tools.userHome %s: %w", home, err)
+	}
+	st := info.Sys().(*syscall.Stat_t)
+	if info.Mode().Perm() != 0o700 {
+		if int(st.Uid) != os.Geteuid() {
+			if err := os.Lchown(home, os.Geteuid(), os.Getegid()); err != nil {
+				return false, fmt.Errorf("fw: tools.userHome: take %s back to fw: %w", home, err)
+			}
+			st.Uid, st.Gid = uint32(os.Geteuid()), uint32(os.Getegid())
+		}
+		if err := os.Chmod(home, 0o700); err != nil {
+			return false, fmt.Errorf("fw: tools.userHome %s: %w", home, err)
+		}
+	}
+	if st.Uid != u.UID || st.Gid != u.GID {
+		if err := os.Lchown(home, int(u.UID), int(u.GID)); err != nil {
+			return false, fmt.Errorf("fw: tools.userHome: give %s to %s: %w", home, u, err)
+		}
 	}
 	if why := u.blocked(home, 0o3); why != "" {
 		return false, fmt.Errorf("fw: tools.user %s cannot write its home %s: %s", u, home, why)

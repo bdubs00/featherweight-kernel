@@ -277,6 +277,29 @@ func TestToolUserHome(t *testing.T) {
 	if out, err := asTool(u, ws, `echo "$HOME" && touch "$HOME/.bash_history" && mkdir -p "$HOME/.cache/x"`); err != nil || strings.TrimSpace(out) != toolHome {
 		t.Fatalf("the tool user cannot use its home: %v: %s", err, out)
 	}
+	// The next start finds the home of the tool user and keeps it. A home
+	// with another mode gets 0700 again, also without CAP_FOWNER.
+	newTestAgent(t, newScript().Model(), WithConfig(cfg))
+	if uid, _, mode := ownerOf(t, toolHome); uid != freeID || mode.Perm() != 0o700 {
+		t.Fatalf("the home at the next start: %d %v", uid, mode)
+	}
+	if _, err := os.Stat(filepath.Join(toolHome, ".bash_history")); err != nil {
+		t.Fatalf("the next start lost a file of the home: %v", err)
+	}
+	// Root without CAP_FOWNER changes the mode of its own files only.
+	if err := os.Lchown(toolHome, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(toolHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Lchown(toolHome, freeID, freeID); err != nil {
+		t.Fatal(err)
+	}
+	newTestAgent(t, newScript().Model(), WithConfig(cfg))
+	if uid, gid, mode := ownerOf(t, toolHome); uid != freeID || gid != freeID || mode.Perm() != 0o700 {
+		t.Fatalf("a home with the mode 0755: %d:%d %v", uid, gid, mode)
+	}
 
 	bad := DefaultConfig()
 	bad.Home = home
