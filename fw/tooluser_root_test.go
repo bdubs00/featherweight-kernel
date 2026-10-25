@@ -243,3 +243,47 @@ func TestToolUserAndRunDirectories(t *testing.T) {
 		t.Fatalf("a directory that the tool user made = %v", err)
 	}
 }
+
+// tools.userHome gives the tool user a home of its own with the mode
+// 0700, where a tool process writes. A link that the tool user put in its
+// place in an earlier start goes first, and a home that holds FW_HOME
+// stops the start.
+func TestToolUserHome(t *testing.T) {
+	ws, home := rootWorkspace(t)
+	toolHome := filepath.Join(ws, ".home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A link to FW_HOME in place of the home, as a tool process can leave.
+	if err := os.Symlink(home, toolHome); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	cfg.Home = home
+	cfg.Tools.Files.Root = ws
+	cfg.Tools.User = strconv.Itoa(freeID) + ":" + strconv.Itoa(freeID)
+	cfg.Tools.UserHome = toolHome
+	a := newTestAgent(t, newScript().Model(), WithConfig(cfg))
+	u := a.ToolUser()
+	if u == nil || u.Home != toolHome {
+		t.Fatalf("ToolUser = %+v", u)
+	}
+	if uid, gid, mode := ownerOf(t, toolHome); uid != freeID || gid != freeID || !mode.IsDir() || mode.Perm() != 0o700 {
+		t.Fatalf("the home: %d:%d %v", uid, gid, mode)
+	}
+	if uid, _, mode := ownerOf(t, home); uid != 0 || mode.Perm() != 0o700 {
+		t.Fatalf("FW_HOME: uid %d, mode %v", uid, mode)
+	}
+	if out, err := asTool(u, ws, `echo "$HOME" && touch "$HOME/.bash_history" && mkdir -p "$HOME/.cache/x"`); err != nil || strings.TrimSpace(out) != toolHome {
+		t.Fatalf("the tool user cannot use its home: %v: %s", err, out)
+	}
+
+	bad := DefaultConfig()
+	bad.Home = home
+	bad.Tools.Files.Root = ws
+	bad.Tools.User = cfg.Tools.User
+	bad.Tools.UserHome = ws
+	if _, err := New(WithConfig(bad), WithModel(newScript().Model())); err == nil || !strings.Contains(err.Error(), "tools.userHome") {
+		t.Fatalf("a home that holds FW_HOME: %v", err)
+	}
+}

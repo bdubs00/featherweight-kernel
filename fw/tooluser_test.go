@@ -261,3 +261,36 @@ func TestToolUserPermissions(t *testing.T) {
 		t.Errorf("the owner cannot rename in its own sticky directory: %q", x)
 	}
 }
+
+// ToolUserOf gives the tool user tools.userHome as its home, so every
+// process of that user gets the same HOME. A relative home is an error,
+// and without a tool user the home does not matter.
+func TestToolUserOf(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Tools.User = "54321:54321"
+	u, err := ToolUserOf(cfg)
+	if err != nil || u == nil || u.Home != "" {
+		t.Fatalf("ToolUserOf = %+v, %v", u, err)
+	}
+	cfg.Tools.UserHome = "/workspace/.home/"
+	if u, err = ToolUserOf(cfg); err != nil || u.Home != "/workspace/.home" {
+		t.Fatalf("ToolUserOf = %+v, %v", u, err)
+	}
+	cmd := exec.Command("true")
+	cmd.Env = []string{"HOME=/root"}
+	u.Apply(cmd)
+	if got := cmd.Env[len(cmd.Env)-3]; got != "HOME=/workspace/.home" {
+		t.Fatalf("env = %v", cmd.Env)
+	}
+	cfg.Tools.UserHome = "home"
+	if _, err := ToolUserOf(cfg); err == nil || !strings.Contains(err.Error(), "tools.userHome \"home\" is not an absolute path") {
+		t.Fatalf("relative home: %v", err)
+	}
+	cfg.Tools.User = ToolUserNone
+	if u, err := ToolUserOf(cfg); u != nil || err != nil {
+		t.Fatalf("no tool user: %v, %v", u, err)
+	}
+	if u, err := ToolUserOf(nil); u != nil || err != nil {
+		t.Fatalf("nil config: %v, %v", u, err)
+	}
+}

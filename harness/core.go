@@ -995,7 +995,12 @@ func (h *host) command(argv []string, dir string, env []string, extra ...string)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = append(slices.Clip(env), extra...)
-	h.a.ToolUser().Apply(cmd)
+	if u := h.a.ToolUser(); u != nil {
+		u.Apply(cmd)
+		// Apply puts the home of the tool user last. The home of the
+		// harness wins over it, because it holds the sessions.
+		cmd.Env = append(cmd.Env, "HOME="+h.home)
+	}
 	procAttr(cmd)
 	return cmd
 }

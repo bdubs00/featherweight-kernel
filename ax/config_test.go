@@ -1,7 +1,9 @@
 package ax
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -181,12 +183,75 @@ func TestApplyToConfigToolUser(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Workspaces, []string{DefaultWorkspacePath, "/workspace/a", "/src/b"}) {
 		t.Errorf("Workspaces = %v", cfg.Workspaces)
 	}
+	wantHome := ""
+	if want != "" {
+		wantHome = DefaultToolHome
+	}
+	if cfg.Tools.UserHome != wantHome {
+		t.Errorf("Tools.UserHome = %q, want %q", cfg.Tools.UserHome, wantHome)
+	}
 
 	cfg = fw.DefaultConfig()
 	cfg.Tools.User = fw.ToolUserNone
 	ApplyToConfig(cfg, &Task{}, bindings)
-	if cfg.Tools.User != fw.ToolUserNone {
-		t.Errorf("an explicit tools.user became %q", cfg.Tools.User)
+	if cfg.Tools.User != fw.ToolUserNone || cfg.Tools.UserHome != "" {
+		t.Errorf("an explicit tools.user became %q with the home %q", cfg.Tools.User, cfg.Tools.UserHome)
+	}
+
+	// An explicit tool user gets the home on the volume, and an explicit
+	// home stays.
+	cfg = fw.DefaultConfig()
+	cfg.Tools.User = "65532:65532"
+	ApplyToConfig(cfg, &Task{}, bindings)
+	if cfg.Tools.UserHome != DefaultToolHome {
+		t.Errorf("Tools.UserHome = %q", cfg.Tools.UserHome)
+	}
+	cfg = fw.DefaultConfig()
+	cfg.Tools.User, cfg.Tools.UserHome = "65532:65532", "/workspace/home"
+	ApplyToConfig(cfg, &Task{}, bindings)
+	if cfg.Tools.UserHome != "/workspace/home" {
+		t.Errorf("an explicit tools.userHome became %q", cfg.Tools.UserHome)
+	}
+}
+
+// openDir gives a directory that other users cannot search the mode 0755
+// and logs it once. A directory that they can search stays as it is.
+func TestOpenDir(t *testing.T) {
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	dir := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := openDir(dir, log); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("mode = %v, %v", info.Mode(), err)
+	}
+	if !strings.Contains(logs.String(), "substrate#2035") || !strings.Contains(logs.String(), "mode=700 now=755") {
+		t.Fatalf("log = %s", logs.String())
+	}
+	logs.Reset()
+	if err := os.Chmod(dir, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := openDir(dir, log); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(dir); info.Mode().Perm() != 0o711 || logs.Len() != 0 {
+		t.Fatalf("a searchable directory changed: %v, log %s", info.Mode(), logs.String())
+	}
+	// Without a tool user, OpenRoot does nothing, not even a stat.
+	OpenRoot(fw.DefaultConfig(), log)
+	cfg := fw.DefaultConfig()
+	cfg.Tools.User = fw.ToolUserNone
+	OpenRoot(cfg, log)
+	if logs.Len() != 0 {
+		t.Fatalf("OpenRoot without a tool user logged %s", logs.String())
 	}
 }
 

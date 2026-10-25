@@ -113,7 +113,7 @@ func newBash(cfg *fw.Config) (fw.Tool, error) {
 		if cfg.Home != "" {
 			t.home = cfg.Home
 		}
-		u, err := fw.LookupToolUser(cfg.Tools.User)
+		u, err := fw.ToolUserOf(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("builtin: bash: %w", err)
 		}

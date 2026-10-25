@@ -52,7 +52,7 @@ func init() {
 // connection of its own, and the model never sees a decision tool.
 func newSources(ctx context.Context, cfg *fw.Config, secrets fw.Secrets) ([]fw.ToolSource, error) {
 	log := slog.Default().With("component", "mcp")
-	user, err := fw.LookupToolUser(cfg.Tools.User)
+	user, err := fw.ToolUserOf(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: %w", err)
 	}

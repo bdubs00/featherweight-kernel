@@ -109,6 +109,28 @@ func LookupToolUser(spec string) (*ToolUser, error) {
 	return u, nil
 }
 
+// ToolUserOf resolves the tool user of cfg: LookupToolUser of tools.user,
+// with tools.userHome as its home directory when that is set. Every part
+// of the kernel that starts a process as the tool user resolves the user
+// here, so each process gets the same HOME. A tools.userHome that is not
+// an absolute path is an error.
+func ToolUserOf(cfg *Config) (*ToolUser, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	u, err := LookupToolUser(cfg.Tools.User)
+	if err != nil || u == nil {
+		return u, err
+	}
+	if h := strings.TrimSpace(cfg.Tools.UserHome); h != "" {
+		if !filepath.IsAbs(h) {
+			return nil, fmt.Errorf("fw: tools.userHome %q is not an absolute path", h)
+		}
+		u.Home = filepath.Clean(h)
+	}
+	return u, nil
+}
+
 // parseID reads a uid or a gid.
 func parseID(s string) (uint32, bool) {
 	n, err := strconv.ParseUint(s, 10, 32)

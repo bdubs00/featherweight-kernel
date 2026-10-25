@@ -225,7 +225,7 @@ func New(opts ...Option) (*Agent, error) {
 	if names := toolSecretNames(cfg.Tools.Bash.Env); len(names) > 0 {
 		a.log.Warn("tools.bash.env gives the shell variables with a secret name; every command of the shell can read them", "names", names)
 	}
-	if a.toolUser, err = LookupToolUser(cfg.Tools.User); err != nil {
+	if a.toolUser, err = ToolUserOf(cfg); err != nil {
 		return nil, err
 	}
 	files := o.files

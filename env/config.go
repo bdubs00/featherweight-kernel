@@ -203,7 +203,7 @@ func resolve(cfg *fw.Config, c Config) (*spec, error) {
 	if err := s.check(cfg, onVolume); err != nil {
 		return nil, err
 	}
-	if s.user, err = fw.LookupToolUser(cfg.Tools.User); err != nil {
+	if s.user, err = fw.ToolUserOf(cfg); err != nil {
 		return nil, fmt.Errorf("env: %w", err)
 	}
 	return s, nil

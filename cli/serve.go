@@ -308,6 +308,9 @@ func (g *globals) bootAX(ctx context.Context, b *axBoot, listen string) error {
 	}
 	// ApplyToConfig also sets FW_ATESPACE from the Task when it is unset.
 	ax.ApplyToConfig(cfg, b.task, b.bindings)
+	// With a tool user, the root directory must let that user through,
+	// before the agent checks the workspace for it.
+	ax.OpenRoot(cfg, log)
 	if err := config.CheckControlServers(cfg); err != nil {
 		return err
 	}

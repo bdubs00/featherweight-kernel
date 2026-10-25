@@ -308,7 +308,14 @@ type ToolsConfig struct {
 	// ":group" or ":gid" (LookupToolUser). Empty is the default of the
 	// environment: the user of fw, or 65532 under ax, which the package ax
 	// sets. "none" runs them as the user of fw.
-	User            string            `yaml:"user,omitempty" json:"user,omitempty"`
+	User string `yaml:"user,omitempty" json:"user,omitempty"`
+	// UserHome is HOME of the processes of the tool user: an absolute
+	// path that fw creates for that user at the start, with the mode
+	// 0700. Empty is the home of the user in /etc/passwd. Under ax, the
+	// package ax sets /workspace/.home, on the durable volume, because a
+	// write to the home of the image goes at the next suspend, and Agent
+	// Substrate shows that home as a directory of root.
+	UserHome        string            `yaml:"userHome,omitempty" json:"userHome,omitempty"`
 	Builtin         []string          `yaml:"builtin" json:"builtin"`
 	Files           FilesToolConfig   `yaml:"files" json:"files"`
 	HTTP            HTTPToolConfig    `yaml:"http" json:"http"`

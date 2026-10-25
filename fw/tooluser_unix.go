@@ -207,6 +207,15 @@ func (a *Agent) useToolUser(u *ToolUser) error {
 			return fmt.Errorf("fw: tools.user %s cannot work in the workspace %s: %s; give that directory the mode 0755, or set tools.user: none", u, r, why)
 		}
 	}
+	if h := strings.TrimSpace(cfg.Tools.UserHome); h != "" {
+		made, err := makeToolHome(u, filepath.Clean(h), reserved, guards)
+		if err != nil {
+			return err
+		}
+		if made {
+			a.log.Info("the tool user has its own home", "home", filepath.Clean(h), "user", u.String())
+		}
+	}
 	if err := u.checkTokenFile(cfg); err != nil {
 		return err
 	}
@@ -214,6 +223,51 @@ func (a *Agent) useToolUser(u *ToolUser) error {
 		a.log.Warn("the root of the files tool holds the state of fw: the files tool keeps out of it, but a shell that changes a path while the files tool opens it can lead the tool there; put FW_HOME outside the root for untrusted input", "home", cfg.Home, "root", filesRoot)
 	}
 	return nil
+}
+
+// makeToolHome creates the home of the tool user (tools.userHome) and
+// gives it to that user with the mode 0700. The home must not overlap a
+// path of fw or hold a directory that stays with fw. A link or a file in
+// its place goes first, because the tool user can put one there in an
+// earlier start, and no tool runs yet. It reports whether it created the
+// directory.
+func makeToolHome(u *ToolUser, home string, reserved, guards []string) (bool, error) {
+	for _, p := range reserved {
+		if under(home, p) || under(p, home) {
+			return false, fmt.Errorf("fw: tools.userHome %s overlaps %s, which holds the state or the configuration of fw; use a directory of its own, such as a sibling of FW_HOME", home, p)
+		}
+	}
+	for _, g := range guards {
+		if under(g, home) {
+			return false, fmt.Errorf("fw: tools.userHome %s holds %s, a directory that stays with fw; use a directory of its own, such as a sibling of FW_HOME", home, g)
+		}
+	}
+	made := false
+	info, err := os.Lstat(home)
+	switch {
+	case err == nil && (info.Mode()&fs.ModeSymlink != 0 || !info.IsDir()):
+		if err := os.Remove(home); err != nil {
+			return false, fmt.Errorf("fw: tools.userHome %s is not a directory, and fw cannot remove it: %w", home, err)
+		}
+		made = true
+	case errors.Is(err, fs.ErrNotExist):
+		made = true
+	case err != nil:
+		return false, fmt.Errorf("fw: tools.userHome %s: %w", home, err)
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return false, fmt.Errorf("fw: tools.userHome %s: %w", home, err)
+	}
+	if err := os.Lchown(home, int(u.UID), int(u.GID)); err != nil {
+		return false, fmt.Errorf("fw: tools.userHome: give %s to %s: %w", home, u, err)
+	}
+	if err := os.Chmod(home, 0o700); err != nil {
+		return false, fmt.Errorf("fw: tools.userHome %s: %w", home, err)
+	}
+	if why := u.blocked(home, 0o3); why != "" {
+		return false, fmt.Errorf("fw: tools.user %s cannot write its home %s: %s", u, home, why)
+	}
+	return made, nil
 }
 
 // ownSub gives the directory name of r to fw with the group of u and the

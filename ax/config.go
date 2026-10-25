@@ -29,6 +29,12 @@ const (
 	// DefaultToolUser is tools.user under ax when fw runs as root: the
 	// user nonroot, uid and gid 65532, of the kernel images.
 	DefaultToolUser = "65532"
+	// DefaultToolHome is tools.userHome under ax with a tool user: a
+	// directory on the durable volume beside FW_HOME. The home of the
+	// image loses every write at the next suspend, and Agent Substrate
+	// shows it as a directory of root (agent-substrate/substrate#2036),
+	// so the tool user cannot write it.
+	DefaultToolHome = "/workspace/.home"
 )
 
 // BootstrapSystem is the system prompt of the bootstrap profile.
@@ -107,6 +113,9 @@ func ApplyToConfig(cfg *fw.Config, task *Task, bindings []Binding) {
 		} else {
 			cfg.Tools.User = DefaultToolUser
 		}
+	}
+	if u := strings.TrimSpace(cfg.Tools.User); u != "" && u != fw.ToolUserNone && strings.TrimSpace(cfg.Tools.UserHome) == "" {
+		cfg.Tools.UserHome = DefaultToolHome
 	}
 	if cfg.Tools.Files.PerRun == nil {
 		on := true
@@ -266,4 +275,41 @@ func Bootstrap(ctx context.Context, a *fw.Agent, goal, dir string, timeout time.
 		log.Warn("ax: bootstrap did not complete", "error", r.Error)
 		return fmt.Errorf("ax: bootstrap run %s ended %s: %s", r.ID, r.State, r.Error)
 	}
+}
+
+// OpenRoot makes the root directory searchable for every user, when a
+// tool user is in effect and fw runs as root. Agent Substrate gives the
+// root directory the mode 0700 at every boot
+// (agent-substrate/substrate#2035), and then the tool user reaches no
+// workspace, so the start stops. Root owns the root directory, so the
+// change needs no capability. Without a tool user, nothing changes. A
+// failure leaves the check of the tool user to stop the start with the
+// reason.
+func OpenRoot(cfg *fw.Config, log *slog.Logger) {
+	u := strings.TrimSpace(cfg.Tools.User)
+	if u == "" || u == fw.ToolUserNone || os.Geteuid() != 0 {
+		return
+	}
+	if err := openDir("/", log); err != nil {
+		log.Warn("ax: the root directory stays closed to the tool user", "error", err)
+	}
+}
+
+// openDir gives p the read and search bits for the group and for other
+// users when other users cannot search it, and logs the change once.
+func openDir(p string, log *slog.Logger) error {
+	info, err := os.Stat(p)
+	if err != nil {
+		return err
+	}
+	perm := info.Mode().Perm()
+	if perm&0o001 != 0 {
+		return nil
+	}
+	mode := info.Mode()&(os.ModeSticky|os.ModeSetuid|os.ModeSetgid) | perm | 0o055
+	if err := os.Chmod(p, mode); err != nil {
+		return err
+	}
+	log.Info("ax: the root directory kept the tool user out, so fw opened it (agent-substrate/substrate#2035)", "path", p, "mode", fmt.Sprintf("%o", perm), "now", fmt.Sprintf("%o", mode.Perm()))
+	return nil
 }
