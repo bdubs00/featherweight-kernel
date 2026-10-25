@@ -973,7 +973,7 @@ The images create the user. `fw:static` has `nonroot`, uid and gid 65532, from i
 
 #### The home of the tool user and the root directory
 
-`tools.userHome`, `FW_TOOLS_USER_HOME` in the environment, names the home of the tool user: an absolute path. At the start, `fw` creates the directory and gives it to the tool user with the mode `0700`. A link or a file in its place goes first, because the tool user can put one there in an earlier start. The home must not overlap FW_HOME, the file ledger, or the configuration file, and it must not hold a directory that stays with `fw`. Each part of the kernel that starts a process as the tool user reads the user through `fw.ToolUserOf`. The shell, a stdio MCP server, and the managers of section 18 therefore get the same `HOME`. The hosted programs of section 19 keep their own home.
+`tools.userHome`, `FW_TOOLS_USER_HOME` in the environment, names the home of the tool user: an absolute path. At the start, `fw` creates the directory and gives it to the tool user with the mode `0700`. A link or a file in its place goes first, because the tool user can put one there in an earlier start. `fw` sets the mode first, while it owns the directory, and then changes the owner. Root changes the mode of a file of another user only with `CAP_FOWNER`, which `fw` does not need and a Task does not have. A home of the tool user with the mode `0700` stays as it is at the next start. The home must not overlap FW_HOME, the file ledger, or the configuration file, and it must not hold a directory that stays with `fw`. Each part of the kernel that starts a process as the tool user reads the user through `fw.ToolUserOf`. The shell, a stdio MCP server, and the managers of section 18 therefore get the same `HOME`. The hosted programs of section 19 keep their own home.
 
 Under ax, with a tool user, `tools.userHome` is `/workspace/.home` by default, on the durable volume beside FW_HOME. The home of the image loses each write at the next suspend. Agent Substrate also shows a file of the image as a file of root (agent-substrate/substrate#2036), so the tool user cannot write `/home/nonroot`.
 
@@ -1235,6 +1235,8 @@ The bus has no other contract. An earlier revision let a driver keep the last ev
 | `nats` | `github.com/nats-io/nats.go` with JetStream | Recommended. One binary gives streams, a key-value store, and an object store. |
 | `redis` | `github.com/redis/go-redis/v9` with Streams | Reuses the Redis that ax already deploys. No new infrastructure. |
 | `kafka` | `github.com/twmb/franz-go` | Not implemented yet (section 16). |
+
+A `nats` bus opens without its server, such as in a golden boot without network, and connects in the background. Until it connects, every publish fails at once with `nats: not connected yet`, on the stream path and on the core path. Before its first connection, the client of NATS refuses every message with headers, and the error then names the headers and not the cause. The caller therefore tries again later, as the egress (section 9.4) and the environment (section 18.6) do.
 
 ### 9.3 Intake
 
@@ -2393,6 +2395,7 @@ The package `env/pkglist` holds the checks of a list and of a mirror. It has no 
 | `<dir>/.fw-env.lock` | fw | The `flock(2)` lock of one installer |
 | `<dir>/.fw-env-local.json` | fw | The changes of the tool `env` to the lists (section 18.7) |
 | `<dir>/.fw-env-index.json` | fw | The mirror of each lock file that fw made for a list |
+| `<dir>/.fw-env-outbox.json`, `<dir>/.fw-env-outbox.lock` | fw | The events that the bus refused, and the lock of that file (section 18.6) |
 | `<dir>/src` | fw | The parent of the directories of the lists |
 | `<dir>/src/python`, `<dir>/src/tools` | tool user | The manifest of a list (`pyproject.toml`, `pixi.toml`), which fw writes, and its lock file, which the manager writes next to it |
 | `<dir>/venv` | tool user | The virtual environment: `UV_PROJECT_ENVIRONMENT` and `VIRTUAL_ENV` |
@@ -2451,6 +2454,15 @@ A tool process of a run waits until the environment is ready, bounded by the con
 ### 18.6 Events
 
 The events of the environment belong to the agent, not to a run. As with `fw.connection.connected` (section 7.11), the package publishes them on the bus, on the subject `fw.environment`, and logs each one. The subject of the event is empty, and `node` names the process. The ledger of the run that changed the environment records its call of the tool `env`.
+
+The bus can refuse an event. A golden boot has no network, and a Task that restores from that snapshot goes on as the same process. An event that the golden boot lost therefore never comes again by itself. A refused event waits in `<dir>/.fw-env-outbox.json`, and the service sends it for the life of the process:
+
+- `fw.env.ready` and `fw.env.failed` wait as a flag. A retry sends the state of that moment, so the newest state wins.
+- `fw.env.changed` waits as it is, in order, because the front writes each change into the configured lists. These events go before the state.
+- After a refusal, the service waits 1 second, and the pause doubles after each refusal in a row, up to 30 seconds. Otherwise it looks every 10 seconds, and at once after an install of the service.
+- The start event is a flag of the outbox too. Once the state is ready or failed, the service sends it. A retry that fails the same way sends nothing itself, so the start event carries that failure. An install that sends a newer state first clears the flag, so the front gets no copy.
+
+A process without the service, such as `fw run`, leaves a refused event to the next start. A file of the outbox that `fw` does not own counts as empty while a tool user exists.
 
 | Type | Data | When |
 |---|---|---|
