@@ -969,7 +969,7 @@ A tool process of a tool user runs with the uid and the gid of that user and wit
 
 A stdio MCP server of a tool user also gets the environment of a tool process and starts in the root of the workspace, so a server such as `server-filesystem` cannot read the state of `fw` either. Such a server gets no secret from the environment of `fw`. Give a credential to an MCP server over HTTP instead, through `auth.bearer` or `auth.oauth`: the kernel calls that server and keeps the credential. Without a tool user, a stdio server keeps the whole environment of `fw`, as before.
 
-The images create the user. `fw:static` has `nonroot`, uid and gid 65532, from its distroless base, and `Dockerfile.toolbox` creates the same user with the home `/home/nonroot`. The tool user cannot install packages: an agent that needs a toolchain gets it in an image built from `fw:toolbox`, and a bootstrap goal (section 11.3) cannot install system packages either.
+The images create the user. `fw:static` has `nonroot`, uid and gid 65532, from its distroless base, and `Dockerfile.toolbox` creates the same user with the home `/home/nonroot`. The tool user cannot install system packages, and a bootstrap goal (section 11.3) cannot install them either. An agent gets Python packages and programs of conda-forge through the block `environment` (section 18). A heavy toolchain goes into an image built from `fw:toolbox`.
 
 #### The home of fw and the workspace
 
@@ -1465,7 +1465,7 @@ ax starts `/usr/local/bin/ax-task-runner` as PID 1 in every Task container. The 
 
 `fw` implements the contract itself instead of embedding the ax `runner` package. The reason is port 80. The ax runner owns the port 80 mux, and `fw` needs that port for its own surfaces. The `ax` package defines the manifest types from the YAML schema of the ax repository. `fw` therefore parses the same YAML that the stock runner parses, without an import of the ax module. The container image contains a symlink from `/usr/local/bin/ax-task-runner` to `/usr/local/bin/fw`.
 
-Two images are built. `fw:static` is `gcr.io/distroless/static` plus the binary, for agents that only use HTTP, MCP, and A2A. `fw:toolbox` is a Debian slim image with `git`, `curl`, and common build tools, for coding agents that use `bash`. Both images run `fw` as root and hold the tool user `nonroot`, uid and gid 65532, which runs the processes of tools under ax (section 7.12). The stock ax runner image installs Python and the Antigravity agent. `fw` needs neither.
+Two images are built. `fw:static` is `gcr.io/distroless/static` plus the binary, for agents that only use HTTP, MCP, and A2A. `fw:toolbox` is a Debian slim image for coding agents that use `bash`. It holds `git`, `curl`, `python3`, network and file programs, and `uv` and `pixi` for the environments of section 18. Both images run `fw` as root. They hold the tool user `nonroot`, uid and gid 65532, which runs the processes of tools under ax (section 7.12). The stock ax runner image installs Python and the Antigravity agent. `fw` needs neither.
 
 ### 11.3 Boot sequence under ax
 
@@ -2204,7 +2204,7 @@ telemetry/              Prometheus registry, OpenTelemetry setup, slog
 examples/               fw.yaml, ax manifests, observability, prompts, skills
 docs/ARCHITECTURE.md    this document
 Dockerfile              fw:static on distroless
-Dockerfile.toolbox      fw:toolbox on Debian with git
+Dockerfile.toolbox      fw:toolbox on Debian with git, python3, uv, and pixi
 ```
 
 The workbench architecture, section 1.3, gives the layout of the workbench.
@@ -2312,9 +2312,9 @@ The safeguards revision of 2026-10-13 came on top of the milestones. It added th
 
 ax builds every actor template with the snapshot fidelity `VOLUMES`. At every resume, Agent Substrate cold-boots the container from its image and restores `/workspace` only. A `pip install` or an `apt-get install` of a run goes to the root file system of the sandbox, and the next suspend loses it. A run that needs a package therefore installs it again after each wake, and it spends its calls to find out what the Task holds.
 
-The package `env` puts the packages on the durable volume instead. The block `environment` of `fw.yaml` names the manifests of two managers that need no root: `uv` for Python, with its own interpreters, and `pixi` for everything else from conda-forge, such as Node, git, compilers, Ansible, and PostgreSQL. Each manifest has a lock file next to it. The kernel adds what the managers do not know: the durable placement, the lock enforcement, the install in the background, the variables of every tool process, the brief in the system prompt, the tool `env`, the Dockerfile, and the events.
+The package `env` puts the packages on the durable volume instead. The block `environment` of `fw.yaml` names the packages of two managers that need no root: `uv` for Python, and `pixi` for everything else from conda-forge, such as Node, git, compilers, Ansible, and PostgreSQL. For each manager, the block names a manifest with a lock file next to it, or a plain list of packages. With a list, the kernel writes the manifest and the lock file itself. The kernel adds what the managers do not know. It gives the durable placement, the lock enforcement, and the install in the background. It also gives the variables of every tool process, the brief in the system prompt, the tool `env`, the Dockerfile, and the events.
 
-`uv` and `pixi` are single static binaries. The kernel never downloads them: the image must carry both on PATH. `fw:toolbox` does not carry them yet; build an image `FROM` it with both, as the first `RUN` of `fw env dockerfile` does (section 18.10). `fw doctor` says when one is missing.
+`uv` and `pixi` are single static binaries. The kernel never downloads them: the image must carry both on PATH. `fw:toolbox` carries uv 0.13.1 and pixi 0.82.0 from the same step as `fw env dockerfile` (section 18.10), and `python3` for uv. If one is missing, `fw doctor` says so.
 
 The package registers itself through the seams of section 12.6: `fw.RegisterExtension` for the block, `fw.RegisterService` for the install, `fw.RegisterTool` for the tool, `fw.RegisterToolEnv` for the variables, `fw.RegisterPromptSection` for the brief, `cli.RegisterDoctorCheck` for its line of `fw doctor`, and `fw.RegisterDefaults` for the tool list and the policy. The default binary links it. A lean build links it with the tag `env`, for example `-tags lean,nats,openai,env`.
 
@@ -2332,6 +2332,18 @@ environment:
   brief: true                      # the Environment section of the system prompt
 ```
 
+A list takes the place of a manifest, and mirrors name the package index of each manager:
+
+```yaml
+environment:
+  packages:
+    python: [ansible-lint, "pyyaml>=6"]   # requirements for uv, in place of python
+    tools: ["nodejs>=22", jq]              # packages of conda-forge for pixi, in place of tools
+  mirrors:
+    python: http://pkg-cache.fw-fleet.svc.cluster.local:8080/pypi/simple
+    tools: http://pkg-cache.fw-fleet.svc.cluster.local:8080/conda-forge
+```
+
 | Key | Default | Meaning |
 |---|---|---|
 | `dir` | `/workspace/.environment` when `/workspace` exists, else `.environment` in the root of the workspace; `/opt/environment` with `placement: image` | The directory of the environment |
@@ -2341,6 +2353,12 @@ environment:
 | `prepare` | none | Shell commands (`/bin/sh -c`) that run in the root of the workspace after the install |
 | `placement` | `durable` | `durable` installs under `dir` at run time. `image` says that the image holds the environment at `dir`, built from `fw env dockerfile`; the kernel installs nothing then. |
 | `brief` | `true` | `false` leaves the Environment section out of the system prompt |
+| `packages.python` | none | A list of requirements for uv, such as `pyyaml>=6`, in place of `python`. The kernel writes the manifest and the lock file under `dir` (section 18.4). |
+| `packages.tools` | none | A list of packages of conda-forge for pixi, in place of `tools`. An item is a name, with an optional version and build, such as `nodejs>=22` or `nodejs 22.*`. |
+| `mirrors.python` | none | The index of uv and pip, such as a cache in the cluster. Every tool process and every install gets it (section 18.5). |
+| `mirrors.tools` | none | The mirror of `https://conda.anaconda.org/conda-forge` in the configuration of pixi |
+
+A list suits a pool of several Tasks. The configuration holds the list, so every worker gets the same packages, and nobody writes a manifest or a lock file. An empty list is valid. The tool `env` can then add a package, and the state is ready with no package and no network.
 
 The decision for `/workspace` is the one of `fw.DefaultHome`. A relative path is relative to the root of the workspace (`tools.files.root`). Another key in the block is an error, as everywhere in `fw.yaml`. The start stops when the block does not fit:
 
@@ -2348,6 +2366,12 @@ The decision for `/workspace` is the one of `fw.DefaultHome`. A relative path is
 - They must not hold the root of the workspace, and with `tools.files.perRun` they must not be under the directories of the runs, which move with each run.
 - Under ax, a durable `dir` must be under `/workspace`, because every suspend loses the rest.
 - With `placement: image`, `dir` must not be under `/workspace`, because the volume of the Task hides the image there.
+- `packages.python` and `python` cannot both exist. The same holds for `packages.tools` and `tools`.
+- A requirement must not start with a dash, hold a control character, or hold more than 200 characters. A list holds 100 items at most.
+- A mirror is an `http` or `https` URL with a host. It must not hold a user, a password, a query, or a fragment, because every tool process can read it.
+- A list needs `placement: durable`. An image needs a manifest with its lock file.
+
+The package `env/pkglist` holds the checks of a list and of a mirror. It has no `init` function, so the workbench can import it and check a list before it writes the list into a pool.
 
 `placement: image` is the target for a heavy environment, such as PyTorch. A durable volume ships at every suspend and comes back at every resume. The lab measured 0.13 to 0.2 seconds for a small workspace; a 2 GiB environment on `/workspace` changes that cost. Measure on the homelab before you choose: the time of `uv sync` for `torch` from the CPU index with a cold and a warm cache, the size of the volume after it, and the suspend and resume time of the Task with that volume.
 
@@ -2359,6 +2383,10 @@ The decision for `/workspace` is the one of `fw.DefaultHome`. A relative path is
 | `<dir>/.fw-env.json` | fw | The marker of a ready environment |
 | `<dir>/.fw-env-failed.json` | fw | The last failure |
 | `<dir>/.fw-env.lock` | fw | The `flock(2)` lock of one installer |
+| `<dir>/.fw-env-local.json` | fw | The changes of the tool `env` to the lists (section 18.7) |
+| `<dir>/.fw-env-index.json` | fw | The mirror of each lock file that fw made for a list |
+| `<dir>/src` | fw | The parent of the directories of the lists |
+| `<dir>/src/python`, `<dir>/src/tools` | tool user | The manifest of a list (`pyproject.toml`, `pixi.toml`), which fw writes, and its lock file, which the manager writes next to it |
 | `<dir>/venv` | tool user | The virtual environment: `UV_PROJECT_ENVIRONMENT` and `VIRTUAL_ENV` |
 | `<dir>/python` | tool user | The interpreters of uv: `UV_PYTHON_INSTALL_DIR` |
 | `<dir>/bin` | tool user | The links to those interpreters and the programs of `uv tool install`: `UV_PYTHON_BIN_DIR`, `UV_TOOL_BIN_DIR` |
@@ -2377,9 +2405,17 @@ The install runs these commands, each as the tool user, with the environment of 
 2. `pixi install --frozen --manifest-path <tools>`, then `pixi info --json` for the directory of the environment and `pixi list --json --frozen` for the versions.
 3. Each `prepare` command, with `/bin/sh -c`, in the root of the workspace, with the programs of steps 1 and 2 on PATH.
 
-The marker records the digest: the sha256 of the manifests, the lock files, and the prepare commands, with a label for each part. Another file does not count. A new digest, such as a lock file from a new revision of a pool, installs again, and the caches make it incremental. The marker also holds the versions, the directory of the pixi environment, and the time that the install took. An environment counts as ready when the marker holds the digest of the files now and its virtual environment and its pixi environment exist.
+For a list, steps 1 and 2 write the manifest first and lock it. Each manifest holds the effective list (section 18.7) in sorted order:
 
-The service of the package starts the install in the background when `fw serve` builds the agent, after the kernel starts, and never delays `/readyz`. A failure records the step, the error, and the last 4 KB of the output of the manager, and the next try comes after 5 seconds, doubling up to 5 minutes. A golden boot has no network, so its first try fails; the next tries succeed once the egress policy lands. A failure that an earlier process recorded is due at once, so the cold boot after a resume tries without waiting. The service ends when the environment is ready. The output in a failure loses every secret of the process (section 4.2) and the password of every URL, such as the token of a private index. While the install runs, the process holds its status at not idle (`fw.Agent.Hold`), so the front does not suspend the Task in the middle of a download.
+1. For Python, fw runs `python3 --version` with the `python3` of its own PATH, which is the Python of the image. It writes `<dir>/src/python/pyproject.toml` with `requires-python` set to the minor version of that Python, such as `==3.11.*`. Then it runs `uv lock` and `uv sync --locked --no-install-project`, both with `--project <dir>/src/python --python <python3>`. `UV_PYTHON_DOWNLOADS=never` keeps uv from a download of an interpreter, so a list needs no host for interpreters. Without a mirror, the install sets `UV_DEFAULT_INDEX` to `https://pypi.org/simple`.
+2. For tools, fw writes `<dir>/src/tools/pixi.toml` with the channel `conda-forge` and the platform of the machine, such as `linux-64`. Then it runs `pixi lock` and `pixi install --locked`, both with `--manifest-path <dir>/src/tools/pixi.toml`. pixi runs no link script of a package.
+3. An empty list runs no manager and needs no network. It removes the environment of an earlier list.
+
+The lock file of a list stays between two installs, so a change of one package keeps the versions of the others. uv.lock holds the absolute URL of the index for each file. When the mirror of a manager changes or goes away, the install removes the lock file first and locks again from scratch. `<dir>/.fw-env-index.json` records the mirror of each lock file. If the digest of a list is ready, a cold boot does not lock it again, because the marker matches.
+
+The marker records the digest: the sha256 of the manifests, the lock files, and the prepare commands, with a label for each part. Another file does not count. For a list, the digest covers the effective list in sorted order, the mirrors, and the prepare commands. It does not cover the manifest and the lock file that the kernel writes. A block without lists and mirrors keeps the digest of the files alone. A new digest, such as a lock file from a new revision of a pool, installs again, and the caches make it incremental. The marker also holds the versions, the directory of the pixi environment, and the time that the install took. A Python package that a list names is explicit (`is_explicit`) in the marker. A ready environment has a marker with the digest of now, a virtual environment, and a pixi environment.
+
+`fw serve` builds the agent, the kernel starts, and then the service of the package starts the install in the background. It never delays `/readyz`. A failure records the step, the error, and the last 4 KB of the output of the manager. The next try comes after 5 seconds, and the pause doubles up to 5 minutes. A golden boot has no network, so its first try fails. The next tries succeed once the egress policy lands. A failure that an earlier process recorded is due at once, so the cold boot after a resume tries without waiting. At its start, the service sends the state that it finds once: `fw.env.ready` with the marker, or `fw.env.failed` with the failure. A Task that is ready at boot therefore says so, and the front can keep one event for each Task. After that, a retry that fails with the same error sends nothing. With `placement: image`, the service installs nothing and sends the state of the image. After a ready environment, the service ends. The output in a failure loses every secret of the process (section 4.2). It also loses the password of every URL, such as the token of a private index. During the install, the process holds its status at not idle (`fw.Agent.Hold`). The front therefore does not suspend the Task in the middle of a download.
 
 A verb that starts no service, such as `fw run`, installs the environment in the first tool process of a run. A laptop therefore tests a profile with the packages of its Task before the Task exists: `fw run` and `fw serve` outside ax install the same environment under `./.environment`. The time limit of the tool call (`tools.limits.timeout`, 10 minutes) bounds that install. A cut install goes on from the cache at the next try.
 
@@ -2392,6 +2428,9 @@ One lock file per environment keeps one installer at a time, across processes to
 - `PATH` with these directories in front, in order: `<dir>/venv/bin`, the `bin` directory of the pixi environment, `<dir>/bin`, and `<dir>/pixi/bin`.
 - `VIRTUAL_ENV` and `UV_PROJECT_ENVIRONMENT` (with `python`), `CONDA_PREFIX` (with `tools`), `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_PYTHON_BIN_DIR`, `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`, `PIXI_HOME`, and `PIXI_CACHE_DIR`.
 - `UV_LINK_MODE=copy` when `dir` and `cache` are on two file systems (the device numbers differ), because uv links the files of a package from its cache by default.
+- With `mirrors.python`, `UV_DEFAULT_INDEX` and `PIP_INDEX_URL` with the URL of the mirror. pip ignores an index on plain http unless it trusts the host. An `http` mirror therefore also gives `PIP_TRUSTED_HOST` with the host of the URL, without the port. uv needs no such variable for plain http.
+
+`mirrors.tools` is part of the file `config.toml` under `PIXI_HOME`, which every pixi process reads. A Python list without a package has no virtual environment, so `VIRTUAL_ENV` and `UV_PROJECT_ENVIRONMENT` stay out.
 
 A tool process of a run waits until the environment is ready, bounded by the context of its call. When the install of the current digest failed and its next try is not due, the process does not start, and the call returns an error that names the step, the error, the time of the next try, and the end of the output of the manager. A run therefore reports a broken environment instead of guessing. For a stdio MCP server, the error makes the listing of its tools fail, and the run goes on without them. A tool process outside a run, such as the listing of `fw tools`, gets the variables and waits for nothing.
 
@@ -2403,11 +2442,11 @@ The events of the environment belong to the agent, not to a run. As with `fw.con
 
 | Type | Data | When |
 |---|---|---|
-| `fw.env.ready` | the marker: `digest`, `placement`, `ready`, `seconds`, `uv`, `pixi`, `python` (`manifest`, `version`, `env`, `packages`), `tools` (`manifest`, `prefix`, `packages`), `prepare` | an install succeeded |
-| `fw.env.failed` | `digest`, `time`, `step`, `error`, `output`, `attempt`, `retryAt` | an install failed; a retry that fails with the same error records no new event |
-| `fw.env.changed` | `digest`, `previous`, `manager`, `command`, `package`, `run`, `agent` | the tool `env` changed a manifest and installed the result |
+| `fw.env.ready` | the marker: `digest`, `placement`, `ready`, `seconds`, `uv`, `pixi`, `python`, `tools`, `prepare` | an install succeeded, or the service found a ready environment at its start |
+| `fw.env.failed` | `digest`, `time`, `step`, `error`, `output`, `attempt`, `retryAt` | an install failed, or the service found a failure at its start. A retry that fails with the same error records no new event. |
+| `fw.env.changed` | `digest`, `previous`, `manager`, `command`, `package`, `run`, `agent` | the tool `env` changed a manifest or a list and installed the result |
 
-Each package is `name`, `version`, and `is_explicit`, the names of `uv pip list` and `pixi list`.
+In the marker, `python` holds `manifest`, `version`, `env`, and `packages`, and `tools` holds `manifest`, `prefix`, and `packages`. Each package is `name`, `version`, and `is_explicit`, the names of `uv pip list` and `pixi list`.
 
 ### 18.7 The tool `env`
 
@@ -2421,6 +2460,15 @@ The tool takes `command`: `list`, `add`, or `remove`. `add` and `remove` also ta
 | `remove` with `tools` | `pixi remove --no-install --manifest-path <tools> -- <package>` |
 
 The manager changes the manifest and the lock file. Then the tool installs the new digest under the lock of the environment and records `fw.env.changed`. A failure of the manager leaves the files as they were. With `placement: image`, `add` and `remove` refuse, because the next cold boot would lose the change: change the manifest and build the image again.
+
+With a list, `add` and `remove` change the list and not a manifest. The tool works under the lock of the environment:
+
+1. It makes the new list. An `add` takes the place of a requirement of the same package, so `pyyaml>=6` replaces `pyyaml`. A `remove` takes out every requirement of the package, and it fails for a package that the list does not hold. A list holds 100 packages at most.
+2. It writes the manifest of the new list and locks it, as `uv add --no-sync` does. If the lock fails, the list and the environment stay as they were, and the result holds the end of the output of the manager.
+3. It records the change in `<dir>/.fw-env-local.json`, installs the new list, and records `fw.env.changed`.
+4. If that install fails, the tool puts the previous list back and records no failure. A package that does not build therefore never leaves the agent without its environment.
+
+The effective list is the configured list with the changes of `<dir>/.fw-env-local.json`. The file names the digest of the configured lists. If the configured lists change, the file no longer counts, and the next install removes it. The front puts the approved changes into the configured lists of the pool, so the new configuration holds them already. The same effective list then gives the same digest, and the Task stays ready without an install.
 
 The policy of section 7.5 names a tool and a field of its input. `env` is one tool, and its field `command` names the action, so a rule names an action with the field form:
 
@@ -2438,6 +2486,8 @@ A dotted name such as `env.add` is a tool glob, and no tool has that name, so th
 
 The text changes only when the state changes: once from installing to ready, or to failed. The cached prefix of the prompt therefore stays valid between those changes. A name or a version with characters other than those of a package name stays out of the text, because the state files are on a volume that other processes can write.
 
+For a list, the section names the list in place of the manifest and the lock file. It names the Python packages that the list names, and not the packages that they bring. A list without a package gets one short line. The section says that a person allows each change. It also tells the model not to edit the files under `<dir>/src`, because fw writes them again. With a mirror, it says that the packages come from the mirror of the deployment, and that other registries can be out of reach.
+
 ### 18.9 `fw doctor`
 
 The line `environment` names:
@@ -2446,7 +2496,9 @@ The line `environment` names:
 - whether `uv` and `pixi` are on PATH, with their versions, for the managers that the block needs;
 - the hosts that the egress policy of the Task must let through, from the URLs in the lock files: `tls pypi.org` for an https host, which needs a rule with tls passthrough, and `http deb.debian.org` for a plain http host. Without a lock file it names the default registry: `pypi.org` and `files.pythonhosted.org` for uv, `conda.anaconda.org` for pixi. Without `python3` on PATH it adds `releases.astral.sh`, where uv downloads a Python. `download.pytorch.org` appears when the lock of uv uses the PyTorch index.
 
-The kernel cannot add an egress host. A person adds the hosts to the Task. A failed state or a missing manager fails the line.
+With a mirror, the host of the mirror is the egress need of its manager, with the port of the URL, such as `http pkg-cache.fw-fleet.svc.cluster.local:8080`. pixi takes every download of conda-forge from the mirror. uv takes every download of a list from the mirror too, because the kernel locks the list against the mirror. A manifest of uv keeps the hosts of its lock file, because `uv sync --frozen` downloads from those URLs. For a Python list, the line checks the `python3` of the image, and it never names `releases.astral.sh`.
+
+The kernel cannot add an egress host. A person adds the hosts to the Task. A failed state, a missing manager, or a missing `python3` for a Python list fails the line.
 
 ### 18.10 `fw env dockerfile`
 
@@ -2461,6 +2513,10 @@ The kernel cannot add an egress host. A person adds the hosts to the Task. A fai
 
 Steps 4 to 6 keep the caches in a BuildKit cache mount, so no cache lands in the image.
 
+`Dockerfile.toolbox` installs uv and pixi with the text of step 1, and a test of `env/dockerfile_test.go` compares the two. A new version therefore changes `env/dockerfile.go` first. The image also carries `python3` for the lists. It has the network programs `ss`, `ip`, `dig`, `ping`, and `nc`. It has the file programs `unzip`, `xz`, `less`, `file`, `lsof`, and `rsync`.
+
+`fw env dockerfile` refuses a block with lists, because an image needs a manifest with its lock file. The variables of a mirror stay out of the image. At run time, the kernel gives them to each tool process.
+
 A block with `placement: image` keeps its `dir`. A durable block gives `/opt/environment`, and the comment at the top of the file names the block that the image needs. The base image must have `/bin/sh`, `curl`, `tar`, and `sha256sum`, which `fw:toolbox` has. apt packages stay an image concern: add them to the file before the managers. When the workspace of the Task holds the manifests, `fw doctor` compares the digest of the marker in the image with the digest of those files, and fails when they differ.
 
 ### 18.11 What this is not
@@ -2473,6 +2529,9 @@ It is not a container inside the container: gVisor does not nest. It is not a ro
 - A tool process of the tool user can change the environment, as `pip install` into the virtual environment does. The marker then no longer describes it, until the next install of a new digest.
 - The time of a long install in `fw run` counts against the time limit of the first tool call of the run.
 - On a system without `flock(2)`, two processes can install one environment at the same time.
+- The manager of a list runs as the tool user and writes the lock file in a directory of the tool user. A tool process can therefore change the lock file of a list. The next install writes the manifest again, but it keeps the lock file.
+- A change of the tool `env` on a list stays on its Task. Another worker of the same pool gets it only after the front writes it into the configured lists.
+- `mirrors.python` changes the downloads of a manifest of uv only through its lock file, because `uv sync --frozen` downloads from the URLs of the lock file.
 - No measurement of a heavy environment exists yet. Section 18.2 names the three numbers to take on the homelab before a default moves between `durable` and `image`.
 
 ## 19. Hosted harnesses

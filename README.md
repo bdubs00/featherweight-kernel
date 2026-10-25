@@ -17,7 +17,7 @@ make build    # writes bin/fw
 make test     # runs every test with the race detector
 ```
 
-Container images: `make image` builds `fw:static` on distroless, and `make image-toolbox` builds `fw:toolbox` on Debian with git. Both contain the `ax-task-runner` symlink that ax expects.
+Container images: `make image` builds `fw:static` on distroless, and `make image-toolbox` builds `fw:toolbox` on Debian with git, python3, uv, and pixi. Both contain the `ax-task-runner` symlink that ax expects.
 
 Without a build tag the binary carries every driver. `TAGS=lean` builds the core alone, and each driver comes back with its own tag: `nats`, `redis`, `anthropic`, `openai`, `gemini`, `spiffe`, `oidc`, `metrics`, and `a2a`. A worker image for one fleet therefore builds with the drivers it uses, for example `make image-toolbox TAGS=lean,nats,openai,oidc`, at about half the size (docs/ARCHITECTURE.md section 15). The tag `memory_sqlite` adds the FTS5 index of the memory to either build.
 
