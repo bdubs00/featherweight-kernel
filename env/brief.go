@@ -3,9 +3,11 @@ package env
 import (
 	"fmt"
 	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/bdubs00/featherweight-kernel/ax"
+	"github.com/bdubs00/featherweight-kernel/env/pkglist"
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
@@ -68,20 +70,38 @@ func (s *spec) briefText(st state, canChange, inTask bool) string {
 		fmt.Fprintf(&b, "\nThe install of the environment failed at the step %s, and it tries again on its own. Until it succeeds, a shell command fails with the reason. If that blocks the task, say so in your answer.\n", safeWord(st.Failure.Step))
 	}
 	b.WriteString("\n")
+	pyList, toolsList := s.isInline(pkglist.Python), s.isInline(pkglist.Tools)
 	if s.python != "" {
-		fmt.Fprintf(&b, "- Python: the virtual environment %s, from %s and %s, with uv as the manager. VIRTUAL_ENV is set, and `python` and the programs of the packages are on PATH.", s.venv(), s.rel(s.python), s.rel(s.uvLock()))
+		switch {
+		case pyList && (m == nil || m.Python == nil) && st.Kind == StateReady:
+			b.WriteString("- Python: no Python packages yet, so there is no virtual environment. The `python3` of the image is on PATH.")
+		case pyList:
+			fmt.Fprintf(&b, "- Python: the virtual environment %s, with uv as the manager, from the list of Python packages of this agent. VIRTUAL_ENV is set, and `python` and the programs of the packages are on PATH.", s.venv())
+		default:
+			fmt.Fprintf(&b, "- Python: the virtual environment %s, from %s and %s, with uv as the manager. VIRTUAL_ENV is set, and `python` and the programs of the packages are on PATH.", s.venv(), s.rel(s.python), s.rel(s.uvLock()))
+		}
 		if m != nil && m.Python != nil {
 			if v := safeWord(m.Python.Version); v != "" {
 				fmt.Fprintf(&b, " Python %s.", v)
 			}
-			if list := packageList(m.Python.Packages, false, briefPackages); list != "" {
+			// For a list, the packages that the list names come first,
+			// because a library brings many packages that nobody asked
+			// for.
+			if list := packageList(m.Python.Packages, pyList, briefPackages); list != "" {
 				fmt.Fprintf(&b, " Packages: %s.", list)
 			}
 		}
 		b.WriteString("\n")
 	}
 	if s.tools != "" {
-		fmt.Fprintf(&b, "- Tools: programs and libraries from conda-forge, from %s and %s, with pixi as the manager. Their programs are on PATH.", s.rel(s.tools), s.rel(s.pixiLock()))
+		switch {
+		case toolsList && (m == nil || m.Tools == nil) && st.Kind == StateReady:
+			b.WriteString("- Tools: no programs from conda-forge yet.")
+		case toolsList:
+			b.WriteString("- Tools: programs and libraries from conda-forge, with pixi as the manager, from the list of programs of this agent. Their programs are on PATH.")
+		default:
+			fmt.Fprintf(&b, "- Tools: programs and libraries from conda-forge, from %s and %s, with pixi as the manager. Their programs are on PATH.", s.rel(s.tools), s.rel(s.pixiLock()))
+		}
 		if m != nil && m.Tools != nil {
 			if list := packageList(m.Tools.Packages, true, briefPackages); list != "" {
 				fmt.Fprintf(&b, " Packages: %s.", list)
@@ -93,11 +113,23 @@ func (s *spec) briefText(st state, canChange, inTask bool) string {
 		switch {
 		case s.placement == PlacementImage:
 			b.WriteString("- The packages are fixed in the image. If one is missing, say so in your answer.\n")
+		case canChange && s.inline != nil:
+			fmt.Fprintf(&b, "- To add or remove a package, call the tool env with the command add or remove and the manager python or tools. A person allows each change. The tool installs the change and keeps it after a suspend. Do not run pip install, uv pip install, or apt-get for a package that the task needs again later, and do not edit the files under %s, because fw writes them again.\n", filepath.Join(s.dir, "src"))
 		case canChange:
 			b.WriteString("- To add or remove a package, call the tool env with the command add or remove and the manager python or tools. It changes the manifest and the lock file and installs the change. Do not run pip install, uv pip install, or apt-get for a package that the task needs again later.\n")
 		default:
 			b.WriteString("- This agent cannot change its packages. If one is missing, say so in your answer.\n")
 		}
+	}
+	if s.mirrors != nil {
+		var parts []string
+		if s.mirrors[pkglist.Python] != "" {
+			parts = append(parts, "UV_DEFAULT_INDEX and PIP_INDEX_URL name it for Python")
+		}
+		if s.mirrors[pkglist.Tools] != "" {
+			parts = append(parts, "pixi uses it for conda-forge")
+		}
+		fmt.Fprintf(&b, "- Packages come from the mirror of this deployment: %s. Other package registries can be out of reach.\n", strings.Join(parts, ", and "))
 	}
 	if inTask {
 		b.WriteString("- A change outside /workspace is lost at the next suspend, and apt-get and sudo are not available to a run.\n")
@@ -106,13 +138,19 @@ func (s *spec) briefText(st state, canChange, inTask bool) string {
 	return strings.TrimSpace(b.String())
 }
 
-// manifests names the manifests for the model.
+// manifests names the manifests for the model, or the lists.
 func (s *spec) manifests() string {
 	var out []string
-	if s.python != "" {
+	switch {
+	case s.isInline(pkglist.Python):
+		out = append(out, "the list of Python packages")
+	case s.python != "":
 		out = append(out, s.rel(s.python))
 	}
-	if s.tools != "" {
+	switch {
+	case s.isInline(pkglist.Tools):
+		out = append(out, "the list of programs")
+	case s.tools != "":
 		out = append(out, s.rel(s.tools))
 	}
 	if len(out) == 0 {

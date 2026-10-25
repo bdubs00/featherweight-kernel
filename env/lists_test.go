@@ -379,3 +379,80 @@ func TestListMirrorChangeLocksAgain(t *testing.T) {
 		t.Fatalf("without a mirror, uv locks with the index %q", got)
 	}
 }
+
+// The section names the lists, the tool env, and the mirror, and it
+// says when a list has no package.
+func TestListSection(t *testing.T) {
+	f := newFixture(t, mirrorBlock)
+	a := f.agent()
+	pending := section(a, fw.AgentProfile{})
+	if !strings.Contains(pending, "being installed from the list of Python packages and the list of programs") {
+		t.Errorf("pending section:\n%s", pending)
+	}
+	if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	ready := section(a, fw.AgentProfile{Tools: []string{"bash", "env"}})
+	for _, want := range []string{
+		"from the list of Python packages of this agent",
+		"Packages: ansible-lint 1.0.0, pyyaml 1.0.0.",
+		"from the list of programs of this agent. Their programs are on PATH. Packages: jq 1.7.1.",
+		"A person allows each change.",
+		"do not edit the files under " + filepath.Join(f.s.dir, "src"),
+		"Packages come from the mirror of this deployment: UV_DEFAULT_INDEX and PIP_INDEX_URL name it for Python, and pixi uses it for conda-forge.",
+	} {
+		if !strings.Contains(ready, want) {
+			t.Errorf("ready section lacks %q:\n%s", want, ready)
+		}
+	}
+	if strings.Contains(ready, "pyproject.toml") || strings.Contains(ready, "uv.lock") {
+		t.Errorf("the section names a file that fw writes:\n%s", ready)
+	}
+	empty := newFixture(t, "packages:\n  python: []\n  tools: []\n")
+	if _, err := fw.ExtendToolEnv(empty.runCtx(), empty.cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	text := section(empty.agent(), fw.AgentProfile{})
+	if !strings.Contains(text, "no Python packages yet") || !strings.Contains(text, "no programs from conda-forge yet") || strings.Contains(text, "mirror") {
+		t.Errorf("empty section:\n%s", text)
+	}
+}
+
+// The doctor line names the mirror host as the egress need, checks the
+// python3 of the image for a Python list, and never names the host of the
+// Python downloads of uv for a list.
+func TestListDoctor(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, mirrorBlock)
+	ok, line := doctor(ctx, f.cfg, nil, time.Second)
+	for _, want := range []string{"uv 0.0.0-fake on PATH", "pixi 0.0.0-fake on PATH", "Python 3.12.7 on PATH", "the egress policy needs http mirror.test:8080"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line lacks %q: %s", want, line)
+		}
+	}
+	for _, not := range []string{"pypi.org", "conda.anaconda.org", pythonHost, "mirror.test:8080,"} {
+		if strings.Contains(line, not) {
+			t.Errorf("line names %q: %s", not, line)
+		}
+	}
+	if !ok {
+		t.Errorf("not ok: %s", line)
+	}
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
+	ok, line = doctor(ctx, f.cfg, nil, time.Second)
+	if ok || !strings.Contains(line, "python3 is not on PATH; the image must carry it for environment.packages.python") || strings.Contains(line, pythonHost) {
+		t.Errorf("no python3: %v %s", ok, line)
+	}
+	plain := newFixture(t, "packages:\n  python: [six]\n  tools: [jq]\n")
+	_, line = doctor(ctx, plain.cfg, nil, time.Second)
+	for _, want := range []string{"tls pypi.org", "tls files.pythonhosted.org", "tls conda.anaconda.org"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("without a mirror, the line lacks %q: %s", want, line)
+		}
+	}
+	file := newFixture(t, fullBlock+"mirrors:\n  python: https://mirror.test/simple\n")
+	_, line = doctor(ctx, file.cfg, nil, time.Second)
+	if !strings.Contains(line, "tls mirror.test") || !strings.Contains(line, "tls conda.anaconda.org") {
+		t.Errorf("a manifest with a mirror: %s", line)
+	}
+}

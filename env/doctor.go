@@ -3,6 +3,7 @@ package env
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bdubs00/featherweight-kernel/env/pkglist"
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
@@ -65,6 +67,16 @@ func doctor(ctx context.Context, cfg *fw.Config, _ fw.Secrets, timeout time.Dura
 			}
 			parts = append(parts, v+" on PATH")
 		}
+		if s.isInline(pkglist.Python) {
+			// uv downloads no interpreter for a list.
+			v, err := probe(ctx, "python3", timeout)
+			if err != nil {
+				ok = false
+				parts = append(parts, fmt.Sprintf("python3 is not on PATH; the image must carry it for %s.packages.python, because uv downloads no interpreter", Block))
+			} else {
+				parts = append(parts, v+" on PATH")
+			}
+		}
 		if hosts := s.hosts(); len(hosts) > 0 {
 			parts = append(parts, "the egress policy needs "+strings.Join(hosts, ", "))
 		}
@@ -113,17 +125,22 @@ func probe(ctx context.Context, name string, timeout time.Duration) (string, err
 	return firstLine(string(out)), nil
 }
 
-// hostRef matches the scheme and the host of a URL in a lock file.
-var hostRef = regexp.MustCompile(`\b(https?)://([A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9])`)
+// hostRef matches the scheme, the host, and the port of a URL in a lock
+// file.
+var hostRef = regexp.MustCompile(`\b(https?)://([A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9](?::[0-9]+)?)`)
 
 // pythonHost is where uv downloads a Python when the image has none.
 const pythonHost = "releases.astral.sh"
 
 // hosts lists the hosts that the lock files download from, as egress
 // rules name them: "tls <host>" for https, which needs a rule with tls
-// passthrough, and "http <host>" for plain http. Without a lock file it
-// names the default registry of the manager. Without python3 on PATH, uv
-// downloads a Python too.
+// passthrough, and "http <host>" for plain http, each with the port of
+// the URL when it names one. Without a lock file it names the default
+// registry of the manager. Without python3 on PATH, uv downloads a Python
+// for a manifest too. A mirror is the host of its manager. pixi takes
+// every download of conda-forge from the mirror, and so does uv for a
+// list, which the kernel locks against the mirror. A manifest of uv keeps
+// the URLs of its lock file, so those hosts stay in the list too.
 func (s *spec) hosts() []string {
 	seen := map[string]bool{}
 	add := func(rule string) {
@@ -145,13 +162,35 @@ func (s *spec) hosts() []string {
 			add(scheme + " " + strings.ToLower(string(m[2])))
 		}
 	}
+	mirror := func(manager string) bool {
+		m := s.mirrors[manager]
+		if m == "" {
+			return false
+		}
+		if u, err := url.Parse(m); err == nil {
+			scheme := "tls"
+			if u.Scheme == "http" {
+				scheme = "http"
+			}
+			add(scheme + " " + strings.ToLower(u.Host))
+		}
+		return true
+	}
 	if s.python != "" {
-		scan(s.uvLock(), "pypi.org", "files.pythonhosted.org")
-		if _, err := exec.LookPath("python3"); err != nil {
+		hasMirror := mirror(pkglist.Python)
+		switch {
+		case hasMirror && s.isInline(pkglist.Python):
+			// The kernel locks a list against the mirror.
+		case hasMirror:
+			scan(s.uvLock())
+		default:
+			scan(s.uvLock(), "pypi.org", "files.pythonhosted.org")
+		}
+		if _, err := exec.LookPath("python3"); err != nil && !s.isInline(pkglist.Python) {
 			add("tls " + pythonHost)
 		}
 	}
-	if s.tools != "" {
+	if s.tools != "" && !mirror(pkglist.Tools) {
 		scan(s.pixiLock(), "conda.anaconda.org")
 	}
 	out := make([]string, 0, len(seen))
