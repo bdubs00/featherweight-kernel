@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/env/pkglist"
@@ -225,21 +224,33 @@ func (s *spec) readOwned(path string, v any) bool {
 }
 
 // writeFile writes a state file through a temporary file and a rename, so
-// a reader never sees half of it.
+// a reader never sees half of it. The temporary file has a random name
+// and a new inode. The tool user can add entries to dir, and with a fixed
+// name, a link of that user can lead the write of fw elsewhere.
 func writeFile(path string, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp" + strconv.Itoa(os.Getpid())
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmp := f.Name()
+	_, err = f.Write(append(b, '\n'))
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
 		_ = os.Remove(tmp)
-		return err
 	}
-	return nil
+	return err
 }
 
 // removeFile removes a state file that can be absent.

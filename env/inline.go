@@ -1,6 +1,7 @@
 package env
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -341,36 +342,73 @@ func (s *spec) pixiConfig() string {
 	return b.String()
 }
 
-// writeText writes a file in a directory that the tool user can write.
-// It writes a new temporary file and renames it, so a link that the tool
-// user put in place of the file never leads the write of fw elsewhere.
-func writeText(path, text string) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+// inDir opens dir as an os.Root and returns the path of p in it. A path
+// of the root cannot lead out of dir, also through a link that the tool
+// user put in place of a directory below dir.
+func (s *spec) inDir(p string) (*os.Root, string, error) {
+	rel, err := filepath.Rel(s.dir, p)
+	if err != nil || !filepath.IsLocal(rel) {
+		return nil, "", fmt.Errorf("%s is not under %s", p, s.dir)
+	}
+	root, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return nil, "", err
+	}
+	return root, rel, nil
+}
+
+// writeText writes a file under dir, in a directory that the tool user
+// can write. It writes a new temporary file with a random name and
+// renames it, so a link that the tool user put in place of the file is
+// replaced and not followed, and a link in place of a directory cannot
+// lead the write out of dir (inDir).
+func (s *spec) writeText(path, text string) error {
+	root, rel, err := s.inDir(path)
 	if err != nil {
 		return err
 	}
-	tmp := f.Name()
+	defer root.Close()
+	tmp := filepath.Join(filepath.Dir(rel), "."+filepath.Base(rel)+".tmp"+randomSuffix())
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
 	_, err = f.WriteString(text)
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Chmod(tmp, 0o644)
-	}
-	if err == nil {
-		err = os.Rename(tmp, path)
+		err = root.Rename(tmp, rel)
 	}
 	if err != nil {
-		_ = os.Remove(tmp)
+		_ = root.Remove(tmp)
 	}
 	return err
 }
 
-// readBack returns the content of a file, or nil when it is absent, so a
-// failed lock can put the manifest back.
-func readBack(path string) []byte {
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
+// randomSuffix returns 16 random hex digits for the name of a temporary
+// file.
+func randomSuffix() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// readBack returns the content of a file under dir, or nil when it is
+// absent or leads out of dir, so a failed lock can put the manifest
+// back. The read never follows a link out of dir, so a link that the
+// tool user put in place of the manifest cannot copy a file of fw.
+func (s *spec) readBack(path string) []byte {
+	root, rel, err := s.inDir(path)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	b, err := root.ReadFile(rel)
+	if err != nil {
 		return nil
 	}
 	return b
@@ -378,11 +416,70 @@ func readBack(path string) []byte {
 
 // putBack writes the content that readBack returned, or removes the file
 // when it was absent.
-func putBack(path string, b []byte) error {
+func (s *spec) putBack(path string, b []byte) error {
 	if b == nil {
-		return removeFile(path)
+		root, rel, err := s.inDir(path)
+		if err != nil {
+			return err
+		}
+		defer root.Close()
+		if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
-	return writeText(path, string(b))
+	return s.writeText(path, string(b))
+}
+
+// claimDir makes rel, a directory under dir, a real directory of fw with
+// the mode 0755. A link or a file in its place goes first. With a tool
+// user, fw takes the directory back, because the walk of the workspace
+// at the start gives every file to the tool user.
+func (s *spec) claimDir(rel string) error {
+	root, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if info, err := root.Lstat(rel); err == nil && (info.Mode()&fs.ModeSymlink != 0 || !info.IsDir()) {
+		if err := root.Remove(rel); err != nil {
+			return err
+		}
+	}
+	if err := root.MkdirAll(rel, 0o755); err != nil {
+		return err
+	}
+	if s.user != nil && os.Geteuid() == 0 {
+		if err := root.Lchown(rel, os.Geteuid(), os.Getegid()); err != nil {
+			return err
+		}
+		if err := root.Chmod(rel, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// toolDir makes rel, a directory under dir, a real directory of the tool
+// user, for a manager. A link or a file in its place goes first.
+func (s *spec) toolDir(rel string) error {
+	root, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if info, err := root.Lstat(rel); err == nil && (info.Mode()&fs.ModeSymlink != 0 || !info.IsDir()) {
+		if err := root.Remove(rel); err != nil {
+			return err
+		}
+	}
+	if err := root.MkdirAll(rel, 0o755); err != nil {
+		return err
+	}
+	if s.user != nil && os.Geteuid() == 0 {
+		return root.Lchown(rel, int(s.user.UID), int(s.user.GID))
+	}
+	return nil
 }
 
 // writeLocal writes the file of the local changes.

@@ -16,7 +16,9 @@ import (
 // descriptor of this process, and it ends with the process. It reports
 // false when another holder has it.
 func tryLock(path string) (unlock func(), ok bool, err error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	// O_NOFOLLOW: the tool user can add entries to dir, and a link in
+	// place of the lock file must not lead fw to create a file elsewhere.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, false, err
 	}
@@ -36,7 +38,7 @@ func tryLock(path string) (unlock func(), ok bool, err error) {
 // locked reports whether another holder has the lock file at path. It
 // never creates the file.
 func locked(path string) bool {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return false
 	}

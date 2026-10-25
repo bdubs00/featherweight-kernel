@@ -357,7 +357,7 @@ func (in *installer) lockPython(ctx context.Context, env []string, list []string
 	if err := in.makeSrc(dir); err != nil {
 		return "", &stepError{step: "python", err: err}
 	}
-	if err := writeText(s.python, pyproject(list, minor)); err != nil {
+	if err := s.writeText(s.python, pyproject(list, minor)); err != nil {
 		return "", &stepError{step: "python", err: err}
 	}
 	if err := s.freshLock(pkglist.Python, s.uvLock()); err != nil {
@@ -446,7 +446,7 @@ func (in *installer) lockTools(ctx context.Context, env []string, list []string)
 	if err := in.makeSrc(dir); err != nil {
 		return &stepError{step: "tools", err: err}
 	}
-	if err := writeText(s.tools, text); err != nil {
+	if err := s.writeText(s.tools, text); err != nil {
 		return &stepError{step: "tools", err: err}
 	}
 	if err := s.freshLock(pkglist.Tools, s.pixiLock()); err != nil {
@@ -506,7 +506,7 @@ func (in *installer) lockList(ctx context.Context, manager string, list []string
 		return &stepError{step: "layout", err: err}
 	}
 	path := map[string]string{pkglist.Python: in.s.python, pkglist.Tools: in.s.tools}[manager]
-	old := readBack(path)
+	old := in.s.readBack(path)
 	env := in.env(ctx, in.s.readMarker())
 	var serr *stepError
 	if manager == pkglist.Python {
@@ -515,7 +515,7 @@ func (in *installer) lockList(ctx context.Context, manager string, list []string
 		serr = in.lockTools(ctx, env, list)
 	}
 	if serr != nil {
-		if err := putBack(path, old); err != nil {
+		if err := in.s.putBack(path, old); err != nil {
 			in.log.Warn("env: put the manifest back", "error", err)
 		}
 	}
@@ -523,12 +523,14 @@ func (in *installer) lockList(ctx context.Context, manager string, list []string
 }
 
 // makeSrc creates the directory of a manifest that fw writes, for the
-// tool user, because the manager writes the lock file next to it.
+// tool user, because the manager writes the lock file next to it. Its
+// parent <dir>/src belongs to fw, so the tool user cannot put a link in
+// place of the directory of a manifest.
 func (in *installer) makeSrc(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+	if err := in.s.claimDir("src"); err != nil {
+		return fmt.Errorf("the directory %s: %w", filepath.Dir(dir), err)
 	}
-	if err := in.s.own(dir); err != nil {
+	if err := in.s.toolDir(filepath.Join("src", filepath.Base(dir))); err != nil {
 		return fmt.Errorf("give %s to the tool user: %w", dir, err)
 	}
 	return nil
@@ -567,7 +569,7 @@ func (in *installer) layout() error {
 		}
 	}
 	if s.tools != "" || s.mirrors[pkglist.Tools] != "" {
-		if err := writeText(filepath.Join(s.pixiHome(), "config.toml"), s.pixiConfig()); err != nil {
+		if err := s.writeText(filepath.Join(s.pixiHome(), "config.toml"), s.pixiConfig()); err != nil {
 			return err
 		}
 	}
