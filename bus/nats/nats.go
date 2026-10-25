@@ -80,8 +80,8 @@ type Bus struct {
 }
 
 // errNotConnected means that the connection to the server is not up yet.
-// Consume and a stream publish fail with it at once, so a caller tries
-// again later instead of waiting for a request timeout.
+// Consume and every publish fail with it at once, so a caller tries again
+// later instead of waiting for a request timeout.
 var errNotConnected = errors.New("nats: not connected yet")
 
 // Open connects to NATS and makes sure the stream exists.
@@ -256,6 +256,13 @@ func (b *Bus) Publish(ctx context.Context, subject string, e fw.Event) error {
 		m.Header.Set(headerRun, e.Subject)
 	}
 	if !b.captured(subject) {
+		if !b.nc.IsConnected() {
+			// Before its first connection, the client has no INFO of a
+			// server and refuses every header with
+			// nats.ErrHeadersNotSupported, which hides the cause. The
+			// caller tries again later, as after a stream publish.
+			return fmt.Errorf("nats: publish %s: %w", subject, errNotConnected)
+		}
 		if err := b.nc.PublishMsg(m); err != nil {
 			return fmt.Errorf("nats: publish %s: %w", subject, err)
 		}

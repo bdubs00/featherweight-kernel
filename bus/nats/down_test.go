@@ -53,6 +53,11 @@ func TestOpenWhileTheServerIsDown(t *testing.T) {
 		t.Fatalf("Consume with the server down = %v; want errNotConnected", err)
 	}
 	_ = b.Publish(ctx, "down.events.x", fw.Event{ID: "1", Type: "t"})
+	// A core publish with headers names the missing connection, and not
+	// the headers that a client without a server refuses.
+	if err := b.Publish(ctx, "down.notice", fw.Event{ID: "2", Type: "fw.env.ready"}); !errors.Is(err, errNotConnected) {
+		t.Fatalf("a core publish with the server down = %v; want errNotConnected", err)
+	}
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("Consume and Publish took %s with the server down", d)
 	}
@@ -88,5 +93,23 @@ func TestOpenWhileTheServerIsDown(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the consumer got nothing after the server came up")
+	}
+	// A core publish with headers goes through once the bus is up.
+	notices := make(chan fw.Event, 1)
+	stop3, err := b.Subscribe(ctx, "down.notice", func(e fw.Event) error { notices <- e; return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop3()
+	if err := b.Publish(ctx, "down.notice", fw.Event{ID: "4", Type: "fw.env.ready"}); err != nil {
+		t.Fatalf("a core publish after the server came up: %v", err)
+	}
+	select {
+	case e := <-notices:
+		if e.ID != "4" || e.Type != "fw.env.ready" {
+			t.Fatalf("got %+v", e)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the subscriber got nothing after the server came up")
 	}
 }
