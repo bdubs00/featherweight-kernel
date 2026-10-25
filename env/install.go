@@ -360,8 +360,14 @@ func (in *installer) lockPython(ctx context.Context, env []string, list []string
 	if err := writeText(s.python, pyproject(list, minor)); err != nil {
 		return "", &stepError{step: "python", err: err}
 	}
+	if err := s.freshLock(pkglist.Python, s.uvLock()); err != nil {
+		return "", &stepError{step: "python", err: err}
+	}
 	if out, err := in.run(ctx, env, dir, "uv", "lock", "--project", dir, "--python", python); err != nil {
 		return "", &stepError{step: "python", err: fmt.Errorf("uv lock: %w", err), output: out}
+	}
+	if err := s.recordLock(pkglist.Python); err != nil {
+		return "", &stepError{step: "python", err: err}
 	}
 	return python, nil
 }
@@ -443,8 +449,14 @@ func (in *installer) lockTools(ctx context.Context, env []string, list []string)
 	if err := writeText(s.tools, text); err != nil {
 		return &stepError{step: "tools", err: err}
 	}
+	if err := s.freshLock(pkglist.Tools, s.pixiLock()); err != nil {
+		return &stepError{step: "tools", err: err}
+	}
 	if out, err := in.run(ctx, env, dir, "pixi", "lock", "--manifest-path", s.tools); err != nil {
 		return &stepError{step: "tools", err: fmt.Errorf("pixi lock: %w", err), output: out}
+	}
+	if err := s.recordLock(pkglist.Tools); err != nil {
+		return &stepError{step: "tools", err: err}
 	}
 	return nil
 }

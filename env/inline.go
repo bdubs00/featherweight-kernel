@@ -30,6 +30,10 @@ import (
 // localFile is the name of the record of the changes of the tool env.
 const localFile = ".fw-env-local.json"
 
+// indexFile is the name of the record of the mirror of each lock file
+// that the kernel made.
+const indexFile = ".fw-env-index.json"
+
 // inlineName is the name of the project in the manifests that the kernel
 // writes. pixi names the directory of the environment after it.
 const inlineName = "fw-environment"
@@ -71,6 +75,38 @@ func (s *spec) isInline(manager string) bool {
 
 func (s *spec) srcDir(manager string) string { return filepath.Join(s.dir, "src", manager) }
 func (s *spec) localPath() string            { return filepath.Join(s.dir, localFile) }
+func (s *spec) indexPath() string            { return filepath.Join(s.dir, indexFile) }
+
+// mirrorKey names the index of manager in the record of the lock files.
+func (s *spec) mirrorKey(manager string) string {
+	if m := s.mirrors[manager]; m != "" {
+		return m
+	}
+	return "default"
+}
+
+// freshLock removes the lock file of manager when the kernel made it for
+// another mirror, or when no record names its mirror, so the manager
+// locks again from scratch. uv.lock holds the absolute URL of the mirror
+// for each file, and an old URL would lead the install to a host that the
+// Task cannot reach.
+func (s *spec) freshLock(manager, lock string) error {
+	var made map[string]string
+	if s.readOwned(s.indexPath(), &made) && made[manager] == s.mirrorKey(manager) {
+		return nil
+	}
+	return removeFile(lock)
+}
+
+// recordLock records the mirror of the lock file of manager.
+func (s *spec) recordLock(manager string) error {
+	made := map[string]string{}
+	if !s.readOwned(s.indexPath(), &made) || made == nil {
+		made = map[string]string{}
+	}
+	made[manager] = s.mirrorKey(manager)
+	return writeFile(s.indexPath(), made)
+}
 
 // listsDigest returns the sha256 of the configured lists, sorted, with a
 // label for each manager. The file of the local changes names it.

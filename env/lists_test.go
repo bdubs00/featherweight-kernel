@@ -117,12 +117,12 @@ func TestListInstall(t *testing.T) {
 		t.Errorf("config.toml:\n%s", got)
 	}
 	uvEnv := f.read(filepath.Join(f.logs, "uv-env"))
-	for _, want := range []string{"UV_DEFAULT_INDEX=http://mirror.test:8080/pypi/simple", "PIP_INDEX_URL=http://mirror.test:8080/pypi/simple", "PIP_TRUSTED_HOST=mirror.test:8080", "UV_PYTHON_DOWNLOADS=never", "UV_PROJECT_ENVIRONMENT=" + s.venv()} {
+	for _, want := range []string{"UV_DEFAULT_INDEX=http://mirror.test:8080/pypi/simple", "PIP_INDEX_URL=http://mirror.test:8080/pypi/simple", "PIP_TRUSTED_HOST=mirror.test", "UV_PYTHON_DOWNLOADS=never", "UV_PROJECT_ENVIRONMENT=" + s.venv()} {
 		if !strings.Contains(uvEnv, want+"\n") {
 			t.Errorf("uv lacks %s", want)
 		}
 	}
-	for name, want := range map[string]string{"UV_DEFAULT_INDEX": "http://mirror.test:8080/pypi/simple", "PIP_INDEX_URL": "http://mirror.test:8080/pypi/simple", "PIP_TRUSTED_HOST": "mirror.test:8080", "VIRTUAL_ENV": s.venv()} {
+	for name, want := range map[string]string{"UV_DEFAULT_INDEX": "http://mirror.test:8080/pypi/simple", "PIP_INDEX_URL": "http://mirror.test:8080/pypi/simple", "PIP_TRUSTED_HOST": "mirror.test", "VIRTUAL_ENV": s.venv()} {
 		if got := envValue(env, name); got != want {
 			t.Errorf("tool process %s = %q, want %q", name, got, want)
 		}
@@ -342,5 +342,40 @@ func TestStartAnnouncesFailure(t *testing.T) {
 	evs := f.settled()
 	if len(evs) != 1 || evs[0].Type != EvFailed || decode[Failure](t, evs[0]).Step != "python" {
 		t.Fatalf("events = %+v", evs)
+	}
+}
+
+// A change of a list locks again from the lock file that exists, and a
+// change of the mirrors removes the lock files first, because uv.lock
+// holds the URL of the mirror for each file.
+func TestListMirrorChangeLocksAgain(t *testing.T) {
+	f := newFixture(t, mirrorBlock)
+	install := func() {
+		t.Helper()
+		if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	install()
+	if f.count("uv.lock present") != 0 || f.count("pixi.lock present") != 0 {
+		t.Fatalf("calls = %v", f.calls())
+	}
+	f.reblock(strings.Replace(mirrorBlock, "[jq]", "[jq, nodejs>=22]", 1))
+	install()
+	if f.count("uv.lock present") != 1 || f.count("pixi.lock present") != 1 {
+		t.Fatalf("a new list did not keep the lock files: %v", f.calls())
+	}
+	f.reblock(strings.ReplaceAll(mirrorBlock, "mirror.test:8080", "cache.test:9090"))
+	install()
+	if f.count("uv.lock present") != 1 || f.count("pixi.lock present") != 1 {
+		t.Fatalf("a new mirror kept the lock files: %v", f.calls())
+	}
+	f.reblock("packages:\n  python: [\"pyyaml>=6\", ansible-lint]\n  tools: [jq]\n")
+	install()
+	if f.count("uv.lock present") != 1 || f.count("pixi.lock present") != 1 {
+		t.Fatalf("a removed mirror kept the lock files: %v", f.calls())
+	}
+	if got := envValue(strings.Split(f.read(filepath.Join(f.logs, "uv-env")), "\n"), "UV_DEFAULT_INDEX"); got != defaultIndex {
+		t.Fatalf("without a mirror, uv locks with the index %q", got)
 	}
 }

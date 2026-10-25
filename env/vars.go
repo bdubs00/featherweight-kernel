@@ -71,7 +71,7 @@ func (s *spec) vars(m *Marker) []string {
 	if m := s.mirrors[pkglist.Python]; m != "" {
 		out = append(out, "UV_DEFAULT_INDEX="+m, "PIP_INDEX_URL="+m)
 		if u, err := url.Parse(m); err == nil && u.Scheme == "http" {
-			out = append(out, "PIP_TRUSTED_HOST="+u.Host)
+			out = append(out, "PIP_TRUSTED_HOST="+u.Hostname())
 		}
 	}
 	if p := s.pixiPrefix(m); p != "" {

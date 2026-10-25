@@ -36,6 +36,7 @@ case "$1" in
 lock)
   project=""
   while [ $# -gt 0 ]; do [ "$1" = "--project" ] && project="$2"; shift; done
+  [ -f "$project/uv.lock" ] && echo "uv.lock present" >> "$log/calls"
   if grep -q '^  "nosuch' "$project/pyproject.toml"; then
     echo "error: No solution found when resolving dependencies: nosuch was not found in the package registry" >&2
     exit 1
@@ -100,6 +101,7 @@ prefix="$envs/$name-123/envs/default"
 case "$1" in
 --version) echo "pixi 0.0.0-fake" ;;
 lock)
+  [ -f "$(dirname "$manifest")/pixi.lock" ] && echo "pixi.lock present" >> "$log/calls"
   if grep -q '^"nosuch' "$manifest"; then
     echo "Error: cannot solve the request because of: No candidates were found for nosuch" >&2
     exit 1
