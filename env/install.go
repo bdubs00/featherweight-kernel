@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bdubs00/featherweight-kernel/env/pkglist"
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
@@ -60,6 +61,9 @@ type installer struct {
 	cfg *fw.Config
 	a   *fw.Agent
 	log *slog.Logger
+	// announced is true once the installer sent fw.env.ready or
+	// fw.env.failed. Only the goroutine of the installer reads it.
+	announced bool
 }
 
 func newInstaller(a *fw.Agent, cfg *fw.Config, s *spec) *installer {
@@ -152,7 +156,7 @@ func (in *installer) attempt(ctx context.Context) (bool, *Failure, error) {
 	if prev != nil && prev.Digest == digest && !in.due(prev) {
 		return true, nil, nil
 	}
-	f := in.install(ctx, digest, prev)
+	f := in.install(ctx, digest, prev, true)
 	return true, f, ctx.Err()
 }
 
@@ -189,10 +193,12 @@ func (in *installer) lock(ctx context.Context) (func(), error) {
 }
 
 // install installs the environment of digest and records the result: the
-// marker and fw.env.ready, or the failure and fw.env.failed. The caller
-// holds the lock. A canceled context records nothing, because the next
-// try goes on from the cache. It returns the failure, or nil.
-func (in *installer) install(ctx context.Context, digest string, prev *Failure) *Failure {
+// marker and fw.env.ready, or the failure and fw.env.failed. Without
+// record, a failure writes no file and sends no event, because the caller
+// puts the previous list back. The caller holds the lock. A canceled
+// context records nothing, because the next try goes on from the cache.
+// It returns the failure, or nil.
+func (in *installer) install(ctx context.Context, digest string, prev *Failure, record bool) *Failure {
 	start := time.Now()
 	if in.a != nil {
 		// The process is not idle while it installs, so the front does
@@ -217,6 +223,10 @@ func (in *installer) install(ctx context.Context, digest string, prev *Failure) 
 			f.Attempt = prev.Attempt + 1
 		}
 		f.RetryAt = f.Time.Add(backoff(f.Attempt))
+		if !record {
+			in.log.Info("a change of the environment failed to install", "digest", short(digest), "step", f.Step, "error", f.Error)
+			return f
+		}
 		if err := writeFile(in.s.failurePath(), f); err != nil {
 			in.log.Warn("env: write the failure", "error", err)
 		}
@@ -245,63 +255,40 @@ func (in *installer) materialize(ctx context.Context, digest string) (*Marker, *
 	if err := in.layout(); err != nil {
 		return nil, &stepError{step: "layout", err: err}
 	}
+	// A record of local changes for other configured lists goes, because
+	// the front put the approved changes into the configured lists.
+	if err := s.dropStaleLocal(); err != nil {
+		in.log.Warn("env: remove the stale local changes", "error", err)
+	}
 	m := &Marker{Digest: digest, Placement: s.placement, Prepare: len(s.prepare)}
 	env := in.env(ctx, nil)
 	if s.python != "" {
-		if err := present(s.python, s.uvLock(), "uv lock"); err != nil {
-			return nil, &stepError{step: "python", err: err}
+		var serr *stepError
+		if s.isInline(pkglist.Python) {
+			m.Python, serr = in.pythonList(ctx, env)
+		} else {
+			m.Python, serr = in.pythonFile(ctx, env)
 		}
-		dir := filepath.Dir(s.python)
-		if out, err := in.run(ctx, env, dir, "uv", "sync", "--frozen", "--no-install-project", "--project", dir); err != nil {
-			return nil, &stepError{step: "python", err: fmt.Errorf("uv sync --frozen: %w", err), output: out}
+		if serr != nil {
+			return nil, serr
 		}
-		py := &PythonInfo{Manifest: s.rel(s.python), Env: s.venv(), Version: pythonVersion(s.venv())}
-		out, err := in.output(ctx, env, dir, "uv", "pip", "list", "--format", "json", "--python", s.venv())
-		if err == nil {
-			err = json.Unmarshal(out, &py.Packages)
+		if m.Python != nil {
+			m.UV = in.version(ctx, env, "uv")
 		}
-		if err != nil {
-			return nil, &stepError{step: "python", err: fmt.Errorf("uv pip list: %w", err)}
-		}
-		m.Python = py
-		m.UV = in.version(ctx, env, "uv")
 	}
 	if s.tools != "" {
-		if err := present(s.tools, s.pixiLock(), "pixi lock"); err != nil {
-			return nil, &stepError{step: "tools", err: err}
+		var serr *stepError
+		if s.isInline(pkglist.Tools) {
+			m.Tools, serr = in.toolsList(ctx, env)
+		} else {
+			m.Tools, serr = in.toolsFile(ctx, env)
 		}
-		dir := filepath.Dir(s.tools)
-		if out, err := in.run(ctx, env, dir, "pixi", "install", "--frozen", "--manifest-path", s.tools); err != nil {
-			return nil, &stepError{step: "tools", err: fmt.Errorf("pixi install --frozen: %w", err), output: out}
+		if serr != nil {
+			return nil, serr
 		}
-		tools := &ToolsInfo{Manifest: s.rel(s.tools)}
-		var info struct {
-			Environments []struct {
-				Name   string `json:"name"`
-				Prefix string `json:"prefix"`
-			} `json:"environments_info"`
+		if m.Tools != nil {
+			m.Pixi = in.version(ctx, env, "pixi")
 		}
-		out, err := in.output(ctx, env, dir, "pixi", "info", "--json", "--manifest-path", s.tools)
-		if err == nil {
-			err = json.Unmarshal(out, &info)
-		}
-		if err != nil {
-			return nil, &stepError{step: "tools", err: fmt.Errorf("pixi info: %w", err)}
-		}
-		for _, e := range info.Environments {
-			if e.Name == "default" {
-				tools.Prefix = e.Prefix
-			}
-		}
-		out, err = in.output(ctx, env, dir, "pixi", "list", "--json", "--frozen", "--manifest-path", s.tools)
-		if err == nil {
-			err = json.Unmarshal(out, &tools.Packages)
-		}
-		if err != nil {
-			return nil, &stepError{step: "tools", err: fmt.Errorf("pixi list: %w", err)}
-		}
-		m.Tools = tools
-		m.Pixi = in.version(ctx, env, "pixi")
 	}
 	env = in.env(ctx, m)
 	for i, c := range s.prepare {
@@ -310,6 +297,229 @@ func (in *installer) materialize(ctx context.Context, digest string) (*Marker, *
 		}
 	}
 	return m, nil
+}
+
+// pythonFile installs the uv project of environment.python from its lock
+// file, as it is.
+func (in *installer) pythonFile(ctx context.Context, env []string) (*PythonInfo, *stepError) {
+	s := in.s
+	if err := present(s.python, s.uvLock(), "uv lock"); err != nil {
+		return nil, &stepError{step: "python", err: err}
+	}
+	dir := filepath.Dir(s.python)
+	if out, err := in.run(ctx, env, dir, "uv", "sync", "--frozen", "--no-install-project", "--project", dir); err != nil {
+		return nil, &stepError{step: "python", err: fmt.Errorf("uv sync --frozen: %w", err), output: out}
+	}
+	return in.pythonInfo(ctx, env, nil)
+}
+
+// pythonList writes the uv project of the list of environment.packages,
+// locks it, and installs the lock. An empty list removes the virtual
+// environment and needs no network.
+func (in *installer) pythonList(ctx context.Context, env []string) (*PythonInfo, *stepError) {
+	s := in.s
+	list := s.effective(pkglist.Python)
+	if len(list) == 0 {
+		if err := errors.Join(os.RemoveAll(s.venv()), os.RemoveAll(s.srcDir(pkglist.Python))); err != nil {
+			return nil, &stepError{step: "python", err: err}
+		}
+		return nil, nil
+	}
+	python, serr := in.lockPython(ctx, env, list)
+	if serr != nil {
+		return nil, serr
+	}
+	dir := s.srcDir(pkglist.Python)
+	if out, err := in.run(ctx, env, dir, "uv", "sync", "--locked", "--no-install-project", "--project", dir, "--python", python); err != nil {
+		return nil, &stepError{step: "python", err: fmt.Errorf("uv sync --locked: %w", err), output: out}
+	}
+	return in.pythonInfo(ctx, env, list)
+}
+
+// lockPython writes the manifest of list for the Python of the image and
+// locks it. It returns the path of that Python. uv downloads no
+// interpreter, so the image must carry python3.
+func (in *installer) lockPython(ctx context.Context, env []string, list []string) (string, *stepError) {
+	s := in.s
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		return "", &stepError{step: "python", err: fmt.Errorf("python3 is not on PATH; the image must carry it for %s.packages.python, because uv downloads no interpreter", Block)}
+	}
+	out, err := in.output(ctx, env, s.root, python, "--version")
+	if err != nil {
+		return "", &stepError{step: "python", err: fmt.Errorf("python3 --version: %w", err)}
+	}
+	minor, err := pythonMinor(string(out))
+	if err != nil {
+		return "", &stepError{step: "python", err: err}
+	}
+	dir := s.srcDir(pkglist.Python)
+	if err := in.makeSrc(dir); err != nil {
+		return "", &stepError{step: "python", err: err}
+	}
+	if err := writeText(s.python, pyproject(list, minor)); err != nil {
+		return "", &stepError{step: "python", err: err}
+	}
+	if out, err := in.run(ctx, env, dir, "uv", "lock", "--project", dir, "--python", python); err != nil {
+		return "", &stepError{step: "python", err: fmt.Errorf("uv lock: %w", err), output: out}
+	}
+	return python, nil
+}
+
+// pythonInfo reads the packages of the virtual environment. With a list,
+// a package that the list names is explicit.
+func (in *installer) pythonInfo(ctx context.Context, env []string, list []string) (*PythonInfo, *stepError) {
+	s := in.s
+	py := &PythonInfo{Manifest: s.rel(s.python), Env: s.venv(), Version: pythonVersion(s.venv())}
+	out, err := in.output(ctx, env, filepath.Dir(s.python), "uv", "pip", "list", "--format", "json", "--python", s.venv())
+	if err == nil {
+		err = json.Unmarshal(out, &py.Packages)
+	}
+	if err != nil {
+		return nil, &stepError{step: "python", err: fmt.Errorf("uv pip list: %w", err)}
+	}
+	if list != nil {
+		named := map[string]bool{}
+		for _, req := range list {
+			named[pkglist.Name(pkglist.Python, req)] = true
+		}
+		for i := range py.Packages {
+			py.Packages[i].Explicit = named[pkglist.Name(pkglist.Python, py.Packages[i].Name)]
+		}
+	}
+	return py, nil
+}
+
+// toolsFile installs the pixi manifest of environment.tools from its
+// lock file, as it is.
+func (in *installer) toolsFile(ctx context.Context, env []string) (*ToolsInfo, *stepError) {
+	s := in.s
+	if err := present(s.tools, s.pixiLock(), "pixi lock"); err != nil {
+		return nil, &stepError{step: "tools", err: err}
+	}
+	if out, err := in.run(ctx, env, filepath.Dir(s.tools), "pixi", "install", "--frozen", "--manifest-path", s.tools); err != nil {
+		return nil, &stepError{step: "tools", err: fmt.Errorf("pixi install --frozen: %w", err), output: out}
+	}
+	return in.toolsInfo(ctx, env)
+}
+
+// toolsList writes the pixi manifest of the list of environment.packages,
+// locks it, and installs the lock. An empty list removes the environment
+// and needs no network.
+func (in *installer) toolsList(ctx context.Context, env []string) (*ToolsInfo, *stepError) {
+	s := in.s
+	list := s.effective(pkglist.Tools)
+	if len(list) == 0 {
+		old, _ := filepath.Glob(filepath.Join(s.pixiEnvs(), inlineName+"-*"))
+		errs := []error{os.RemoveAll(s.srcDir(pkglist.Tools))}
+		for _, d := range old {
+			errs = append(errs, os.RemoveAll(d))
+		}
+		if err := errors.Join(errs...); err != nil {
+			return nil, &stepError{step: "tools", err: err}
+		}
+		return nil, nil
+	}
+	if serr := in.lockTools(ctx, env, list); serr != nil {
+		return nil, serr
+	}
+	if out, err := in.run(ctx, env, s.srcDir(pkglist.Tools), "pixi", "install", "--locked", "--manifest-path", s.tools); err != nil {
+		return nil, &stepError{step: "tools", err: fmt.Errorf("pixi install --locked: %w", err), output: out}
+	}
+	return in.toolsInfo(ctx, env)
+}
+
+// lockTools writes the manifest of list and locks it.
+func (in *installer) lockTools(ctx context.Context, env []string, list []string) *stepError {
+	s := in.s
+	text, err := pixiManifest(list)
+	if err != nil {
+		return &stepError{step: "tools", err: err}
+	}
+	dir := s.srcDir(pkglist.Tools)
+	if err := in.makeSrc(dir); err != nil {
+		return &stepError{step: "tools", err: err}
+	}
+	if err := writeText(s.tools, text); err != nil {
+		return &stepError{step: "tools", err: err}
+	}
+	if out, err := in.run(ctx, env, dir, "pixi", "lock", "--manifest-path", s.tools); err != nil {
+		return &stepError{step: "tools", err: fmt.Errorf("pixi lock: %w", err), output: out}
+	}
+	return nil
+}
+
+// toolsInfo reads the directory and the packages of the pixi environment.
+func (in *installer) toolsInfo(ctx context.Context, env []string) (*ToolsInfo, *stepError) {
+	s := in.s
+	dir := filepath.Dir(s.tools)
+	tools := &ToolsInfo{Manifest: s.rel(s.tools)}
+	var info struct {
+		Environments []struct {
+			Name   string `json:"name"`
+			Prefix string `json:"prefix"`
+		} `json:"environments_info"`
+	}
+	out, err := in.output(ctx, env, dir, "pixi", "info", "--json", "--manifest-path", s.tools)
+	if err == nil {
+		err = json.Unmarshal(out, &info)
+	}
+	if err != nil {
+		return nil, &stepError{step: "tools", err: fmt.Errorf("pixi info: %w", err)}
+	}
+	for _, e := range info.Environments {
+		if e.Name == "default" {
+			tools.Prefix = e.Prefix
+		}
+	}
+	out, err = in.output(ctx, env, dir, "pixi", "list", "--json", "--frozen", "--manifest-path", s.tools)
+	if err == nil {
+		err = json.Unmarshal(out, &tools.Packages)
+	}
+	if err != nil {
+		return nil, &stepError{step: "tools", err: fmt.Errorf("pixi list: %w", err)}
+	}
+	return tools, nil
+}
+
+// lockList writes the manifest of a new list of manager and locks it,
+// without an install, as uv add --no-sync and pixi add --no-install do.
+// When the lock fails, the manifest is as it was. An empty list locks
+// nothing.
+func (in *installer) lockList(ctx context.Context, manager string, list []string) *stepError {
+	if len(list) == 0 {
+		return nil
+	}
+	if err := in.layout(); err != nil {
+		return &stepError{step: "layout", err: err}
+	}
+	path := map[string]string{pkglist.Python: in.s.python, pkglist.Tools: in.s.tools}[manager]
+	old := readBack(path)
+	env := in.env(ctx, in.s.readMarker())
+	var serr *stepError
+	if manager == pkglist.Python {
+		_, serr = in.lockPython(ctx, env, list)
+	} else {
+		serr = in.lockTools(ctx, env, list)
+	}
+	if serr != nil {
+		if err := putBack(path, old); err != nil {
+			in.log.Warn("env: put the manifest back", "error", err)
+		}
+	}
+	return serr
+}
+
+// makeSrc creates the directory of a manifest that fw writes, for the
+// tool user, because the manager writes the lock file next to it.
+func (in *installer) makeSrc(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if err := in.s.own(dir); err != nil {
+		return fmt.Errorf("give %s to the tool user: %w", dir, err)
+	}
+	return nil
 }
 
 // present checks that a manifest and its lock file exist.
@@ -326,7 +536,8 @@ func present(manifest, lock, how string) error {
 // layout creates the directories of the environment: dir for fw, guarded
 // against the tool user, and the directories that the managers write for
 // the tool user. It also writes the configuration of pixi, which keeps
-// each environment under dir and not next to its manifest.
+// each environment under dir and not next to its manifest, and names the
+// mirror of conda-forge.
 func (in *installer) layout() error {
 	s := in.s
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
@@ -343,9 +554,8 @@ func (in *installer) layout() error {
 			return fmt.Errorf("give %s to the tool user: %w", d, err)
 		}
 	}
-	if s.tools != "" {
-		conf := fmt.Sprintf("# Written by fw (environment.tools). Each environment lives under %s.\ndetached-environments = %q\n", s.dir, s.pixiEnvs())
-		if err := os.WriteFile(filepath.Join(s.pixiHome(), "config.toml"), []byte(conf), 0o644); err != nil {
+	if s.tools != "" || s.mirrors[pkglist.Tools] != "" {
+		if err := writeText(filepath.Join(s.pixiHome(), "config.toml"), s.pixiConfig()); err != nil {
 			return err
 		}
 	}
@@ -359,8 +569,24 @@ func (in *installer) env(ctx context.Context, m *Marker) []string {
 	if in.a != nil && fw.AgentFrom(ctx) == nil {
 		ctx = fw.WithAgent(ctx, in.a)
 	}
-	env := in.s.apply(fw.ToolEnv(ctx, in.cfg, os.Environ(), nil), m)
-	return append(env, "UV_NO_PROGRESS=1", "PIXI_NO_PROGRESS=true", "PIXI_COLOR=never", "NO_COLOR=1")
+	s := in.s
+	env := s.apply(fw.ToolEnv(ctx, in.cfg, os.Environ(), nil), m)
+	env = append(env, "UV_NO_PROGRESS=1", "PIXI_NO_PROGRESS=true", "PIXI_COLOR=never", "NO_COLOR=1")
+	if s.python != "" && lookupEnv(env, "UV_PROJECT_ENVIRONMENT") == "" {
+		// A list that was empty has no virtual environment yet, and uv
+		// must create it at its place under dir.
+		env = append(env, "UV_PROJECT_ENVIRONMENT="+s.venv(), "VIRTUAL_ENV="+s.venv())
+	}
+	if s.isInline(pkglist.Python) {
+		// The Python of the image serves uv, so no install needs a host
+		// for interpreters. The index is always named, so uv locks again
+		// when the mirror changes or goes away.
+		env = append(env, "UV_PYTHON_DOWNLOADS=never")
+		if s.mirrors[pkglist.Python] == "" {
+			env = append(env, "UV_DEFAULT_INDEX="+defaultIndex)
+		}
+	}
+	return env
 }
 
 // command builds a manager process as the tool user.
@@ -462,12 +688,34 @@ func (in *installer) publish(typ string, data any) {
 	defer cancel()
 	if err := in.a.Bus().Publish(ctx, Subject, e); err != nil {
 		in.log.Warn("env: publish an event", "type", typ, "subject", Subject, "error", err)
+		return
+	}
+	if typ == EvReady || typ == EvFailed {
+		in.announced = true
+	}
+}
+
+// announce sends the state of the environment once, for the front, which
+// keeps the last event of each Task: fw.env.ready with the marker, or
+// fw.env.failed with the failure. A pending state sends nothing, because
+// its install sends the result.
+func (in *installer) announce(st state) {
+	if in.announced {
+		return
+	}
+	switch {
+	case st.Kind == StateReady && st.Marker != nil:
+		in.publish(EvReady, st.Marker)
+	case st.Kind == StateFailed && st.Failure != nil:
+		in.publish(EvFailed, st.Failure)
 	}
 }
 
 // serve installs the environment in the background until it is ready,
 // with a pause that doubles after each failure. It returns when the
-// environment is ready or ctx ends.
+// environment is ready or ctx ends. It sends the state that it finds
+// once, so a Task that is ready at its start says so too, and a retry
+// that fails the same way stays quiet after that.
 func (in *installer) serve(ctx context.Context) {
 	for first := true; ; first = false {
 		st := in.s.state()
@@ -478,8 +726,10 @@ func (in *installer) serve(ctx context.Context) {
 				// finds the environment ready logs here.
 				in.log.Info("the environment is ready", "digest", short(st.Digest), "dir", in.s.dir)
 			}
+			in.announce(st)
 			return
 		case StateFailed:
+			in.announce(st)
 			if !in.due(st.Failure) {
 				if !sleep(ctx, time.Until(st.Failure.RetryAt)) {
 					return

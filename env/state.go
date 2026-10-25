@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/bdubs00/featherweight-kernel/env/pkglist"
 )
 
 // States of an environment, as fw doctor and the tool env name them.
@@ -82,9 +84,13 @@ type state struct {
 	Failure *Failure // the failure of Digest, or nil
 }
 
-// digest returns the sha256 of the manifests, the lock files, and the
-// prepare commands. A missing file counts as missing, so the digest
-// changes when it appears.
+// digest returns the sha256 of the manifests, the lock files, the
+// mirrors, and the prepare commands. A missing file counts as missing, so
+// the digest changes when it appears. For a list of environment.packages,
+// the digest covers the effective list in sorted order and not the
+// manifest and the lock file that the kernel writes. A block without
+// lists and mirrors keeps the digest of the files alone, so an
+// environment of an older kernel stays ready.
 func (s *spec) digest() string {
 	h := sha256.New()
 	part := func(label string, b []byte) {
@@ -100,13 +106,27 @@ func (s *spec) digest() string {
 		}
 		part(label, b)
 	}
-	if s.python != "" {
+	if s.inline != nil {
+		part("lists", []byte("1"))
+	}
+	switch {
+	case s.isInline(pkglist.Python):
+		s.inlineDigest(part, pkglist.Python)
+	case s.python != "":
 		file("python manifest", s.python)
 		file("python lock", s.uvLock())
 	}
-	if s.tools != "" {
+	switch {
+	case s.isInline(pkglist.Tools):
+		s.inlineDigest(part, pkglist.Tools)
+	case s.tools != "":
 		file("tools manifest", s.tools)
 		file("tools lock", s.pixiLock())
+	}
+	for _, m := range []string{pkglist.Python, pkglist.Tools} {
+		if u := s.mirrors[m]; u != "" {
+			part(m+" mirror", []byte(u))
+		}
 	}
 	for _, p := range s.prepare {
 		part("prepare", []byte(p))
@@ -153,9 +173,10 @@ func (s *spec) state() state {
 }
 
 // intact reports whether the directories that a marker names still exist,
-// so a marker without its environment counts as not ready.
+// so a marker without its environment counts as not ready. A list without
+// a package has no environment, and its part of the marker is nil.
 func (s *spec) intact(m *Marker) bool {
-	if s.python != "" {
+	if s.python != "" && (m.Python != nil || !s.isInline(pkglist.Python)) {
 		if _, err := os.Stat(filepath.Join(s.venv(), "bin", "python")); err != nil {
 			return false
 		}

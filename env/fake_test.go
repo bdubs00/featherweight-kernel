@@ -23,18 +23,30 @@ import (
 // fakeUV is a stand-in for uv. It records each call and its environment
 // under the log directory. sync makes a virtual environment from the lines
 // "package <name> <version>" of uv.lock. A file named fail in the project
-// fails sync with a URL that holds a password. add and remove change the
-// manifest and the lock file.
+// fails sync with a URL that holds a password, and so does a lock file
+// with the package nobuild. lock writes uv.lock from the dependencies of
+// the manifest that fw writes, and fails for a package whose name starts
+// with nosuch. add and remove change the manifest and the lock file.
 const fakeUV = `#!/bin/sh
 log=@LOG@
 echo "uv $*" >> "$log/calls"
 env | sort > "$log/uv-env"
 case "$1" in
 --version) echo "uv 0.0.0-fake"; exit 0 ;;
+lock)
+  project=""
+  while [ $# -gt 0 ]; do [ "$1" = "--project" ] && project="$2"; shift; done
+  if grep -q '^  "nosuch' "$project/pyproject.toml"; then
+    echo "error: No solution found when resolving dependencies: nosuch was not found in the package registry" >&2
+    exit 1
+  fi
+  echo "version = 1" > "$project/uv.lock"
+  sed -n 's/^  "\([A-Za-z0-9._-]*\).*",$/package \1 1.0.0/p' "$project/pyproject.toml" >> "$project/uv.lock"
+  ;;
 sync)
   project=""
   while [ $# -gt 0 ]; do [ "$1" = "--project" ] && project="$2"; shift; done
-  if [ -f "$project/fail" ]; then
+  if [ -f "$project/fail" ] || grep -q '^package nobuild ' "$project/uv.lock"; then
     echo "error: Failed to fetch https://user:hunter2@index.example/simple/pyyaml" >&2
     exit 2
   fi
@@ -72,15 +84,28 @@ esac
 `
 
 // fakePixi is a stand-in for pixi. install makes an environment with a
-// program jq under the directory that PIXI_HOME/config.toml names.
+// program jq under the directory that PIXI_HOME/config.toml names, in a
+// directory named after the workspace. lock writes pixi.lock next to the
+// manifest, and fails for a package whose name starts with nosuch.
 const fakePixi = `#!/bin/sh
 log=@LOG@
 echo "pixi $*" >> "$log/calls"
 env | sort > "$log/pixi-env"
+manifest=""; prev=""
+for a in "$@"; do [ "$prev" = "--manifest-path" ] && manifest="$a"; prev="$a"; done
+name=example
+[ -n "$manifest" ] && [ -f "$manifest" ] && name=$(sed -n 's/^name = "\(.*\)"$/\1/p' "$manifest" | head -n 1)
 envs=$(sed -n 's/^detached-environments = "\(.*\)"$/\1/p' "$PIXI_HOME/config.toml")
-prefix="$envs/example-123/envs/default"
+prefix="$envs/$name-123/envs/default"
 case "$1" in
 --version) echo "pixi 0.0.0-fake" ;;
+lock)
+  if grep -q '^"nosuch' "$manifest"; then
+    echo "Error: cannot solve the request because of: No candidates were found for nosuch" >&2
+    exit 1
+  fi
+  grep '^"' "$manifest" > "$(dirname "$manifest")/pixi.lock"
+  ;;
 install)
   mkdir -p "$prefix/bin"
   printf '#!/bin/sh\necho jq-1.7.1\n' > "$prefix/bin/jq"
@@ -99,6 +124,13 @@ add|remove)
   ;;
 *) echo "fake pixi: unknown command $1" >&2; exit 64 ;;
 esac
+`
+
+// fakePython is a stand-in for the python3 of the image.
+const fakePython = `#!/bin/sh
+echo "python3 $*" >> @LOG@/calls
+[ "$1" = "--version" ] && echo "Python 3.12.7"
+exit 0
 `
 
 // fixture is a workspace with a block environment, fake managers first on
@@ -131,7 +163,7 @@ func newFixture(t *testing.T, block string) *fixture {
 			t.Fatal(err)
 		}
 	}
-	for name, text := range map[string]string{"uv": fakeUV, "pixi": fakePixi} {
+	for name, text := range map[string]string{"uv": fakeUV, "pixi": fakePixi, "python3": fakePython} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(strings.ReplaceAll(text, "@LOG@", f.logs)), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -157,6 +189,22 @@ func newFixture(t *testing.T, block string) *fixture {
 	// A block that does not load leaves s nil, for the tests of the checks.
 	f.s, _ = load(cfg)
 	return f
+}
+
+// reblock gives the fixture another block in the same workspace, as a
+// new revision of a pool does, and loads it.
+func (f *fixture) reblock(block string) {
+	f.t.Helper()
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(block), &doc); err != nil {
+		f.t.Fatal(err)
+	}
+	f.cfg.Extensions[Block] = *doc.Content[0]
+	s, err := load(f.cfg)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.s = s
 }
 
 // agent builds the agent of the fixture once and records the events of

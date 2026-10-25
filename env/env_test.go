@@ -366,9 +366,41 @@ func TestService(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// A start that finds the environment ready says so once.
+	if evs := f.events(1); len(evs) != 1 || evs[0].Type != EvReady {
+		t.Fatalf("events = %+v", evs)
+	}
+	f.a = nil
+	f.mu.Lock()
+	f.evs = nil
+	f.mu.Unlock()
+	again := f.agent()
+	c, err = Start(context.Background(), again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs := f.events(1); len(evs) != 1 || evs[0].Type != EvReady || decode[Marker](t, evs[0]).Digest != f.s.digest() {
+		t.Fatalf("a start that finds the environment ready: events = %+v", evs)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if f.count("uv sync") != 1 {
+		t.Fatal("a ready environment installed again at the start")
+	}
+	// With placement image, the start installs nothing and sends the
+	// state of the image.
 	g := newFixture(t, "placement: image\ndir: "+filepath.Join(t.TempDir(), "img")+"\npython: pyproject.toml\n")
-	if c, err := Start(context.Background(), g.agent()); c != nil || err != nil {
-		t.Fatalf("image Start = %v, %v", c, err)
+	c, err = Start(context.Background(), g.agent())
+	if err != nil {
+		t.Fatalf("image Start: %v", err)
+	}
+	if evs := g.events(1); len(evs) != 1 || evs[0].Type != EvFailed || !strings.Contains(decode[Failure](t, evs[0]).Error, "the image holds no environment") {
+		t.Fatalf("image events = %+v", evs)
+	}
+	_ = c.Close()
+	if g.count("uv") != 0 {
+		t.Fatal("an image installed")
 	}
 	bad := newFixture(t, "python: pyproject.toml\n")
 	bad.cfg.Extensions[Block].Content[1].Value = "setup.py"

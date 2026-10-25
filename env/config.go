@@ -237,6 +237,15 @@ func (s *spec) lists(c Config) error {
 			}
 			s.inline[l.manager] = list
 		}
+		// The kernel writes the manifest of a list under dir, and the
+		// rest of the package finds it where a manifest of the block
+		// would be.
+		if s.isInline(pkglist.Python) {
+			s.python = filepath.Join(s.srcDir(pkglist.Python), "pyproject.toml")
+		}
+		if s.isInline(pkglist.Tools) {
+			s.tools = filepath.Join(s.srcDir(pkglist.Tools), "pixi.toml")
+		}
 		if s.inline != nil && s.placement == PlacementImage {
 			return fmt.Errorf("env: %s.packages needs placement durable; for placement image, name a manifest with its lock file", Block)
 		}

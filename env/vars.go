@@ -1,9 +1,12 @@
 package env
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bdubs00/featherweight-kernel/env/pkglist"
 )
 
 // defaultPath is the PATH of a tool process that has none.
@@ -48,7 +51,9 @@ func (s *spec) paths(m *Marker) []string {
 // dir and cache. PIXI_HOME holds the configuration of pixi, which keeps
 // each environment under dir (detached-environments), and the programs of
 // pixi global. With dir and cache on two file systems, uv copies the files
-// of a package instead of linking them.
+// of a package instead of linking them. A mirror of Python is the index of
+// uv and pip. pip ignores an index on plain http unless it trusts the
+// host, so an http mirror also names its host in PIP_TRUSTED_HOST.
 func (s *spec) vars(m *Marker) []string {
 	out := []string{
 		"UV_CACHE_DIR=" + s.uvCache(),
@@ -59,8 +64,15 @@ func (s *spec) vars(m *Marker) []string {
 		"PIXI_HOME=" + s.pixiHome(),
 		"PIXI_CACHE_DIR=" + s.pixiCache(),
 	}
-	if s.python != "" {
+	if s.python != "" && (!s.isInline(pkglist.Python) || isDir(s.venv())) {
+		// A list without a package has no virtual environment.
 		out = append(out, "UV_PROJECT_ENVIRONMENT="+s.venv(), "VIRTUAL_ENV="+s.venv())
+	}
+	if m := s.mirrors[pkglist.Python]; m != "" {
+		out = append(out, "UV_DEFAULT_INDEX="+m, "PIP_INDEX_URL="+m)
+		if u, err := url.Parse(m); err == nil && u.Scheme == "http" {
+			out = append(out, "PIP_TRUSTED_HOST="+u.Host)
+		}
 	}
 	if p := s.pixiPrefix(m); p != "" {
 		out = append(out, "CONDA_PREFIX="+p)
@@ -99,4 +111,15 @@ func (s *spec) apply(env []string, m *Marker) []string {
 	front := strings.Join(s.paths(m), string(os.PathListSeparator))
 	out = append(out, "PATH="+front+string(os.PathListSeparator)+path)
 	return append(out, add...)
+}
+
+// lookupEnv returns the value of the last entry of name in env, or "".
+func lookupEnv(env []string, name string) string {
+	v := ""
+	for _, kv := range env {
+		if n, val, ok := strings.Cut(kv, "="); ok && n == name {
+			v = val
+		}
+	}
+	return v
 }

@@ -82,7 +82,7 @@ func TestToolRefusals(t *testing.T) {
 	f := newFixture(t, "python: pyproject.toml\n")
 	tl, _ := newTool(f.cfg)
 	ctx := f.runCtx()
-	if res := callTool(t, ctx, tl, `{"command":"add","manager":"tools","package":"jq"}`); !res.IsError || !strings.Contains(fw.TextOf(res.Content), "no tools manifest") {
+	if res := callTool(t, ctx, tl, `{"command":"add","manager":"tools","package":"jq"}`); !res.IsError || !strings.Contains(fw.TextOf(res.Content), "has no tools packages") {
 		t.Fatalf("res = %+v", res)
 	}
 	f.write("fail", "")

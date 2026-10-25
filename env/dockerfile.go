@@ -50,6 +50,9 @@ func writeDockerfile(cfg *fw.Config, from string, w io.Writer) error {
 	if s == nil {
 		return errors.New("env: the configuration has no block environment")
 	}
+	if s.inline != nil {
+		return fmt.Errorf("env: fw env dockerfile needs a manifest with its lock file for each manager; %s.packages names the packages in a list, which an image does not take", Block)
+	}
 	text, err := s.dockerfile(from)
 	if err != nil {
 		return err
@@ -110,7 +113,11 @@ func (s *spec) dockerfile(from string) (string, error) {
 	var vars []string
 	for _, kv := range img.vars(nil) {
 		name, _, _ := strings.Cut(kv, "=")
-		if name != "UV_LINK_MODE" && name != "UV_CACHE_DIR" && name != "PIXI_CACHE_DIR" {
+		switch name {
+		case "UV_LINK_MODE", "UV_CACHE_DIR", "PIXI_CACHE_DIR", "UV_DEFAULT_INDEX", "PIP_INDEX_URL", "PIP_TRUSTED_HOST":
+			// The kernel gives a tool process the cache and the mirror
+			// of the configuration at run time.
+		default:
 			vars = append(vars, kv)
 		}
 	}

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
-	"unicode"
+	"time"
 
+	"github.com/bdubs00/featherweight-kernel/env/pkglist"
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
@@ -26,7 +28,7 @@ const toolSchema = `{
     "command": {
       "type": "string",
       "enum": ["list", "add", "remove"],
-      "description": "list shows the state, the paths, and the packages of the environment. add installs a package and records it in the manifest and the lock file. remove takes it out again."
+      "description": "list shows the state, the paths, and the packages of the environment. add installs a package and records it in the environment. remove takes it out again."
     },
     "manager": {
       "type": "string",
@@ -44,7 +46,7 @@ const toolSchema = `{
 
 const toolDescription = "Manage the packages of the environment of this agent. " +
 	"The environment is on the durable volume, so a package stays after a suspend, which a pip install or an apt-get install does not. " +
-	"list shows what is installed. add and remove change the manifest and the lock file and install the change, which can take a few minutes for a large package."
+	"list shows what is installed. add and remove change the packages of the environment and install the change, which can take a few minutes for a large package."
 
 // tool is the tool env. Without the block it is opt-in, so no profile
 // gets it unless its tool list names it.
@@ -110,13 +112,21 @@ func (t *tool) list() string {
 	}
 	m := st.Marker
 	if s.python != "" {
-		fmt.Fprintf(&b, "Python: %s and %s, virtual environment %s.\n", s.rel(s.python), s.rel(s.uvLock()), s.venv())
+		if s.isInline(pkglist.Python) {
+			fmt.Fprintf(&b, "Python list (the configuration with the changes of this agent): %s. Virtual environment %s.\n", listText(s.effective(pkglist.Python)), s.venv())
+		} else {
+			fmt.Fprintf(&b, "Python: %s and %s, virtual environment %s.\n", s.rel(s.python), s.rel(s.uvLock()), s.venv())
+		}
 		if m != nil && m.Python != nil {
 			fmt.Fprintf(&b, "Python packages: %s.\n", packageList(m.Python.Packages, false, 0))
 		}
 	}
 	if s.tools != "" {
-		fmt.Fprintf(&b, "Tools: %s and %s.\n", s.rel(s.tools), s.rel(s.pixiLock()))
+		if s.isInline(pkglist.Tools) {
+			fmt.Fprintf(&b, "Tools list (the configuration with the changes of this agent): %s.\n", listText(s.effective(pkglist.Tools)))
+		} else {
+			fmt.Fprintf(&b, "Tools: %s and %s.\n", s.rel(s.tools), s.rel(s.pixiLock()))
+		}
 		if m != nil && m.Tools != nil {
 			fmt.Fprintf(&b, "Tool packages: %s.\n", packageList(m.Tools.Packages, true, 0))
 		}
@@ -140,11 +150,14 @@ func (t *tool) change(ctx context.Context, in input) fw.ToolResult {
 	case in.Manager != ManagerPython && in.Manager != ManagerTools:
 		return fw.ErrorResult(fmt.Sprintf("env: the manager %q is not python or tools.", in.Manager))
 	case manifest == "":
-		return fw.ErrorResult(fmt.Sprintf("env: the environment has no %s manifest; a person sets environment.%s in fw.yaml.", in.Manager, in.Manager))
+		return fw.ErrorResult(fmt.Sprintf("env: the environment has no %s packages; a person sets environment.packages.%s or environment.%s in fw.yaml.", in.Manager, in.Manager, in.Manager))
 	}
 	pkg := strings.TrimSpace(in.Package)
 	if err := checkPackage(pkg); err != nil {
 		return fw.ErrorResult("env: " + err.Error())
+	}
+	if s.isInline(in.Manager) {
+		return t.changeList(ctx, in, pkg)
 	}
 	inst := newInstaller(fw.AgentFrom(ctx), t.cfg, s)
 	unlock, err := inst.lock(ctx)
@@ -169,7 +182,7 @@ func (t *tool) change(ctx context.Context, in input) fw.ToolResult {
 		return fw.ErrorResult(msg)
 	}
 	digest := s.digest()
-	if f := inst.install(ctx, digest, nil); f != nil {
+	if f := inst.install(ctx, digest, nil, true); f != nil {
 		return fw.ErrorResult(fmt.Sprintf("env: %s %s changed %s, but the install failed. %v", args[0], in.Command, s.rel(manifest), failureError(f)))
 	}
 	if ctx.Err() != nil {
@@ -182,21 +195,100 @@ func (t *tool) change(ctx context.Context, in input) fw.ToolResult {
 	return fw.TextResult(fmt.Sprintf("%s %s in %s and its lock file. The environment is ready (digest %s).\n%s", verb, pkg, s.rel(manifest), short(digest), t.list()))
 }
 
-// checkPackage refuses a package that a manager would read as an option,
-// and control characters.
-func checkPackage(pkg string) error {
-	switch {
-	case pkg == "":
-		return fmt.Errorf("the package is empty; name a requirement such as \"pyyaml>=6\"")
-	case len(pkg) > 256:
-		return fmt.Errorf("the package is longer than 256 characters")
-	case strings.HasPrefix(pkg, "-"):
-		return fmt.Errorf("the package %q starts with a dash", pkg)
+// changeList runs add or remove on a list of environment.packages. It
+// locks the new list first, as uv add and pixi add do, so a package that
+// does not resolve leaves the list and the environment as they were. Then
+// it records the change in the file of the local changes, installs the
+// new list, and records fw.env.changed. When the install fails, it puts
+// the previous list back, so a package that does not build never leaves
+// the agent without its environment.
+func (t *tool) changeList(ctx context.Context, in input, pkg string) fw.ToolResult {
+	s := t.s
+	inst := newInstaller(fw.AgentFrom(ctx), t.cfg, s)
+	unlock, err := inst.lock(ctx)
+	if err != nil {
+		return fw.ErrorResult(err.Error())
 	}
-	for _, r := range pkg {
-		if unicode.IsControl(r) {
-			return fmt.Errorf("the package holds a control character")
+	defer unlock()
+	before := s.effective(in.Manager)
+	next, err := applyChange(in.Manager, before, in.Command, pkg)
+	if err != nil {
+		return fw.ErrorResult(fmt.Sprintf("env: %v. The list is as it was.", err))
+	}
+	if slices.Equal(next, before) {
+		return fw.TextResult(fmt.Sprintf("The %s list holds %s already, so nothing changed.\n%s", in.Manager, pkg, t.list()))
+	}
+	if serr := inst.lockList(ctx, in.Manager, next); serr != nil {
+		msg := fmt.Sprintf("env: the %s list with this change does not resolve: %v. The list and the environment are as they were.", in.Manager, serr)
+		if out := serr.output; out != "" {
+			msg += " The output of the manager ends with:\n" + out
 		}
+		return fw.ErrorResult(inst.redact(msg))
+	}
+	previous := s.digest()
+	loc := s.readLocal()
+	var old *Local
+	if loc != nil {
+		c := *loc
+		c.Changes = slices.Clone(loc.Changes)
+		old = &c
+	} else {
+		loc = &Local{Configured: s.listsDigest()}
+	}
+	run := fw.RunInfoFrom(ctx)
+	loc.Changes = append(loc.Changes, Change{Manager: in.Manager, Command: in.Command, Package: pkg, Time: time.Now().UTC(), Run: run.RunID, Agent: run.Agent})
+	if err := s.writeLocal(loc); err != nil {
+		return fw.ErrorResult(fmt.Sprintf("env: record the change: %v. The list is as it was.", err))
+	}
+	digest := s.digest()
+	if f := inst.install(ctx, digest, nil, false); f != nil {
+		var err error
+		if old != nil {
+			err = s.writeLocal(old)
+		} else {
+			err = removeFile(s.localPath())
+		}
+		if err != nil {
+			inst.log.Warn("env: put the list back", "error", err)
+		}
+		// The failed install can have changed the environment, so the
+		// previous list installs again when it is not intact. The call
+		// holds the lock already.
+		if st := s.state(); st.Kind != StateReady && ctx.Err() == nil {
+			if f2 := inst.install(ctx, st.Digest, nil, true); f2 != nil {
+				inst.log.Warn("env: install the previous list again", "step", f2.Step, "error", f2.Error)
+			}
+		}
+		return fw.ErrorResult(fmt.Sprintf("env: the %s list with this change failed to install, so the list is as it was. %v", in.Manager, failureError(f)))
+	}
+	if ctx.Err() != nil {
+		return fw.ErrorResult(fmt.Sprintf("env: the %s list changed, but the call ended before the install finished; the next command installs it.", in.Manager))
+	}
+	inst.log.Info("the environment changed", "digest", short(digest), "manager", in.Manager, "command", in.Command, "package", inst.redact(pkg), "run", run.RunID)
+	inst.publish(EvChanged, ChangedData{Digest: digest, Previous: previous, Manager: in.Manager, Command: in.Command, Package: inst.redact(pkg), Run: run.RunID, Agent: run.Agent})
+	verb := map[string]string{"add": "Added", "remove": "Removed"}[in.Command]
+	return fw.TextResult(fmt.Sprintf("%s %s in the %s list. The environment is ready (digest %s). The change stays for this agent: the person who runs it puts it into the configuration.\n%s", verb, pkg, in.Manager, short(digest), t.list()))
+}
+
+// listText renders a list of requirements for the model.
+func listText(list []string) string {
+	if len(list) == 0 {
+		return "no packages"
+	}
+	return strings.Join(list, ", ")
+}
+
+// checkPackage refuses a package that a manager would read as an option,
+// and control characters, by the rules of a configured list.
+func checkPackage(pkg string) error {
+	if pkg == "" {
+		return fmt.Errorf("the package is empty; name a requirement such as \"pyyaml>=6\"")
+	}
+	if err := pkglist.CheckRequirement(pkg); err != nil {
+		if strings.HasPrefix(pkg, "-") {
+			return fmt.Errorf("the package %q %w", pkg, err)
+		}
+		return fmt.Errorf("the package %w", err)
 	}
 	return nil
 }

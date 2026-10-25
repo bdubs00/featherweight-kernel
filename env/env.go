@@ -30,18 +30,19 @@ func init() {
 // of the policy (section 7.5 of the architecture).
 var AskRules = []string{"env: command=add", "env: command=remove"}
 
-// Start is the fw.Service of the environment. Without the block, or with
-// placement image, it starts nothing. Otherwise it installs the
-// environment in the background, after the agent is up, and tries again
-// with a growing pause until the install succeeds, for example after the
-// egress policy of the Task lands. A block that does not fit stops the
-// start.
+// Start is the fw.Service of the environment. Without the block it starts
+// nothing. Otherwise it installs the environment in the background, after
+// the agent is up, and tries again with a growing pause until the install
+// succeeds, for example after the egress policy of the Task lands. It
+// sends the state that it finds once, as fw.env.ready or fw.env.failed.
+// With placement image, it only sends the state of the image. A block
+// that does not fit stops the start.
 func Start(ctx context.Context, a *fw.Agent) (io.Closer, error) {
 	s, err := load(a.Config())
 	if err != nil {
 		return nil, err
 	}
-	if s == nil || s.placement == PlacementImage {
+	if s == nil {
 		return nil, nil
 	}
 	in := newInstaller(a, a.Config(), s)
@@ -49,6 +50,10 @@ func Start(ctx context.Context, a *fw.Agent) (io.Closer, error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		if s.placement == PlacementImage {
+			in.announce(s.state())
+			return
+		}
 		in.serve(ctx)
 	}()
 	return service{cancel: cancel, done: done}, nil
