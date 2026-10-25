@@ -33,8 +33,8 @@ const (
 
 // CheckRequirement checks one requirement, such as "pyyaml>=6" or
 // "nodejs>=22". It refuses an empty requirement, a requirement that
-// starts with a dash, which a manager could read as an option, a control
-// character, and a requirement longer than MaxLength. The caller trims
+// starts with a dash, a control character, and a requirement longer than
+// MaxLength. A manager can read a requirement with a dash as an option. The caller trims
 // the spaces first. The error does not repeat the requirement.
 func CheckRequirement(req string) error {
 	switch {
@@ -111,8 +111,8 @@ func isNameByte(c byte) bool {
 
 // CheckMirror checks the URL of a mirror. It must be an http or https URL
 // with a host, without a user or a password, a query, or a fragment.
-// Every tool process can read the URL in its environment, so a URL with a
-// password would give the password to the model. The error does not
+// Every tool process can read the URL in its environment, so the model
+// can read a password of the URL too. The error does not
 // repeat the URL.
 func CheckMirror(raw string) error {
 	if raw == "" {

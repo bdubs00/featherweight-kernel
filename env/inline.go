@@ -88,7 +88,7 @@ func (s *spec) mirrorKey(manager string) string {
 // freshLock removes the lock file of manager when the kernel made it for
 // another mirror, or when no record names its mirror, so the manager
 // locks again from scratch. uv.lock holds the absolute URL of the mirror
-// for each file, and an old URL would lead the install to a host that the
+// for each file. With an old URL, the install goes to a host that the
 // Task cannot reach.
 func (s *spec) freshLock(manager, lock string) error {
 	var made map[string]string

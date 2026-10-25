@@ -237,9 +237,8 @@ func (s *spec) lists(c Config) error {
 			}
 			s.inline[l.manager] = list
 		}
-		// The kernel writes the manifest of a list under dir, and the
-		// rest of the package finds it where a manifest of the block
-		// would be.
+		// The kernel writes the manifest of a list under dir. The rest
+		// of the package reads it as it reads a manifest of the block.
 		if s.isInline(pkglist.Python) {
 			s.python = filepath.Join(s.srcDir(pkglist.Python), "pyproject.toml")
 		}
