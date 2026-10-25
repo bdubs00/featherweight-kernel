@@ -339,9 +339,15 @@ func TestStartAnnouncesFailure(t *testing.T) {
 	for f.count("uv sync") == syncs && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	evs := f.settled()
+	// The notifier sends the state after the retry, which fails the same
+	// way and sends nothing itself.
+	evs := f.events(1)
 	if len(evs) != 1 || evs[0].Type != EvFailed || decode[Failure](t, evs[0]).Step != "python" {
 		t.Fatalf("events = %+v", evs)
+	}
+	time.Sleep(retryFirst + 200*time.Millisecond)
+	if evs := f.settled(); len(evs) != 1 {
+		t.Fatalf("the failure went out %d times", len(evs))
 	}
 }
 

@@ -61,9 +61,9 @@ type installer struct {
 	cfg *fw.Config
 	a   *fw.Agent
 	log *slog.Logger
-	// announced is true once the installer sent fw.env.ready or
-	// fw.env.failed. Only the goroutine of the installer reads it.
-	announced bool
+	// wake tells the notifier of the service that the installer kept an
+	// event for the bus. It is nil outside the service.
+	wake chan struct{}
 }
 
 func newInstaller(a *fw.Agent, cfg *fw.Config, s *spec) *installer {
@@ -199,6 +199,9 @@ func (in *installer) lock(ctx context.Context) (func(), error) {
 // context records nothing, because the next try goes on from the cache.
 // It returns the failure, or nil.
 func (in *installer) install(ctx context.Context, digest string, prev *Failure, record bool) *Failure {
+	// The notifier of the service looks at the state again after each
+	// install, such as for the start event that waits for a result.
+	defer in.poke()
 	start := time.Now()
 	if in.a != nil {
 		// The process is not idle while it installs, so the front does
@@ -687,7 +690,9 @@ func (in *installer) redact(s string) string {
 	return urlPassword.ReplaceAllString(s, "://***@")
 }
 
-// publish sends an event of the environment to the bus of the agent.
+// publish sends an event of the environment to the bus of the agent. An
+// event that the bus refuses waits in the outbox, and the service sends it
+// later (outbox.go).
 func (in *installer) publish(typ string, data any) {
 	if in.a == nil || in.a.Bus() == nil {
 		return
@@ -698,38 +703,23 @@ func (in *installer) publish(typ string, data any) {
 		return
 	}
 	e.Node = in.a.Node()
-	ctx, cancel := context.WithTimeout(context.Background(), publishFor)
-	defer cancel()
-	if err := in.a.Bus().Publish(ctx, Subject, e); err != nil {
-		in.log.Warn("env: publish an event", "type", typ, "subject", Subject, "error", err)
+	start := time.Now().UTC()
+	state := typ == EvReady || typ == EvFailed
+	if err := in.send(e); err != nil {
+		in.log.Warn("env: the bus refused an event; it waits, and the service sends it later", "type", typ, "subject", Subject, "error", err)
+		in.keep(e)
 		return
 	}
-	if typ == EvReady || typ == EvFailed {
-		in.announced = true
-	}
-}
-
-// announce sends the state of the environment once, for the front, which
-// keeps the last event of each Task: fw.env.ready with the marker, or
-// fw.env.failed with the failure. A pending state sends nothing, because
-// its install sends the result.
-func (in *installer) announce(st state) {
-	if in.announced {
-		return
-	}
-	switch {
-	case st.Kind == StateReady && st.Marker != nil:
-		in.publish(EvReady, st.Marker)
-	case st.Kind == StateFailed && st.Failure != nil:
-		in.publish(EvFailed, st.Failure)
+	if state {
+		in.settled(start)
 	}
 }
 
 // serve installs the environment in the background until it is ready,
 // with a pause that doubles after each failure. It returns when the
-// environment is ready or ctx ends. It sends the state that it finds
-// once, so a Task that is ready at its start says so too, and a retry
-// that fails the same way stays quiet after that.
+// environment is ready or ctx ends. The notifier of the service sends the
+// state that the start finds (notify), and a retry that fails the same
+// way stays quiet.
 func (in *installer) serve(ctx context.Context) {
 	for first := true; ; first = false {
 		st := in.s.state()
@@ -740,10 +730,8 @@ func (in *installer) serve(ctx context.Context) {
 				// finds the environment ready logs here.
 				in.log.Info("the environment is ready", "digest", short(st.Digest), "dir", in.s.dir)
 			}
-			in.announce(st)
 			return
 		case StateFailed:
-			in.announce(st)
 			if !in.due(st.Failure) {
 				if !sleep(ctx, time.Until(st.Failure.RetryAt)) {
 					return

@@ -3,6 +3,7 @@ package env
 import (
 	"context"
 	"io"
+	"sync"
 
 	"github.com/bdubs00/featherweight-kernel/cli"
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -35,8 +36,9 @@ var AskRules = []string{"env: command=add", "env: command=remove"}
 // the agent is up, and tries again with a growing pause until the install
 // succeeds, for example after the egress policy of the Task lands. It
 // sends the state that it finds once, as fw.env.ready or fw.env.failed.
-// With placement image, it only sends the state of the image. A block
-// that does not fit stops the start.
+// With placement image, it only sends the state of the image. For the
+// life of the process, it also sends the events that the bus refused. A
+// block that does not fit stops the start.
 func Start(ctx context.Context, a *fw.Agent) (io.Closer, error) {
 	s, err := load(a.Config())
 	if err != nil {
@@ -46,15 +48,30 @@ func Start(ctx context.Context, a *fw.Agent) (io.Closer, error) {
 		return nil, nil
 	}
 	in := newInstaller(a, a.Config(), s)
+	in.wake = make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
 	go func() {
-		defer close(done)
-		if s.placement == PlacementImage {
-			in.announce(s.state())
-			return
+		defer wg.Done()
+		if s.placement != PlacementImage {
+			in.serve(ctx)
 		}
-		in.serve(ctx)
+	}()
+	// The notifier sends the state that the start finds, and it lives as
+	// long as the process: an event that the bus refused, such as the
+	// start event of a golden boot without network, goes out once the bus
+	// takes it.
+	notifier := newInstaller(a, a.Config(), s)
+	notifier.wake = in.wake
+	go func() {
+		defer wg.Done()
+		notifier.notify(ctx)
+	}()
+	go func() {
+		wg.Wait()
+		close(done)
 	}()
 	return service{cancel: cancel, done: done}, nil
 }

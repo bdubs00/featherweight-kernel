@@ -146,6 +146,9 @@ type fixture struct {
 	a    *fw.Agent
 	mu   sync.Mutex
 	evs  []fw.Event
+	// wrap, when set, wraps the in-memory bus of the agent, such as in a
+	// bus that refuses events.
+	wrap func(fw.Bus) fw.Bus
 }
 
 // newFixture writes the manifests and the block, and builds the agent.
@@ -217,11 +220,15 @@ func (f *fixture) agent() *fw.Agent {
 		return f.a
 	}
 	bus := fw.NewMemBus()
+	var agentBus fw.Bus = bus
+	if f.wrap != nil {
+		agentBus = f.wrap(bus)
+	}
 	noModel := fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
 		return nil, errors.New("env test: no model")
 	}}
 	a, err := fw.New(fw.WithConfig(f.cfg), fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithModel(noModel),
-		fw.WithLedger(fw.NewMemLedger()), fw.WithBus(bus), fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+		fw.WithLedger(fw.NewMemLedger()), fw.WithBus(agentBus), fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
 	if err != nil {
 		f.t.Fatal(err)
 	}
