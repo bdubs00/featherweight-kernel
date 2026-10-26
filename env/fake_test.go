@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -308,12 +309,13 @@ func (f *fixture) count(prefix string) int {
 	return n
 }
 
-// events returns the events of the environment, waiting briefly for n.
+// events returns the events of the environment in the order of their
+// publish, waiting briefly for n.
 func (f *fixture) events(n int) []fw.Event {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		f.mu.Lock()
-		evs := append([]fw.Event(nil), f.evs...)
+		evs := inOrder(f.evs)
 		f.mu.Unlock()
 		if len(evs) >= n || time.Now().After(deadline) {
 			return evs
@@ -328,7 +330,17 @@ func (f *fixture) settled() []fw.Event {
 	time.Sleep(50 * time.Millisecond)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]fw.Event(nil), f.evs...)
+	return inOrder(f.evs)
+}
+
+// inOrder returns a copy of evs in the order of their publish. The memory
+// bus hands each event to a subscriber in a goroutine of its own, so two
+// events of one publisher can arrive in either order. An event takes its
+// time when the installer makes it, just before its publish.
+func inOrder(evs []fw.Event) []fw.Event {
+	out := slices.Clone(evs)
+	slices.SortStableFunc(out, func(a, b fw.Event) int { return a.Time.Compare(b.Time) })
+	return out
 }
 
 func decode[T any](t *testing.T, e fw.Event) T {
