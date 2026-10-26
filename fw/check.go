@@ -183,7 +183,8 @@ type CheckOutput struct {
 }
 
 // CheckResult is the result of one step of a check. Output is the text of
-// the result of the tool as JSON when it parses as JSON, and else as a
+// the result of the tool as JSON when it parses as JSON, the structured
+// content of the result when its text does not, and else the text as a
 // JSON string. IsError is true for an error result of the tool, which does
 // not fail the run. Cut is true when the result was longer than the output
 // limit of the check: Output then holds the first bytes of the text, as a
@@ -325,11 +326,15 @@ func (t *checkTool) Call(ctx context.Context, input json.RawMessage) (ToolResult
 
 // cutCheck keeps the text of a result, at most n bytes of it, and reports
 // whether the result lost anything: text past n bytes, or a block that is
-// not text. A result with structured content and no text becomes the text
-// of that content, as the ledger records it.
+// not text. A result with structured content becomes the text of that
+// content, as the ledger records it, when it has no text or when its text
+// is no JSON, as a tool that writes words for a model and JSON for a
+// program does. A check reads JSON, so it reads the structured content of
+// such a tool.
 func cutCheck(res ToolResult, n int) (ToolResult, bool) {
-	if len(res.Content) == 0 && len(res.Structured) > 0 {
-		res.Content = []Block{Text(string(res.Structured))}
+	if s := bytes.TrimSpace(res.Structured); len(s) > 0 && json.Valid(s) &&
+		(len(res.Content) == 0 || !json.Valid(bytes.TrimSpace([]byte(TextOf(res.Content))))) {
+		res.Content = []Block{Text(string(s))}
 	}
 	res.Structured = nil
 	text := TextOf(res.Content)

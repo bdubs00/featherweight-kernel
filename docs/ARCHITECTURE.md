@@ -3091,7 +3091,7 @@ The output of a completed check run is JSON with one result per step, in the ord
 {"results": [{"tool": "servicenow.query_incidents", "output": {"result": {"records": [{"number": "INC0012"}]}}, "isError": false}]}
 ```
 
-`output` holds the text of the result of the tool. If the text parses as JSON, `output` is that JSON. Otherwise, `output` is a JSON string.
+`output` holds the text of the result of the tool. If the text parses as JSON, `output` is that JSON. If it does not and the result has structured content, as an MCP tool that writes words for a model and JSON for a program does, `output` is the structured content, so a check reads the JSON of such a tool. Otherwise, `output` is a JSON string.
 
 If the text is longer than `maxBytes`, the step keeps the first `maxBytes` bytes of the text, on a rune boundary. Its `output` is then a JSON string, and the result has `"cut": true`. The ledger records the cut result. A result with an image or a document keeps only its text, and it also has `"cut": true`. The output limit of the tools (`tools.limits.maxOutputBytes`, section 7.7) does not cut the result of a step, because no model reads it.
 

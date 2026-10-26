@@ -514,7 +514,9 @@ func TestCheckRunReachesMaxToolCalls(t *testing.T) {
 }
 
 // cutCheck keeps the head of the text on a rune boundary and turns
-// structured content without text into text.
+// structured content without text into text. A text in words beside
+// structured content gives the structured content, and a text of JSON
+// stays.
 func TestCutCheck(t *testing.T) {
 	res, cut := cutCheck(TextResult("héllo"), 2)
 	if !cut || TextOf(res.Content) != "h" {
@@ -527,6 +529,18 @@ func TestCutCheck(t *testing.T) {
 	res, cut = cutCheck(TextResult("short"), 5)
 	if cut || TextOf(res.Content) != "short" {
 		t.Fatalf("short = %v, %+v", cut, res)
+	}
+	words := ToolResult{Content: []Block{Text("The wiki holds 2 pages:\n- a.md\n- b.md")}, Structured: json.RawMessage(`{"pages":[{"path":"a.md"},{"path":"b.md"}],"total":2}`)}
+	res, cut = cutCheck(words, 1000)
+	if cut || TextOf(res.Content) != `{"pages":[{"path":"a.md"},{"path":"b.md"}],"total":2}` || res.Structured != nil {
+		t.Fatalf("words and structured content = %v, %+v", cut, res)
+	}
+	both := ToolResult{Content: []Block{Text(`[{"id":1}]`)}, Structured: json.RawMessage(`{"result":[{"id":1}]}`)}
+	if res, _ = cutCheck(both, 1000); TextOf(res.Content) != `[{"id":1}]` {
+		t.Fatalf("a text of JSON = %+v", res)
+	}
+	if res, _ = cutCheck(ToolResult{Content: []Block{Text("words")}, Structured: json.RawMessage(`{bad`)}, 1000); TextOf(res.Content) != "words" {
+		t.Fatalf("structured content that is no JSON = %+v", res)
 	}
 }
 
