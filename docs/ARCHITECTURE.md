@@ -2363,6 +2363,8 @@ environment:
 | `prepare` | none | Shell commands (`/bin/sh -c`) that run in the root of the workspace after the install |
 | `placement` | `durable` | `durable` installs under `dir` at run time. `image` says that the image holds the environment at `dir`, built from `fw env dockerfile`; the kernel installs nothing then. |
 | `brief` | `true` | `false` leaves the Environment section out of the system prompt |
+| `on` | `true` | `false` turns the packages off: the lists are empty, the next install removes the environment, the prompt has no Environment section, and the tool `env` only lists (section 18.7) |
+| `ask` | `true` | `false` keeps the agent from a change of its packages: the commands `add` and `remove` of the tool `env` refuse |
 | `packages.python` | none | A list of requirements for uv, such as `pyyaml>=6`, in place of `python`. The kernel writes the manifest and the lock file under `dir` (section 18.4). |
 | `packages.tools` | none | A list of packages of conda-forge for pixi, in place of `tools`. An item is a name, with an optional version and build, such as `nodejs>=22` or `nodejs 22.*`. |
 | `mirrors.python` | none | The index of uv and pip, such as a cache in the cluster. Every tool process and every install gets it (section 18.5). |
@@ -2396,6 +2398,7 @@ The package `env/pkglist` holds the checks of a list and of a mirror. It has no 
 | `<dir>/.fw-env-local.json` | fw | The changes of the tool `env` to the lists (section 18.7) |
 | `<dir>/.fw-env-index.json` | fw | The mirror of each lock file that fw made for a list |
 | `<dir>/.fw-env-outbox.json`, `<dir>/.fw-env-outbox.lock` | fw | The events that the bus refused, and the lock of that file (section 18.6) |
+| `<dir>/.fw-env-pushed.json` | fw, mode `0600` | The push of the front, the base in place of the lists and the switch of the block (section 18.13) |
 | `<dir>/src` | fw | The parent of the directories of the lists |
 | `<dir>/src/python`, `<dir>/src/tools` | tool user | The manifest of a list (`pyproject.toml`, `pixi.toml`), which fw writes, and its lock file, which the manager writes next to it |
 | `<dir>/venv` | tool user | The virtual environment: `UV_PROJECT_ENVIRONMENT` and `VIRTUAL_ENV` |
@@ -2432,6 +2435,8 @@ The marker records the digest: the sha256 of the manifests, the lock files, and 
 
 `fw serve` builds the agent, the kernel starts, and then the service of the package starts the install in the background. It never delays `/readyz`. A failure records the step, the error, and the last 4 KB of the output of the manager. The next try comes after 5 seconds, and the pause doubles up to 5 minutes. A golden boot has no network, so its first try fails. The next tries succeed once the egress policy lands. A failure that an earlier process recorded is due at once, so the cold boot after a resume tries without waiting. At its start, the service sends the state that it finds once: `fw.env.ready` with the marker, or `fw.env.failed` with the failure. A Task that is ready at boot therefore says so, and the front can keep one event for each Task. After that, a retry that fails with the same error sends nothing. With `placement: image`, the service installs nothing and sends the state of the image. After a ready environment, the service ends. The output in a failure loses every secret of the process (section 4.2). It also loses the password of every URL, such as the token of a private index. During the install, the process holds its status at not idle (`fw.Agent.Hold`). The front therefore does not suspend the Task in the middle of a download.
 
+The service lives as long as the process. After an install that is ready, it reads the block again every 2 seconds. It installs a new digest, such as after a push of the front (section 18.13). A change of the digest also ends a pause before the next try. A failure that is an answer of the resolver, such as for a package that does not exist, comes again with the same lists. Its next try therefore waits 5 minutes, the longest pause, at once. A failure of the network keeps the short pause that doubles. The output of uv for such an answer holds `No solution found when resolving`, and the output of pixi holds `failed to solve the environment` or `Cannot solve the request`.
+
 A verb that starts no service, such as `fw run`, installs the environment in the first tool process of a run. A laptop therefore tests a profile with the packages of its Task before the Task exists: `fw run` and `fw serve` outside ax install the same environment under `./.environment`. The time limit of the tool call (`tools.limits.timeout`, 10 minutes) bounds that install. A cut install goes on from the cache at the next try.
 
 One lock file per environment keeps one installer at a time, across processes too. The lock is `flock(2)`, so it ends with its process. On a system without `flock(2)`, two processes can install at the same time.
@@ -2447,7 +2452,7 @@ One lock file per environment keeps one installer at a time, across processes to
 
 `mirrors.tools` is part of the file `config.toml` under `PIXI_HOME`, which every pixi process reads. A Python list without a package has no virtual environment, so `VIRTUAL_ENV` and `UV_PROJECT_ENVIRONMENT` stay out.
 
-A tool process of a run waits until the environment is ready, bounded by the context of its call. When the install of the current digest failed and its next try is not due, the process does not start, and the call returns an error that names the step, the error, the time of the next try, and the end of the output of the manager. A run therefore reports a broken environment instead of guessing. For a stdio MCP server, the error makes the listing of its tools fail, and the run goes on without them. A tool process outside a run, such as the listing of `fw tools`, gets the variables and waits for nothing.
+A tool process never fails because of an install. Until the environment of the current digest is ready, a tool process gets the last environment that installed and still exists. After a failed install, it does the same. Without such an environment, it starts without one. Only the first install, before any environment exists, holds a tool process of a run, bounded by the context of its call. Then `fw run`, which starts no service, installs there. A run that needs a missing package learns of it from the Environment section and from the shell. A tool process outside a run, such as the listing of `fw tools`, gets the variables and waits for nothing.
 
 `UV_PROJECT_ENVIRONMENT` holds for every project. A `uv sync` in another project of the workspace therefore installs into the same environment. A shell unsets it for a project that needs a virtual environment of its own. pixi runs no activation script for a tool process: the process gets `PATH` and `CONDA_PREFIX` alone.
 
@@ -2466,15 +2471,22 @@ A process without the service, such as `fw run`, leaves a refused event to the n
 
 | Type | Data | When |
 |---|---|---|
-| `fw.env.ready` | the marker: `digest`, `placement`, `ready`, `seconds`, `uv`, `pixi`, `python`, `tools`, `prepare` | an install succeeded, or the service found a ready environment at its start |
+| `fw.env.ready` | the marker: `digest`, `placement`, `ready`, `seconds`, `uv`, `pixi`, `python`, `tools`, `prepare`, and the switch | an install succeeded, or the service found a ready environment at its start |
 | `fw.env.failed` | `digest`, `time`, `step`, `error`, `output`, `attempt`, `retryAt` | an install failed, or the service found a failure at its start. A retry that fails with the same error records no new event. |
 | `fw.env.changed` | `digest`, `previous`, `manager`, `command`, `package`, `run`, `agent` | the tool `env` changed a manifest or a list and installed the result |
 
-In the marker, `python` holds `manifest`, `version`, `env`, and `packages`, and `tools` holds `manifest`, `prefix`, and `packages`. Each package is `name`, `version`, and `is_explicit`, the names of `uv pip list` and `pixi list`.
+The switch is `on`, `ask`, and, for a block with lists, `lists`: `python` and `tools`, the base with the local changes of the tool `env`. `fw.env.failed` carries the switch too, next to the failure. In the marker, `python` holds `manifest`, `version`, `env`, and `packages`, and `tools` holds `manifest`, `prefix`, and `packages`. Each package is `name`, `version`, and `is_explicit`, the names of `uv pip list` and `pixi list`.
 
 ### 18.7 The tool `env`
 
 The tool takes `command`: `list`, `add`, or `remove`. `add` and `remove` also take `manager`, `python` or `tools`, and `package`, a requirement such as `pyyaml>=6` or `nodejs>=22`. A package that starts with a dash is refused, so the model cannot pass an option to a manager.
+
+The switch of section 18.2 decides first, before the policy. `list` always works, and `add` and `remove` refuse with these answers:
+
+- With `on: false`: `A person turns packages on for this agent on the page.`
+- With `ask: false`: `This agent cannot ask for packages. A person adds them on the page.`
+
+The ask rules of the policy stay. Each call reads the block again, so a push of the front applies to the next call.
 
 | Call | Runs |
 |---|---|
@@ -2512,6 +2524,8 @@ The text changes only when the state changes: once from installing to ready, or 
 
 For a list, the section names the list in place of the manifest and the lock file. It names the Python packages that the list names, and not the packages that they bring. A list without a package gets one short line. The section says that a person allows each change. It also tells the model not to edit the files under `<dir>/src`, because fw writes them again. With a mirror, it says that the packages come from the mirror of the deployment, and that other registries can be out of reach.
 
+With `on: false`, the prompt has no Environment section. With `ask: false`, the section says that the agent cannot change its packages. Until an install of the current digest is ready, the section names the packages of the last environment that installed. A tool process gets the same packages. The section names a failure in one sentence, such as `The last change of the packages failed to install at the step python, so the shell has the packages of the last install that worked` after a failed change.
+
 ### 18.9 `fw doctor`
 
 The line `environment` names:
@@ -2546,6 +2560,30 @@ A block with `placement: image` keeps its `dir`. A durable block gives `/opt/env
 ### 18.11 What this is not
 
 It is not a container inside the container: gVisor does not nest. It is not a root shell: apt and system services stay out of a run. It does not replace the goal of a Workspace (section 11.3), which stays the fallback for an environment that nobody wrote down. No GPU reaches a Task, so a GPU package is not a reason for an environment.
+
+### 18.13 A push of the front
+
+A pool of the workbench gives a worker a new Task for a change of its configuration. A new Task starts with an empty `/workspace`, which holds the runs of the agent. The front therefore changes the packages of a running worker in place, through two routes of the native surface. Without the block `environment`, both answer 404.
+
+`GET /v1/environment` needs the role that views each profile of the process (`agent.view`). It answers 200:
+
+```json
+{"on": true, "ask": true, "lists": {"python": ["pyyaml", "six"], "tools": ["jq"]},
+ "state": "ready", "digest": "sha256:...", "marker": {"digest": "sha256:...", "...": "..."},
+ "failure": {"digest": "sha256:...", "step": "python", "...": "..."}}
+```
+
+`lists` holds the base with the local changes of the tool `env`. `state` is `pending`, `materializing`, `ready`, or `failed`. `digest` is the digest of now. `marker` is the last environment that installed, and `failure` is the failure of the digest of now. Each of the two is absent without one.
+
+`PUT /v1/environment` needs the role that operates each profile of the process (`agent.run`). The front calls it with its static token. It takes this body:
+
+```json
+{"on": true, "ask": false, "python": ["pyyaml", "six"], "tools": ["jq"]}
+```
+
+`on` and `ask` must be present. Each list follows the checks of section 18.2, and a list that does not fit answers 400. A block that names a manifest, or that has `placement: image`, answers 409. The kernel keeps the body in `<dir>/.fw-env-pushed.json`, with the mode `0600`, and answers 202 with the shape of the GET. The body is the base in place of the lists and the switch of the block. A change of the base drops the local changes of the tool `env`. The service installs a new digest in the background. The notifier sends the state with the new switch, also without an install.
+
+The file lives on the volume of the Task, so a suspend keeps the push. A new Task starts from the block, and the front pushes again.
 
 ### 18.12 Limits
 
