@@ -47,7 +47,7 @@ func (s *spec) readPushed() *Pushed {
 	if !s.readOwned(s.pushedPath(), &p) {
 		return nil
 	}
-	if pkglist.Check(p.Python) != nil || pkglist.Check(p.Tools) != nil {
+	if pkglist.Check(pkglist.Python, p.Python) != nil || pkglist.Check(pkglist.Tools, p.Tools) != nil {
 		return nil
 	}
 	p.Python, p.Tools = trimList(p.Python), trimList(p.Tools)
@@ -177,7 +177,7 @@ func mount(k *native.Kit) error {
 			name string
 			list []string
 		}{{pkglist.Python, body.Python}, {pkglist.Tools, body.Tools}} {
-			if err := pkglist.Check(l.list); err != nil {
+			if err := pkglist.Check(l.name, l.list); err != nil {
 				native.WriteProblem(w, r, http.StatusBadRequest, fmt.Sprintf("%s %v", l.name, err))
 				return
 			}

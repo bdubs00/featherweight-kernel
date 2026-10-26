@@ -243,7 +243,7 @@ func (s *spec) lists(c Config) error {
 			if l.file != "" {
 				return fmt.Errorf("env: %s.packages.%s and %s.%s cannot both exist; name the packages in the list or in the manifest", Block, l.manager, Block, l.manager)
 			}
-			if err := pkglist.Check(*l.list); err != nil {
+			if err := pkglist.Check(l.manager, *l.list); err != nil {
 				return fmt.Errorf("env: %s.packages.%s %w", Block, l.manager, err)
 			}
 			list := make([]string, 0, len(*l.list))

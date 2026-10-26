@@ -121,9 +121,11 @@ func TestPushRoutes(t *testing.T) {
 
 	for body, want := range map[string]string{
 		`{"python": []}`: "the body needs on and ask",
-		`{"on": true, "ask": true, "python": ["-e ."]}`: "python item 0 starts with a dash",
-		`{"on": true, "ask": true, "tools": ["a\tb"]}`:  "tools item 0 holds a control character",
-		`{"on": true, "ask": true, "python": "pyyaml"}`: "",
+		`{"on": true, "ask": true, "python": ["-e ."]}`:            "python item 0 starts with a dash",
+		`{"on": true, "ask": true, "tools": ["a\tb"]}`:             "tools item 0 holds a control character",
+		`{"on": true, "ask": true, "python": ["six", "bad name"]}`: "python item 1 holds a space inside the name",
+		`{"on": true, "ask": true, "tools": ["jq\\"]}`:             "tools item 0 is not a program",
+		`{"on": true, "ask": true, "python": "pyyaml"}`:            "",
 	} {
 		code, b := call(t, srv, "PUT", body, true)
 		if code != http.StatusBadRequest || !strings.Contains(string(b), want) {

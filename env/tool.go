@@ -178,7 +178,7 @@ func (t *tool) change(ctx context.Context, in input) fw.ToolResult {
 		return fw.ErrorResult(fmt.Sprintf("env: the environment has no %s packages; a person sets environment.packages.%s or environment.%s in fw.yaml.", in.Manager, in.Manager, in.Manager))
 	}
 	pkg := strings.TrimSpace(in.Package)
-	if err := checkPackage(pkg); err != nil {
+	if err := checkPackage(in.Manager, pkg); err != nil {
 		return fw.ErrorResult("env: " + err.Error())
 	}
 	if s.isInline(in.Manager) {
@@ -303,13 +303,15 @@ func listText(list []string) string {
 	return strings.Join(list, ", ")
 }
 
-// checkPackage refuses a package that a manager would read as an option,
-// and control characters, by the rules of a configured list.
-func checkPackage(pkg string) error {
+// checkPackage refuses a package of the manager by the rules of a
+// configured list (pkglist.CheckRequirement): a requirement that a
+// manager would read as an option, a control character, a quote, and
+// anything that is not a name with a version.
+func checkPackage(manager, pkg string) error {
 	if pkg == "" {
 		return fmt.Errorf("the package is empty; name a requirement such as \"pyyaml>=6\"")
 	}
-	if err := pkglist.CheckRequirement(pkg); err != nil {
+	if err := pkglist.CheckRequirement(manager, pkg); err != nil {
 		if strings.HasPrefix(pkg, "-") {
 			return fmt.Errorf("the package %q %w", pkg, err)
 		}

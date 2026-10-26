@@ -65,10 +65,12 @@ func TestToolAddRemove(t *testing.T) {
 		}
 	}
 	for input, want := range map[string]string{
-		`{"command":"add","manager":"apt","package":"curl"}`:     "is not python or tools",
-		`{"command":"add","manager":"python","package":"--pre"}`: "starts with a dash",
-		`{"command":"add","manager":"python"}`:                   "the package is empty",
-		`{"command":"upgrade"}`:                                  "is not list, add, or remove",
+		`{"command":"add","manager":"apt","package":"curl"}`:           "is not python or tools",
+		`{"command":"add","manager":"python","package":"--pre"}`:       "starts with a dash",
+		`{"command":"add","manager":"python"}`:                         "the package is empty",
+		`{"command":"add","manager":"python","package":"bad name;rm"}`: "the package holds a semicolon",
+		`{"command":"add","manager":"tools","package":"walk tool"}`:    "the package is not a program",
+		`{"command":"upgrade"}`:                                        "is not list, add, or remove",
 	} {
 		if res := callTool(t, ctx, tl, input); !res.IsError || !strings.Contains(fw.TextOf(res.Content), want) {
 			t.Errorf("%s = %+v, want %q", input, res, want)

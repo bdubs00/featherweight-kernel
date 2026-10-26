@@ -157,7 +157,9 @@ func (s *spec) effective(manager string) []string {
 	}
 	if loc := s.readLocal(); loc != nil {
 		for _, c := range loc.Changes {
-			if c.Manager != manager {
+			if c.Manager != manager || pkglist.CheckRequirement(manager, strings.TrimSpace(c.Package)) != nil {
+				// The tool env checks each change before it keeps it, so
+				// a change that fails the check is not of fw.
 				continue
 			}
 			if next, err := applyChange(manager, out, c.Command, c.Package); err == nil {

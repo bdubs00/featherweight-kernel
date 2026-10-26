@@ -53,6 +53,7 @@ func TestLoadLists(t *testing.T) {
 		"mirrors:\n  pip: http://x/simple":                        "environment.mirrors.pip is not a key",
 		"packages:\n  python: [six, \"--index-url=http://evil\"]": "packages.python item 1 starts with a dash",
 		"packages:\n  tools: [\"jq\\u0007\"]":                     "packages.tools item 0 holds a control character",
+		"packages:\n  python: [\"six; python_version>3\"]":        "packages.python item 0 holds a semicolon",
 		"packages:\n  python: [" + strings.Repeat("a", 201) + "]": "longer than 200 characters",
 		long: "holds 101 items; the limit is 100",
 		"mirrors:\n  python: ftp://mirror/simple":                       "mirrors.python is not an http or an https URL",
@@ -241,7 +242,7 @@ func TestListToolAddRemove(t *testing.T) {
 		`{"command":"remove","manager":"python","package":"requests"}`:   "holds no package requests. The list is as it was.",
 		`{"command":"add","manager":"python","package":"nosuch-pkg"}`:    "does not resolve: python: uv lock: exit status 1. The list and the environment are as they were. The output of the manager ends with:\nerror: No solution found",
 		`{"command":"add","manager":"tools","package":"nosuch"}`:         "does not resolve: tools: pixi lock: exit status 1",
-		`{"command":"add","manager":"tools","package":"conda-forge::x"}`: "a channel or a bracket is not available",
+		`{"command":"add","manager":"tools","package":"conda-forge::x"}`: "names a channel; a channel is not available",
 		`{"command":"add","manager":"python","package":"nobuild"}`:       "failed to install, so the list is as it was",
 		`{"command":"add","manager":"python","package":"-e ."}`:          "starts with a dash",
 	} {

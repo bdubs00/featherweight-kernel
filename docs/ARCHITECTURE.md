@@ -2379,7 +2379,8 @@ The decision for `/workspace` is the one of `fw.DefaultHome`. A relative path is
 - Under ax, a durable `dir` must be under `/workspace`, because every suspend loses the rest.
 - With `placement: image`, `dir` must not be under `/workspace`, because the volume of the Task hides the image there.
 - `packages.python` and `python` cannot both exist. The same holds for `packages.tools` and `tools`.
-- A requirement must not start with a dash, hold a control character, or hold more than 200 characters. A list holds 100 items at most.
+- A requirement must not start with a dash, hold a control character or a quote, or hold more than 200 characters. A list holds 100 items at most.
+- A Python requirement is a name of PEP 508 with optional extras and version specifiers, such as `pyyaml`, `pyyaml>=6`, or `ansible-lint[yaml]==24.9.2`. A URL, an environment marker after a semicolon, and a space inside the name are refused. A requirement of `tools` is a conda name with an optional version and an optional build, such as `jq`, `nodejs>=22`, `nodejs 22.*`, or `openssl 3.* *_0`, without a channel. The kernel writes each requirement into a manifest of TOML, so the check keeps every quote and line break out of it. The tool `env` and `PUT /v1/environment` check a requirement by the same rules.
 - A mirror is an `http` or `https` URL with a host. It must not hold a user, a password, a query, or a fragment, because every tool process can read it.
 - A list needs `placement: durable`. An image needs a manifest with its lock file.
 
