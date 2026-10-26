@@ -39,7 +39,7 @@ func TestDoctor(t *testing.T) {
 	}
 	f.write("fail", "")
 	f.write("uv.lock", "version = 1\npackage pyyaml 6.0.3\n")
-	if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err == nil {
+	if err := f.install(); err == nil {
 		t.Fatal("no failure")
 	}
 	if ok, line := doctor(ctx, f.cfg, nil, time.Second); ok || !strings.Contains(line, "failed at the step python: uv sync --frozen: exit status 2 (attempt 1, next try in") {
@@ -80,12 +80,15 @@ func TestDoctorImage(t *testing.T) {
 	}
 }
 
-// An install without uv on PATH fails with a reason that names the image.
+// An install without uv on PATH fails with a reason that names the image,
+// and a tool process starts without the environment.
 func TestInstallWithoutManager(t *testing.T) {
 	f := newFixture(t, "python: pyproject.toml\n")
 	t.Setenv("PATH", filepath.Join(t.TempDir(), "empty"))
-	_, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil)
-	if err == nil || !strings.Contains(err.Error(), "uv is not on PATH; the image must carry it") {
-		t.Fatalf("err = %v", err)
+	if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err != nil {
+		t.Fatalf("a tool process failed because of the install: %v", err)
+	}
+	if fl := f.s.readFailure(); fl == nil || !strings.Contains(fl.Error, "uv is not on PATH; the image must carry it") {
+		t.Fatalf("failure = %+v", fl)
 	}
 }

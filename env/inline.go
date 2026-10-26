@@ -109,10 +109,12 @@ func (s *spec) recordLock(manager string) error {
 	return writeFile(s.indexPath(), made)
 }
 
-// listsDigest returns the sha256 of the configured lists, sorted, with a
-// label for each manager. The file of the local changes names it.
+// listsDigest returns the sha256 of the base: the switch on and the base
+// lists, sorted, with a label for each manager. The file of the local
+// changes names it, so a change of the base drops the local changes.
 func (s *spec) listsDigest() string {
 	h := sha256.New()
+	fmt.Fprintf(h, "on %t\n", s.on)
 	for _, m := range []string{pkglist.Python, pkglist.Tools} {
 		l, ok := s.inline[m]
 		if !ok {

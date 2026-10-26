@@ -16,6 +16,12 @@ import (
 // Name is the name of the tool.
 const Name = "env"
 
+// The answers of add and remove when the switch refuses them.
+const (
+	MsgOff   = "A person turns packages on for this agent on the page."
+	MsgNoAsk = "This agent cannot ask for packages. A person adds them on the page."
+)
+
 // Managers of the tool: the keys of the block that name the manifests.
 const (
 	ManagerPython = "python"
@@ -92,11 +98,24 @@ func (t *tool) Call(ctx context.Context, raw json.RawMessage) (fw.ToolResult, er
 	if t.s == nil {
 		return fw.ErrorResult("env: this agent has no environment; a person adds the block environment to fw.yaml."), nil
 	}
+	// The front can push another base at any time, so each call reads the
+	// block again.
+	s, err := load(t.cfg)
+	if err != nil || s == nil {
+		return fw.ErrorResult(fmt.Sprintf("env: the block environment: %v", err)), nil
+	}
+	c := &tool{cfg: t.cfg, s: s}
 	switch in.Command {
 	case "list":
-		return fw.TextResult(t.list()), nil
+		return fw.TextResult(c.list()), nil
 	case "add", "remove":
-		return t.change(ctx, in), nil
+		switch {
+		case !s.on:
+			return fw.ErrorResult(MsgOff), nil
+		case !s.ask:
+			return fw.ErrorResult(MsgNoAsk), nil
+		}
+		return c.change(ctx, in), nil
 	}
 	return fw.ErrorResult(fmt.Sprintf("env: the command %q is not list, add, or remove.", in.Command)), nil
 }
@@ -107,6 +126,12 @@ func (t *tool) list() string {
 	st := s.state()
 	var b strings.Builder
 	fmt.Fprintf(&b, "State: %s (digest %s).\nDirectory: %s (placement %s).\n", st.Kind, short(st.Digest), s.dir, s.placement)
+	switch {
+	case !s.on:
+		b.WriteString("Packages are off for this agent, so add and remove are not available.\n")
+	case !s.ask:
+		b.WriteString("This agent cannot ask for packages, so add and remove are not available.\n")
+	}
 	if st.Failure != nil {
 		fmt.Fprintf(&b, "The install failed at the step %s: %s.\n", st.Failure.Step, st.Failure.Error)
 	}

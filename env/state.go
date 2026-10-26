@@ -188,6 +188,26 @@ func (s *spec) intact(m *Marker) bool {
 	return true
 }
 
+// lastEnv returns m when the environment that it names still exists: the
+// last environment that installed, which a tool process uses until an
+// install of the current digest is ready. It returns nil for a nil m.
+func (s *spec) lastEnv(m *Marker) *Marker {
+	if m == nil {
+		return nil
+	}
+	if m.Python != nil {
+		if _, err := os.Stat(filepath.Join(s.venv(), "bin", "python")); err != nil {
+			return nil
+		}
+	}
+	if m.Tools != nil && m.Tools.Prefix != "" {
+		if _, err := os.Stat(m.Tools.Prefix); err != nil {
+			return nil
+		}
+	}
+	return m
+}
+
 // readMarker reads the marker. A marker that the user of fw does not own
 // counts as absent when a tool user exists, because the tool user could
 // have written it.
@@ -227,31 +247,7 @@ func (s *spec) readOwned(path string, v any) bool {
 // a reader never sees half of it. The temporary file has a random name
 // and a new inode. The tool user can add entries to dir, and with a fixed
 // name, a link of that user can lead the write of fw elsewhere.
-func writeFile(path string, v any) error {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	_, err = f.Write(append(b, '\n'))
-	if err == nil {
-		err = f.Chmod(0o644)
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(tmp, path)
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-	}
-	return err
-}
+func writeFile(path string, v any) error { return writeFileMode(path, v, 0o644) }
 
 // removeFile removes a state file that can be absent.
 func removeFile(path string) error {
@@ -265,8 +261,11 @@ func removeFile(path string) error {
 // a row: 5 seconds, doubling, at most 5 minutes.
 func backoff(attempt int) time.Duration {
 	d := 5 * time.Second
-	for i := 1; i < attempt && d < 5*time.Minute; i++ {
+	for i := 1; i < attempt && d < backoffMax; i++ {
 		d *= 2
 	}
-	return min(d, 5*time.Minute)
+	return min(d, backoffMax)
 }
+
+// backoffMax is the longest wait before the next install.
+const backoffMax = 5 * time.Minute

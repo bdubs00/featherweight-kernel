@@ -24,8 +24,8 @@ import (
 // tokens.subject, and to the log. The ledger of a run records the call of
 // the tool env that changed the environment.
 const (
-	EvReady   = "fw.env.ready"   // the data is a Marker
-	EvFailed  = "fw.env.failed"  // the data is a Failure
+	EvReady   = "fw.env.ready"   // the data is a ReadyData
+	EvFailed  = "fw.env.failed"  // the data is a FailedData
 	EvChanged = "fw.env.changed" // the data is a ChangedData
 	// Subject is the bus subject of the events.
 	Subject = "fw.environment"
@@ -51,6 +51,7 @@ const (
 	jsonBytes  = 16 << 20               // the largest JSON output of a manager
 	waitDelay  = 5 * time.Second        // how long a killed manager has to exit
 	publishFor = 5 * time.Second        // the bound of one publish on the bus
+	watchEvery = 2 * time.Second        // how often the service looks for a new digest
 )
 
 // installer installs the environment of a spec for an agent. The agent can
@@ -226,6 +227,12 @@ func (in *installer) install(ctx context.Context, digest string, prev *Failure, 
 			f.Attempt = prev.Attempt + 1
 		}
 		f.RetryAt = f.Time.Add(backoff(f.Attempt))
+		if unsolvable(serr) {
+			// The same lists give the same answer of the resolver, such
+			// as for a package that does not exist. The next try waits
+			// for the longest pause, and a new base installs at once.
+			f.RetryAt = f.Time.Add(backoffMax)
+		}
 		if !record {
 			in.log.Info("a change of the environment failed to install", "digest", short(digest), "step", f.Step, "error", f.Error)
 			return f
@@ -237,7 +244,7 @@ func (in *installer) install(ctx context.Context, digest string, prev *Failure, 
 		// is the one a person reads.
 		if prev == nil || prev.Digest != digest || prev.Error != f.Error {
 			in.log.Warn("the environment failed to install", "digest", short(digest), "step", f.Step, "error", f.Error, "attempt", f.Attempt, "retryIn", backoff(f.Attempt))
-			in.publish(EvFailed, f)
+			in.publish(EvFailed, FailedData{Failure: f, Switch: in.s.switchOf()})
 		} else {
 			in.log.Debug("the environment failed to install again", "digest", short(digest), "step", f.Step, "attempt", f.Attempt)
 		}
@@ -247,7 +254,7 @@ func (in *installer) install(ctx context.Context, digest string, prev *Failure, 
 		in.log.Warn("env: remove the failure", "error", err)
 	}
 	in.log.Info("the environment is ready", "digest", short(digest), "seconds", m.Seconds, "dir", in.s.dir)
-	in.publish(EvReady, m)
+	in.publish(EvReady, ReadyData{Marker: m, Switch: in.s.switchOf()})
 	return nil
 }
 
@@ -722,6 +729,7 @@ func (in *installer) publish(typ string, data any) {
 // way stays quiet.
 func (in *installer) serve(ctx context.Context) {
 	for first := true; ; first = false {
+		in.reload()
 		st := in.s.state()
 		switch st.Kind {
 		case StateReady:
@@ -733,7 +741,7 @@ func (in *installer) serve(ctx context.Context) {
 			return
 		case StateFailed:
 			if !in.due(st.Failure) {
-				if !sleep(ctx, time.Until(st.Failure.RetryAt)) {
+				if !in.pause(ctx, time.Until(st.Failure.RetryAt)) {
 					return
 				}
 				continue
@@ -745,11 +753,11 @@ func (in *installer) serve(ctx context.Context) {
 			return
 		case err != nil:
 			in.log.Warn("env: the install cannot start", "error", err)
-			if !sleep(ctx, backoff(1)) {
+			if !in.pause(ctx, backoff(1)) {
 				return
 			}
 		case f != nil:
-			if !sleep(ctx, time.Until(f.RetryAt)) {
+			if !in.pause(ctx, time.Until(f.RetryAt)) {
 				return
 			}
 		case !held:
@@ -758,6 +766,64 @@ func (in *installer) serve(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// watch installs the environment for the life of the process: it serves
+// until the environment is ready, and then looks every watchEvery for a
+// new digest, such as after a push of the front, and serves again.
+func (in *installer) watch(ctx context.Context) {
+	for {
+		in.serve(ctx)
+		for {
+			if !sleep(ctx, watchEvery) {
+				return
+			}
+			in.reload()
+			if in.s.state().Kind != StateReady {
+				break
+			}
+		}
+	}
+}
+
+// pause waits for d, but returns early when the digest changes, such as
+// after a push of the front that fixes a list. It reports false when ctx
+// ends.
+func (in *installer) pause(ctx context.Context, d time.Duration) bool {
+	digest := in.s.digest()
+	for d > 0 {
+		step := min(d, watchEvery)
+		if !sleep(ctx, step) {
+			return false
+		}
+		d -= step
+		in.reload()
+		if in.s.digest() != digest {
+			return true
+		}
+	}
+	return true
+}
+
+// reload reads the block again, because the front can push another base
+// at any time. A block that does not load keeps the spec as it is.
+func (in *installer) reload() {
+	if s, err := load(in.cfg); err == nil && s != nil {
+		in.s = s
+	}
+}
+
+// unsolvable reports whether a failed step is an answer of the resolver
+// that the same lists give again, such as for a package that does not
+// exist, and not a failure of the network.
+func unsolvable(e *stepError) bool {
+	text := e.output + "\n" + e.err.Error()
+	for _, p := range []string{"No solution found when resolving", "failed to solve the environment", "Cannot solve the request"} {
+		if strings.Contains(text, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // sleep waits for d or the end of ctx, and reports whether d passed.

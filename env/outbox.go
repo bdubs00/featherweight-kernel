@@ -156,9 +156,9 @@ func (in *installer) stateEvent(st state) (fw.Event, bool) {
 	var data any
 	switch {
 	case st.Kind == StateReady && st.Marker != nil:
-		typ, data = EvReady, st.Marker
+		typ, data = EvReady, ReadyData{Marker: st.Marker, Switch: in.s.switchOf()}
 	case st.Kind == StateFailed && st.Failure != nil:
-		typ, data = EvFailed, st.Failure
+		typ, data = EvFailed, FailedData{Failure: st.Failure, Switch: in.s.switchOf()}
 	default:
 		return fw.Event{}, false
 	}
@@ -198,6 +198,7 @@ func (in *installer) owe() bool {
 // or errNotYet while the state installs. What the bus did not take
 // waits on.
 func (in *installer) flush(owed bool) (bool, error) {
+	in.reload()
 	if _, err := os.Lstat(in.s.outboxPath()); err != nil && !owed {
 		return false, nil
 	}

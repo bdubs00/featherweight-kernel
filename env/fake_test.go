@@ -103,7 +103,7 @@ case "$1" in
 lock)
   [ -f "$(dirname "$manifest")/pixi.lock" ] && echo "pixi.lock present" >> "$log/calls"
   if grep -q '^"nosuch' "$manifest"; then
-    echo "Error: cannot solve the request because of: No candidates were found for nosuch" >&2
+    echo "Error: failed to solve the environment. Cannot solve the request because of: No candidates were found for nosuch" >&2
     exit 1
   fi
   grep '^"' "$manifest" > "$(dirname "$manifest")/pixi.lock"
@@ -149,6 +149,8 @@ type fixture struct {
 	// wrap, when set, wraps the in-memory bus of the agent, such as in a
 	// bus that refuses events.
 	wrap func(fw.Bus) fw.Bus
+	// extra holds more options of the agent, such as a surface.
+	extra []fw.Option
 }
 
 // newFixture writes the manifests and the block, and builds the agent.
@@ -196,6 +198,19 @@ func newFixture(t *testing.T, block string) *fixture {
 	return f
 }
 
+// install installs the current digest as the service does, when it is
+// due, and returns the failure as an error. A tool process no longer
+// installs a new digest.
+func (f *fixture) install() error {
+	f.t.Helper()
+	s, err := load(f.cfg)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.s = s
+	return newInstaller(f.agent(), f.cfg, s).ready(f.runCtx())
+}
+
 // reblock gives the fixture another block in the same workspace, as a
 // new revision of a pool does, and loads it.
 func (f *fixture) reblock(block string) {
@@ -227,8 +242,9 @@ func (f *fixture) agent() *fw.Agent {
 	noModel := fw.ModelFunc{GenerateFn: func(context.Context, *fw.Request) (*fw.Response, error) {
 		return nil, errors.New("env test: no model")
 	}}
-	a, err := fw.New(fw.WithConfig(f.cfg), fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithModel(noModel),
-		fw.WithLedger(fw.NewMemLedger()), fw.WithBus(agentBus), fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	opts := append([]fw.Option{fw.WithConfig(f.cfg), fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithModel(noModel),
+		fw.WithLedger(fw.NewMemLedger()), fw.WithBus(agentBus), fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))}, f.extra...)
+	a, err := fw.New(opts...)
 	if err != nil {
 		f.t.Fatal(err)
 	}

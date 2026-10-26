@@ -65,6 +65,13 @@ type Config struct {
 	Brief     *bool    `yaml:"brief" json:"brief,omitempty"`
 	Packages  *Lists   `yaml:"packages" json:"packages,omitempty"`
 	Mirrors   *Mirrors `yaml:"mirrors" json:"mirrors,omitempty"`
+	// On turns the packages on. With false, the lists are empty, the
+	// prompt has no Environment section, and the tool env only lists.
+	// The default is true.
+	On *bool `yaml:"on" json:"on,omitempty"`
+	// Ask lets the agent ask for a package through the tool env. With
+	// false, add and remove refuse. The default is true.
+	Ask *bool `yaml:"ask" json:"ask,omitempty"`
 }
 
 // Lists is the key packages of the block: the packages in plain lists.
@@ -92,7 +99,7 @@ type Mirrors struct {
 
 // keys are the keys of the block. Another key is an error, so a typo stops
 // the process.
-var keys = []string{"dir", "cache", "python", "tools", "prepare", "placement", "brief", "packages", "mirrors"}
+var keys = []string{"dir", "cache", "python", "tools", "prepare", "placement", "brief", "packages", "mirrors", "on", "ask"}
 
 // subKeys are the keys of the mappings in the block.
 var subKeys = map[string][]string{
@@ -117,6 +124,15 @@ type spec struct {
 	inline map[string][]string
 	// mirrors holds the URLs of environment.mirrors by manager.
 	mirrors map[string]string
+	// manifest is true for a manager whose packages a manifest of the
+	// block names, and not a list.
+	manifest map[string]bool
+	// on and ask are the switch of the packages: the keys on and ask of
+	// the block, or the push of the front (pushed).
+	on, ask bool
+	// pushed is true when the push of the front (.fw-env-pushed.json)
+	// is the base, in place of the lists and the switch of the block.
+	pushed bool
 }
 
 // load resolves the block of cfg. It returns nil and no error when cfg has
@@ -159,7 +175,7 @@ func resolve(cfg *fw.Config, c Config) (*spec, error) {
 	if err != nil {
 		return nil, fmt.Errorf("env: the root of the workspace: %w", err)
 	}
-	s := &spec{root: root, brief: c.Brief == nil || *c.Brief}
+	s := &spec{root: root, brief: c.Brief == nil || *c.Brief, on: c.On == nil || *c.On, ask: c.Ask == nil || *c.Ask}
 	switch p := strings.ToLower(strings.TrimSpace(c.Placement)); p {
 	case "", PlacementDurable:
 		s.placement = PlacementDurable
@@ -179,6 +195,7 @@ func resolve(cfg *fw.Config, c Config) (*spec, error) {
 		dir = imageDir
 	}
 	s.dir, s.cache = s.path(c.Dir, dir), s.path(c.Cache, cache)
+	s.manifest = map[string]bool{pkglist.Python: c.Python != "", pkglist.Tools: c.Tools != ""}
 	if c.Python != "" {
 		s.python = s.path(c.Python, "")
 		if filepath.Base(s.python) != "pyproject.toml" {
@@ -206,6 +223,7 @@ func resolve(cfg *fw.Config, c Config) (*spec, error) {
 	if s.user, err = fw.ToolUserOf(cfg); err != nil {
 		return nil, fmt.Errorf("env: %w", err)
 	}
+	s.base()
 	return s, nil
 }
 
@@ -363,4 +381,46 @@ func (s *spec) rel(p string) string {
 		return r
 	}
 	return p
+}
+
+// setList makes list the base list of manager, in place of the list of
+// the block. The kernel writes its manifest under dir.
+func (s *spec) setList(manager string, list []string) {
+	if s.inline == nil {
+		s.inline = map[string][]string{}
+	}
+	if list == nil {
+		list = []string{}
+	}
+	s.inline[manager] = list
+	if manager == pkglist.Python {
+		s.python = filepath.Join(s.srcDir(pkglist.Python), "pyproject.toml")
+	} else {
+		s.tools = filepath.Join(s.srcDir(pkglist.Tools), "pixi.toml")
+	}
+}
+
+// base applies the push of the front and the switch. A push replaces the
+// lists and the switch of the block for each manager without a manifest.
+// With the packages off, every list is empty, so the next install removes
+// the environment.
+func (s *spec) base() {
+	if s.placement != PlacementDurable {
+		return
+	}
+	if p := s.readPushed(); p != nil {
+		s.on, s.ask, s.pushed = p.On, p.Ask, true
+		for _, l := range []struct {
+			manager string
+			list    []string
+		}{{pkglist.Python, p.Python}, {pkglist.Tools, p.Tools}} {
+			if !s.manifest[l.manager] {
+				s.setList(l.manager, l.list)
+			}
+		}
+	}
+	if !s.on {
+		s.setList(pkglist.Python, nil)
+		s.setList(pkglist.Tools, nil)
+	}
 }

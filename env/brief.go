@@ -21,10 +21,10 @@ const briefPackages = 30
 // failed. environment.brief: false turns it off.
 func section(a *fw.Agent, prof fw.AgentProfile) string {
 	s, err := load(a.Config())
-	if err != nil || s == nil || !s.brief {
+	if err != nil || s == nil || !s.brief || !s.on {
 		return ""
 	}
-	return s.briefText(s.state(), toolAllowed(prof.Tools), ax.Detect())
+	return s.briefText(s.state(), toolAllowed(prof.Tools) && s.ask, ax.Detect())
 }
 
 // toolAllowed reports whether a tool list of a profile names the tool env,
@@ -59,15 +59,21 @@ func (s *spec) briefText(st state, canChange, inTask bool) string {
 		}
 		b.WriteString("\n")
 	}
+	// Until an install is ready, the shell has the last environment that
+	// installed and still exists (toolEnv), so the section names that one.
 	m := st.Marker
 	if st.Kind != StateReady {
-		m = nil
+		m = s.lastEnv(st.Marker)
 	}
-	switch st.Kind {
-	case StatePending, StateMaterializing:
+	switch {
+	case st.Kind == StateFailed && m != nil:
+		fmt.Fprintf(&b, "\nThe last change of the packages failed to install at the step %s, so the shell has the packages of the last install that worked.\n", safeWord(st.Failure.Step))
+	case st.Kind == StateFailed:
+		fmt.Fprintf(&b, "\nThe packages failed to install at the step %s, so the shell starts without them.\n", safeWord(st.Failure.Step))
+	case m != nil:
+		b.WriteString("\nA change of the packages installs now. Until it is ready, the shell has the packages of the last install.\n")
+	case st.Kind == StatePending, st.Kind == StateMaterializing:
 		fmt.Fprintf(&b, "\nThe environment is being installed from %s now. The first command of the shell waits until it is ready.\n", s.manifests())
-	case StateFailed:
-		fmt.Fprintf(&b, "\nThe install of the environment failed at the step %s, and it tries again on its own. Until it succeeds, a shell command fails with the reason. If that blocks the task, say so in your answer.\n", safeWord(st.Failure.Step))
 	}
 	b.WriteString("\n")
 	pyList, toolsList := s.isInline(pkglist.Python), s.isInline(pkglist.Tools)

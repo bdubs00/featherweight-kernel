@@ -176,9 +176,14 @@ func TestInstallMarkerAndReady(t *testing.T) {
 	if st := f.s.state(); st.Kind != StateReady {
 		t.Fatalf("state = %s", st.Kind)
 	}
-	// A new digest installs again.
+	// A new digest installs again. Until then, a tool process gets the
+	// last environment at once and installs nothing.
 	f.write("uv.lock", "version = 1\npackage pyyaml 6.0.2\npackage six 1.17.0\n")
-	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err != nil {
+	env, err = fw.ExtendToolEnv(ctx, f.cfg, nil)
+	if err != nil || envValue(env, "VIRTUAL_ENV") != f.s.venv() || f.count("uv sync") != syncs {
+		t.Fatalf("a tool process during a new digest: %v, %s", err, envValue(env, "VIRTUAL_ENV"))
+	}
+	if err := f.install(); err != nil {
 		t.Fatal(err)
 	}
 	if f.count("uv sync") != syncs+1 || len(f.s.readMarker().Python.Packages) != 2 {
@@ -207,13 +212,18 @@ func TestToolEnvOutsideRun(t *testing.T) {
 }
 
 // A failed install records fw.env.failed with the end of the output and
-// no password, and a tool process fails with the reason until the next
-// try is due. The next try that succeeds removes the failure.
+// no password. A tool process never fails because of it: without an
+// environment that installed, it starts without one. The next try that
+// succeeds removes the failure.
 func TestFailureAndRetry(t *testing.T) {
 	f := newFixture(t, fullBlock)
 	f.write("fail", "")
 	ctx := f.runCtx()
-	_, err := fw.ExtendToolEnv(ctx, f.cfg, nil)
+	env, err := fw.ExtendToolEnv(ctx, f.cfg, []string{"PATH=/bin"})
+	if err != nil || envValue(env, "PATH") == "" {
+		t.Fatalf("a tool process after a failed first install: %v", err)
+	}
+	err = f.install()
 	if err == nil || !strings.Contains(err.Error(), "step python") || !strings.Contains(err.Error(), "uv sync --frozen") || !strings.Contains(err.Error(), "Failed to fetch") {
 		t.Fatalf("err = %v", err)
 	}
@@ -234,10 +244,14 @@ func TestFailureAndRetry(t *testing.T) {
 	if st := f.s.state(); st.Kind != StateFailed {
 		t.Fatalf("state = %s", st.Kind)
 	}
-	// Before the next try, a tool process fails at once.
+	// Before the next try, the install answers with the failure at once,
+	// and a tool process starts without the environment.
 	syncs := f.count("uv sync")
-	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err == nil || !strings.Contains(err.Error(), "tries again in") {
+	if err := f.install(); err == nil || !strings.Contains(err.Error(), "tries again in") {
 		t.Fatalf("err = %v", err)
+	}
+	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err != nil {
+		t.Fatalf("a tool process failed because of the install: %v", err)
 	}
 	if f.count("uv sync") != syncs {
 		t.Fatal("a failed environment installed again before its next try")
@@ -247,7 +261,7 @@ func TestFailureAndRetry(t *testing.T) {
 	if err := writeFile(f.s.failurePath(), fl); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err == nil {
+	if err := f.install(); err == nil {
 		t.Fatal("the failure went away")
 	}
 	if got := f.s.readFailure(); got.Attempt != 2 || got.RetryAt.Sub(got.Time) != backoff(2) {
@@ -263,7 +277,7 @@ func TestFailureAndRetry(t *testing.T) {
 	if err := writeFile(f.s.failurePath(), fl); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err != nil {
+	if err := f.install(); err != nil {
 		t.Fatal(err)
 	}
 	if f.s.readFailure() != nil || f.s.state().Kind != StateReady {
@@ -274,8 +288,9 @@ func TestFailureAndRetry(t *testing.T) {
 	}
 }
 
-// A tool process waits while another holder installs the environment, and
-// its context bounds the wait.
+// A tool process waits while another holder installs the first
+// environment, and its context bounds the wait. At the end of the wait,
+// it starts without the environment, and with no error.
 func TestWaitForAnotherInstall(t *testing.T) {
 	f := newFixture(t, fullBlock)
 	if err := os.MkdirAll(f.s.dir, 0o755); err != nil {
@@ -290,8 +305,9 @@ func TestWaitForAnotherInstall(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(f.runCtx(), 300*time.Millisecond)
 	defer cancel()
-	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err == nil || !strings.Contains(err.Error(), "not ready yet (materializing)") {
-		t.Fatalf("err = %v", err)
+	start := time.Now()
+	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err != nil || time.Since(start) < 250*time.Millisecond {
+		t.Fatalf("err = %v after %s", err, time.Since(start))
 	}
 	if f.count("uv") != 0 {
 		t.Fatal("a waiter installed beside the holder")
@@ -342,8 +358,10 @@ func TestBashGetsTheEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = bash2.(interface{ Close() error }).Close() })
-	res, err = bash2.Call(g.runCtx(), json.RawMessage(`{"command":"true"}`))
-	if err != nil || !res.IsError || !strings.Contains(fw.TextOf(res.Content), "the environment failed to install at the step python") {
+	// A failed install never stops the shell: it starts without the
+	// environment.
+	res, err = bash2.Call(g.runCtx(), json.RawMessage(`{"command":"echo shell-ok; test -x \"$VIRTUAL_ENV/bin/python\" || echo no-venv"}`))
+	if err != nil || res.IsError || !strings.Contains(fw.TextOf(res.Content), "shell-ok") || !strings.Contains(fw.TextOf(res.Content), "no-venv") {
 		t.Fatalf("result = %+v, err = %v", res, err)
 	}
 }
@@ -455,7 +473,7 @@ func TestFailureOfEarlierProcess(t *testing.T) {
 	if err := writeFile(f.s.failurePath(), old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err != nil {
+	if err := f.install(); err != nil {
 		t.Fatalf("a failure of an earlier process held the new one: %v", err)
 	}
 	if f.s.state().Kind != StateReady {

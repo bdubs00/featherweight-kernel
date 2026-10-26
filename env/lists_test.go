@@ -287,7 +287,7 @@ func TestListToolAddRemove(t *testing.T) {
 	if f.s.readLocal() != nil || f.s.state().Kind != StateReady {
 		t.Fatalf("after the new revision: local %+v, state %s", f.s.readLocal(), f.s.state().Kind)
 	}
-	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err != nil {
+	if err := f.install(); err != nil {
 		t.Fatal(err)
 	}
 	if f.count("uv sync") != syncs {
@@ -295,7 +295,7 @@ func TestListToolAddRemove(t *testing.T) {
 	}
 	// The next install removes the stale file.
 	f.reblock("packages:\n  python: [six>=1.16]\n  tools: []\n")
-	if _, err := fw.ExtendToolEnv(ctx, f.cfg, nil); err != nil {
+	if err := f.install(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(f.s.localPath()); err == nil {
@@ -315,7 +315,7 @@ func TestStartAnnouncesFailure(t *testing.T) {
 	if err := os.MkdirAll(f.s.dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err == nil {
+	if err := f.install(); err == nil {
 		t.Fatal("no failure")
 	}
 	if evs := f.events(1); len(evs) != 1 {
@@ -358,7 +358,7 @@ func TestListMirrorChangeLocksAgain(t *testing.T) {
 	f := newFixture(t, mirrorBlock)
 	install := func() {
 		t.Helper()
-		if _, err := fw.ExtendToolEnv(f.runCtx(), f.cfg, nil); err != nil {
+		if err := f.install(); err != nil {
 			t.Fatal(err)
 		}
 	}

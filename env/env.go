@@ -7,6 +7,7 @@ import (
 
 	"github.com/bdubs00/featherweight-kernel/cli"
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/surface/native"
 )
 
 func init() {
@@ -17,6 +18,7 @@ func init() {
 	fw.RegisterPromptSection(section)
 	cli.RegisterDoctorCheck(doctor)
 	cli.EnvDockerfile = writeDockerfile
+	native.Extend(mount)
 	fw.RegisterDefaults(func(c *fw.Config) {
 		c.Tools.Builtin = append(c.Tools.Builtin, Name)
 		// A change of the packages asks a person first. A profile that
@@ -56,7 +58,7 @@ func Start(ctx context.Context, a *fw.Agent) (io.Closer, error) {
 	go func() {
 		defer wg.Done()
 		if s.placement != PlacementImage {
-			in.serve(ctx)
+			in.watch(ctx)
 		}
 	}()
 	// The notifier sends the state that the start finds, and it lives as
@@ -89,10 +91,12 @@ func (s service) Close() error {
 	return nil
 }
 
-// toolEnv is the fw.ToolEnvHook of the environment. A tool process of a
-// run waits until the environment is ready, and fails with the reason
-// when its install failed. Every tool process gets the variables of the
-// environment.
+// toolEnv is the fw.ToolEnvHook of the environment. Every tool process
+// gets the variables of the environment. A tool process never fails
+// because of an install: until an install is ready, or after it failed,
+// it gets the last environment that installed and still exists, or none.
+// Only the first install, before any environment exists, holds a tool
+// process of a run, and fw run, which starts no service, installs there.
 func toolEnv(ctx context.Context, cfg *fw.Config, env []string) ([]string, error) {
 	s, err := load(cfg)
 	if err != nil {
@@ -101,10 +105,19 @@ func toolEnv(ctx context.Context, cfg *fw.Config, env []string) ([]string, error
 	if s == nil {
 		return env, nil
 	}
-	if fw.RunInfoFrom(ctx).RunID != "" && !fw.ToolEnvNoWait(ctx) {
-		if err := newInstaller(fw.AgentFrom(ctx), cfg, s).ready(ctx); err != nil {
-			return nil, err
-		}
+	if fw.RunInfoFrom(ctx).RunID == "" || fw.ToolEnvNoWait(ctx) || s.placement == PlacementImage {
+		return s.apply(env, s.readMarker()), nil
 	}
-	return s.apply(env, s.readMarker()), nil
+	st := s.state()
+	if st.Kind == StateReady {
+		return s.apply(env, st.Marker), nil
+	}
+	if last := s.lastEnv(st.Marker); last != nil || st.Kind == StateFailed {
+		return s.apply(env, last), nil
+	}
+	in := newInstaller(fw.AgentFrom(ctx), cfg, s)
+	if err := in.ready(ctx); err != nil && ctx.Err() == nil {
+		in.log.Info("env: a tool process starts without the environment, because its install failed", "error", firstLine(err.Error()))
+	}
+	return s.apply(env, s.lastEnv(s.readMarker())), nil
 }

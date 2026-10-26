@@ -68,7 +68,7 @@ func TestSectionFailedAndUnsafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := section(f.agent(), fw.AgentProfile{})
-	if !strings.Contains(text, "failed at the step python") {
+	if !strings.Contains(text, "The packages failed to install at the step python, so the shell starts without them.") {
 		t.Errorf("failed section:\n%s", text)
 	}
 	m := &Marker{Digest: f.s.digest(), Placement: PlacementDurable, Python: &PythonInfo{Version: "3.12", Packages: []Package{
