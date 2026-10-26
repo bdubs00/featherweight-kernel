@@ -692,6 +692,12 @@ func reactionLine(d fw.ReactionData) string {
 	if d.By != "" {
 		who = oneLine(d.By, 60)
 	}
+	if d.Removed {
+		if d.Seq == 0 {
+			return who + " took back " + d.Reaction + " on the run"
+		}
+		return fmt.Sprintf("%s took back %s on event %d", who, d.Reaction, d.Seq)
+	}
 	s := who + " reacted " + d.Reaction
 	if d.Seq == 0 {
 		s += " to the run"

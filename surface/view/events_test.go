@@ -98,6 +98,8 @@ func TestLineOfAReaction(t *testing.T) {
 		{fw.ReactionData{Reaction: fw.ReactionDown, By: "alice", Note: "Too\nlong."}, "alice reacted down to the run: Too long."},
 		{fw.ReactionData{Seq: 9, Reaction: fw.ReactionUp, By: "bob", Receipt: true}, "bob reacted up to event 9 and accepted the result"},
 		{fw.ReactionData{Seq: 9, Reaction: fw.ReactionDown, Receipt: true}, "the process reacted down to event 9 and rejected the result"},
+		{fw.ReactionData{Seq: 9, Reaction: fw.ReactionUp, By: "bob", Removed: true}, "bob took back up on event 9"},
+		{fw.ReactionData{Reaction: fw.ReactionHeart, By: "bob", Removed: true}, "bob took back heart on the run"},
 	} {
 		if got := describe(fw.MustEvent("r1", fw.EvRunReacted, c.data)); got != c.want {
 			t.Errorf("line = %q, want %q", got, c.want)

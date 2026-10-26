@@ -38,8 +38,10 @@ const maxReactionByBytes = 256
 // ReactionDown, or ReactionHeart. By is the subject of the person. Note
 // is free text of at most MaxReactionNoteBytes bytes. Receipt is true when
 // the reaction also recorded a quality receipt (see React); a caller
-// cannot set it. The event changes the state of a run in no way, so one
-// that arrives after fw.run.finished leaves the run finished, as an
+// cannot set it. Removed is true when the person took the reaction back:
+// the event then takes one from the count of the reaction, and it keeps
+// no note. The event changes the state of a run in no way, so one that
+// arrives after fw.run.finished leaves the run finished, as an
 // annotation does (LeavesFinished).
 type ReactionData struct {
 	Seq      uint64 `json:"seq"`
@@ -47,6 +49,7 @@ type ReactionData struct {
 	By       string `json:"by,omitempty"`
 	Note     string `json:"note,omitempty"`
 	Receipt  bool   `json:"receipt"`
+	Removed  bool   `json:"removed,omitempty"`
 }
 
 // React records the reaction of a person on an event of a run, or on the
@@ -61,7 +64,11 @@ type ReactionData struct {
 // MaxReactionNoteBytes are ErrInvalidRequest.
 //
 // A reaction that the same person already put on the same event appends
-// nothing, also with another note. A thumb, ReactionUp or ReactionDown, on the fw.run.finished of
+// nothing, also with another note. With d.Removed, React takes the
+// reaction of the person back: it appends the event with Removed when the
+// person has the reaction on the event, and nothing otherwise. A quality
+// receipt that the reaction recorded stays, because a receipt is final.
+// A thumb, ReactionUp or ReactionDown, on the fw.run.finished of
 // a completed episode of the run also records a quality receipt with
 // ObserveQuality: the verification accepted or rejected of that
 // completion, under the receipt id "reaction:<run>:<seq>:<by>", so a
@@ -102,6 +109,9 @@ func (a *Agent) React(ctx context.Context, id string, d ReactionData) error {
 		return fmt.Errorf("%w: the person of a reaction holds more than %d bytes or a control character", ErrInvalidRequest, maxReactionByBytes)
 	}
 	d.Receipt = false
+	if d.Removed {
+		d.Note = ""
+	}
 
 	a.k.reactMu.Lock()
 	defer a.k.reactMu.Unlock()
@@ -109,7 +119,7 @@ func (a *Agent) React(ctx context.Context, id string, d ReactionData) error {
 	if d.Seq > last {
 		return fmt.Errorf("%w: run %s has no event %d; its latest event is %d", ErrInvalidRequest, id, d.Seq, last)
 	}
-	completion := false
+	completion, has := false, false
 	for e, err := range a.ledger.Read(ctx, id, 0) {
 		if err != nil {
 			return fmt.Errorf("fw: read the reactions of run %s: %w", id, err)
@@ -118,14 +128,19 @@ func (a *Agent) React(ctx context.Context, id string, d ReactionData) error {
 		case e.Type == EvRunReacted:
 			var old ReactionData
 			if e.Decode(&old) == nil && old.Seq == d.Seq && old.Reaction == d.Reaction && old.By == d.By {
-				return nil
+				// The last event of the person on the event decides.
+				has = !old.Removed
 			}
 		case d.Seq != 0 && e.Seq == d.Seq && e.Type == EvRunFinished:
 			var f RunFinishedData
 			completion = e.Decode(&f) == nil && f.Outcome == OutcomeCompleted
 		}
 	}
-	if completion && (d.Reaction == ReactionUp || d.Reaction == ReactionDown) {
+	if has != d.Removed {
+		// The person has the reaction already, or has none to take back.
+		return nil
+	}
+	if completion && !d.Removed && (d.Reaction == ReactionUp || d.Reaction == ReactionDown) {
 		verification := "accepted"
 		if d.Reaction == ReactionDown {
 			verification = "rejected"

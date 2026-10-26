@@ -587,6 +587,9 @@ func summarize(e fw.Event, tools map[string]string) string {
 			if d.Receipt {
 				add("receipt=true")
 			}
+			if d.Removed {
+				add("removed=true")
+			}
 		}
 	case fw.EvLoopDetected:
 		var d fw.LoopDetectedData

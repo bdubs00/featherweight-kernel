@@ -1,6 +1,7 @@
 package fw
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"strings"
@@ -119,6 +120,79 @@ func TestReact(t *testing.T) {
 	if run.State != StateCompleted || run.Output != "done" || len(run.Reactions) != 3 ||
 		run.Reactions[ReactionHeart] != 1 || run.Reactions[ReactionUp] != 2 || run.Reactions[ReactionDown] != 2 {
 		t.Fatalf("run after the reactions = %+v", run)
+	}
+}
+
+// A person takes a reaction back: the removal appends one event, takes one
+// from the count, and keeps the receipt that the thumb recorded. A removal
+// of a reaction that the person does not have appends nothing, and the
+// person can react again after a removal.
+func TestReactRemove(t *testing.T) {
+	ctx := testCtx(t)
+	cfg := DefaultConfig()
+	cfg.Access.Default = "closed"
+	cfg.Access.Admins = []string{"alice", "bob"}
+	alice := WithPrincipal(ctx, &Principal{Subject: "alice", Kind: KindUser})
+	bob := WithPrincipal(ctx, &Principal{Subject: "bob", Kind: KindUser})
+	a := newTestAgent(t, newScript(endTurn("done")).Model(), WithConfig(cfg))
+	r, err := a.Run(alice, "Do the work")
+	mustState(t, r, err, StateCompleted)
+	fin := finishSeq(t, a.Ledger(), r.ID)
+	count := func() map[string]int {
+		t.Helper()
+		run, err := a.Get(ctx, r.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return run.Reactions
+	}
+
+	// Nothing to take back appends nothing.
+	if err := a.React(alice, r.ID, ReactionData{Seq: fin, Reaction: ReactionUp, Removed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(reactionsOf(t, a.Ledger(), r.ID)); n != 0 {
+		t.Fatalf("a removal of nothing appended %d events", n)
+	}
+	for _, c := range []struct {
+		ctx context.Context
+		d   ReactionData
+	}{
+		{alice, ReactionData{Seq: fin, Reaction: ReactionUp}},
+		{bob, ReactionData{Seq: fin, Reaction: ReactionUp}},
+		{alice, ReactionData{Seq: fin, Reaction: ReactionUp, Note: "gone", Removed: true}},
+		{alice, ReactionData{Seq: fin, Reaction: ReactionUp, Removed: true}},
+	} {
+		if err := a.React(c.ctx, r.ID, c.d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := reactionsOf(t, a.Ledger(), r.ID)
+	if len(got) != 3 || got[2] != (ReactionData{Seq: fin, Reaction: ReactionUp, By: "alice", Removed: true}) {
+		t.Fatalf("reactions = %+v", got)
+	}
+	if c := count(); len(c) != 1 || c[ReactionUp] != 1 {
+		t.Fatalf("counts after a removal = %v", c)
+	}
+	if n := len(receiptsOf(t, a.Ledger(), r.ID)); n != 1 {
+		t.Fatalf("%d receipts after a removal, want the first one", n)
+	}
+	// Alice reacts again, and bob takes his back: the count of up is the
+	// one of alice, and a count that reaches zero leaves the map.
+	if err := a.React(alice, r.ID, ReactionData{Seq: fin, Reaction: ReactionUp}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.React(bob, r.ID, ReactionData{Seq: fin, Reaction: ReactionUp, Removed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.React(alice, r.ID, ReactionData{Seq: fin, Reaction: ReactionUp, Removed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if c := count(); c != nil {
+		t.Fatalf("counts after every removal = %v", c)
+	}
+	if n := len(reactionsOf(t, a.Ledger(), r.ID)); n != 6 {
+		t.Fatalf("%d reaction events, want 6", n)
 	}
 }
 

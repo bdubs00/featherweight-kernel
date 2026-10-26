@@ -121,6 +121,13 @@ func TestReactions(t *testing.T) {
 	if len(reactions) != 2 || reactions[0] != want[0] || reactions[1] != want[1] || receipts != 1 {
 		t.Fatalf("reactions = %+v, %d receipts", reactions, receipts)
 	}
+
+	// remove takes the reaction of the caller back, and the count goes
+	// down.
+	resp, b = do(t, "POST", srv.URL+"/v1/runs/"+r.ID+"/reactions", `{"seq":`+itoa(fin)+`,"reaction":"up","remove":true}`, "Authorization", "Bearer alice-token")
+	if got := decodeRun(t, resp, b, http.StatusOK); got.Reactions[fw.ReactionUp] != 0 || got.Reactions[fw.ReactionHeart] != 1 {
+		t.Fatalf("run after a removal = %s", b)
+	}
 }
 
 func itoa(n uint64) string { return strconv.FormatUint(n, 10) }

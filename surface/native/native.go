@@ -822,20 +822,22 @@ func (s *server) sendMessage(w http.ResponseWriter, r *http.Request) {
 
 // reactionBody is the body of POST /v1/runs/{id}/reactions: the event of
 // the run, 0 for the run as a whole, the reaction, up, down, or heart, a
-// note, and the person. Only a trusted caller, the static token or a
-// workload, names the person in by, as for the sender of a message;
-// anyone else reacts as the principal of the request. Without by, the
-// reaction names the person of HeaderOnBehalfOf, or the caller.
+// note, the person, and remove, true to take the reaction of the person
+// back. Only a trusted caller, the static token or a workload, names the
+// person in by, as for the sender of a message; anyone else reacts as the
+// principal of the request. Without by, the reaction names the person of
+// HeaderOnBehalfOf, or the caller.
 type reactionBody struct {
 	Seq      uint64 `json:"seq"`
 	Reaction string `json:"reaction"`
 	Note     string `json:"note"`
 	By       string `json:"by"`
+	Remove   bool   `json:"remove"`
 }
 
 // react answers POST /v1/runs/{id}/reactions with the run object after the
-// reaction (fw.Agent.React). The caller needs the operator role on the
-// run.
+// reaction, or after its removal with remove (fw.Agent.React). The caller
+// needs the operator role on the run.
 func (s *server) react(w http.ResponseWriter, r *http.Request) {
 	var body reactionBody
 	if !s.decode(w, r, &body) {
@@ -847,7 +849,7 @@ func (s *server) react(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	d := fw.ReactionData{Seq: body.Seq, Reaction: strings.ToLower(strings.TrimSpace(body.Reaction)), Note: body.Note, By: by}
+	d := fw.ReactionData{Seq: body.Seq, Reaction: strings.ToLower(strings.TrimSpace(body.Reaction)), Note: body.Note, By: by, Removed: body.Remove}
 	if err := s.a.React(r.Context(), id, d); err != nil {
 		s.fail(w, r, err)
 		return

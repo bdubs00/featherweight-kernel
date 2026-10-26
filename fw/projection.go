@@ -423,7 +423,17 @@ func (r *Run) Apply(e Event, prices Prices) {
 		}
 		counts := make(map[string]int, len(r.Reactions)+1)
 		maps.Copy(counts, r.Reactions)
-		counts[d.Reaction]++
+		switch {
+		case !d.Removed:
+			counts[d.Reaction]++
+		case counts[d.Reaction] > 1:
+			counts[d.Reaction]--
+		default:
+			delete(counts, d.Reaction)
+		}
+		if len(counts) == 0 {
+			counts = nil
+		}
 		r.Reactions = counts
 	case EvBudgetChanged:
 		// A branch keeps the changes that it copied, because it goes on
