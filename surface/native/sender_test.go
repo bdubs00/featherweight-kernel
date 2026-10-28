@@ -155,6 +155,28 @@ func TestInlineProfileCompaction(t *testing.T) {
 	}
 }
 
+// An inline profile carries a definition of done: the kernel runs its
+// checks, so a check of a tool that the run lacks ends the run as not done
+// after its one attempt. A bad block is a 400 that names it.
+func TestInlineProfileDone(t *testing.T) {
+	a := newAgent(t, newScript(endTurn("done")).model())
+	srv := serve(t, a)
+	resp, b := do(t, "POST", srv.URL+"/v1/runs", `{"input":"hi","wait":true,"profile":{"done":{"checks":[{"name":"the file","tool":"nothing-here"}],"attempts":1,"timeout":"30s"}}}`)
+	r := decodeRun(t, resp, b, http.StatusOK)
+	if r.State != fw.StateFailed || r.Done == nil || r.Done.State != fw.DoneFailed || len(r.Done.Checks) != 1 || r.Done.Checks[0].Name != "the file" {
+		t.Fatalf("run = %s, done = %+v", r.State, r.Done)
+	}
+	for body, field := range map[string]string{
+		`{"input":"hi","profile":{"done":{"checks":[{"tool":"two words"}]}}}`:              "profile.done.checks[0].tool",
+		`{"input":"hi","profile":{"done":{"checks":[{"tool":"clock"}],"timeout":"soon"}}}`: "done.timeout",
+	} {
+		resp, b = do(t, "POST", srv.URL+"/v1/runs", body)
+		if p := decodeProblem(t, resp, b, http.StatusBadRequest); !strings.Contains(p.Detail, field) {
+			t.Fatalf("detail = %q, want %s", p.Detail, field)
+		}
+	}
+}
+
 // TestPinnedMessage checks pinned in the body of a follow-up: any caller
 // who can send pins a message, and the bound of the pinned messages is a
 // 400 that names it.

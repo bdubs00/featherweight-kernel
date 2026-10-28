@@ -305,6 +305,27 @@ type profileBody struct {
 	// Compaction overlays the compaction block of the named profile
 	// (fw.CompactionConfig); the kernel checks it.
 	Compaction *fw.CompactionConfig `json:"compaction"`
+	// Done adds checks to the definition of done of the named profile
+	// (fw.Done). The kernel merges them and never drops a check of the
+	// owner of the profile.
+	Done *doneBody `json:"done"`
+}
+
+// doneBody is fw.Done with a timeout that is a Go duration string, such as
+// "5m", or a number of nanoseconds.
+type doneBody struct {
+	Checks   []fw.DoneCheck `json:"checks"`
+	Attempts int            `json:"attempts"`
+	Timeout  doneTimeout    `json:"timeout"`
+}
+
+// doneTimeout is the timeout of a done body.
+type doneTimeout time.Duration
+
+func (d *doneTimeout) UnmarshalJSON(b []byte) error {
+	v, err := parseDuration(b, "done.timeout")
+	*d = doneTimeout(v)
+	return err
 }
 
 // rulesBody is fw.Rules: a default verdict and three rule lists, plus All,
@@ -452,6 +473,13 @@ func (p *profileBody) profile() (*fw.AgentProfile, error) {
 		return nil, err
 	}
 	out.Budget = b
+	if p.Done != nil {
+		d := &fw.Done{Checks: p.Done.Checks, Attempts: p.Done.Attempts, Timeout: time.Duration(p.Done.Timeout)}
+		if err := fw.CheckDone(d); err != nil {
+			return nil, errors.New("profile." + strings.TrimPrefix(err.Error(), fw.ErrInvalidRequest.Error()+": "))
+		}
+		out.Done = d
+	}
 	if p.Compaction != nil {
 		c := *p.Compaction
 		c.Model = strings.TrimSpace(c.Model)
