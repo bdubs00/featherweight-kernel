@@ -3052,12 +3052,13 @@ It stopped: step 3 gitea.issue_write: error: gitea: 503 Service Unavailable.
 
 Package `routine` reads recorded runs. The calls of a run are the calls of the model, without the calls of the kernel (`fw.ModelCalls`). `routine.Replay` checks a routine against them. For each run, it reads the answers of the agent with `observe`. A run whose answer a question does not expect, or whose `find` finds no value, is one that the routine hands to the agent: Replay counts it as handed. For every other run, Replay renders each step and compares it with the call of the agent to the same tool at the same place. It compares each key of `compare`, or else each key of the rendered input, as canonical JSON. A key that only the agent sets is extra and is counted. A check matches the next call of its tool and the recorded result. A check that the agent never made is unchecked and is counted. With a decider, Replay also scores the decider per question: the agreement, the Brier score, and a table of reliability at the bands 0.5, 0.7, 0.85, and 0.95.
 
-`routine.Propose` makes a routine from the runs that completed and that nobody sent back. The most common sequence of tool names gives the steps, and a list takes the length that most runs give it. The runs with another sequence or another length are not used, with the reason. Each value of an input, and of a JSON answer, gets one kind:
+`routine.Propose` makes a routine from the runs that completed and that nobody sent back. The calls of the checks of done are no steps. The most common sequence of tool names gives the steps, and a list takes the length that most runs give it. The runs with another sequence or another length are not used, with the reason. Each value of an input, and of a JSON answer, gets one kind:
 
-- A value that every run shares is a constant.
+- A value that every run shares and that the agent read in an earlier result stays a `find` over that result: a text with a space in it, such as a line of a file, or a number after the word that labels it, such as `pens=` before `120`. So a routine that copies a line writes the line of its own run.
+- Any other value that every run shares is a constant: a name, a path, a key, a number without a label, or a value that only the input holds.
 - A key that some runs leave out and the others set to one value is an optional key, which the routine leaves out.
 - A list goes element by element.
-- A value from the input or from an earlier result is a `find`. Its context is the word that labels the value, such as `Number: (\d+)`, else the shortest context that reads every run.
+- A value from the input or from an earlier result is a `find`. Its context is the word that labels the value, such as `Number: (\d+)`, else the shortest context that reads every run. A text ends at the next character or at the end of the text.
 - A value from a small set, at most 8 values over at least 10 runs, is a question with the option `other`. The values of the answer become questions first.
 - A value whose context in a result holds the value of a question is a `find` with `printf`.
 - Any other value is free, `{{/* free <place> */}}`. The routine stays incomplete until a person writes it, and a replay of the step says "the routine cannot fill the value <place> yet".

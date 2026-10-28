@@ -5,6 +5,8 @@ package routine
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -202,5 +204,137 @@ func TestReplayOfAFreeValue(t *testing.T) {
 	res := Replay(context.Background(), r, runs, ReplayOptions{})
 	if len(res.Diverged) != 5 || res.Diverged[0].Reason != "the routine cannot fill the value step 2 labels[0] yet" {
 		t.Fatalf("replay = %+v", res.Diverged)
+	}
+}
+
+// stockRuns records runs of a clerk that copies the first line of the
+// stock file into a report and answers with it, as the clerk of the lab
+// stack did. Its profile has a check of done that reads the report. The
+// files tool shows a file with line numbers. line gives the first line of
+// the file in run i, and wrote the line that the agent writes.
+func stockRuns(t *testing.T, n int, line, wrote func(i int) string) [][]fw.Event {
+	t.Helper()
+	var file, report string
+	files := fw.NewTool(fw.ToolSpec{Name: "files"}, func(_ context.Context, in json.RawMessage) (fw.ToolResult, error) {
+		var v struct {
+			Command  string `json:"command"`
+			Path     string `json:"path"`
+			FileText string `json:"file_text"`
+		}
+		_ = json.Unmarshal(in, &v)
+		switch {
+		case v.Command == "create":
+			report = v.FileText
+			return fw.TextResult("File created successfully at: /data/" + v.Path), nil
+		case v.Path == "reports/stock-ack.md":
+			return fw.TextResult("Here's the content of /data/reports/stock-ack.md with line numbers:\n     1\t" + report), nil
+		}
+		return fw.TextResult("Here's the content of /data/stock/levels.txt with line numbers:\n     1\t" + file + "\n     2\tThe clerk copies the first line only."), nil
+	})
+	run := 0
+	model := fw.ModelFunc{GenerateFn: func(_ context.Context, req *fw.Request) (*fw.Response, error) {
+		steps := 0
+		for _, m := range req.Messages {
+			if m.Role == fw.RoleAssistant {
+				steps++
+			}
+		}
+		call := func(id, input string) *fw.Response {
+			return &fw.Response{Content: []fw.Block{{Type: fw.BlockToolUse, ID: id, Name: "files", Input: json.RawMessage(input)}}, StopReason: fw.StopToolUse}
+		}
+		text, _ := json.Marshal(wrote(run))
+		switch steps {
+		case 0:
+			return call("c1", `{"command": "view", "path": "stock/levels.txt"}`), nil
+		case 1:
+			return call("c2", `{"command": "create", "path": "reports/stock-ack.md", "file_text": `+string(text)+`}`), nil
+		}
+		return &fw.Response{Content: []fw.Block{fw.Text(`ACK {"line": ` + string(text) + `}`)}, StopReason: fw.StopEndTurn}, nil
+	}}
+	prof := fw.AgentProfile{Name: "clerk", Done: &fw.Done{Checks: []fw.DoneCheck{{Name: "the acknowledgement is saved", Tool: "files",
+		Input: `{"command": "view", "path": "reports/stock-ack.md"}`, Contains: []string{"STOCK"}}}, Attempts: 1}}
+	l := fw.NewMemLedger()
+	a, err := fw.New(fw.WithoutDefaults(), fw.WithAuthn(fw.NoAuthn{}), fw.WithModelName("anthropic/claude-opus-5-5"), fw.WithModel(model),
+		fw.WithLedger(l), fw.WithBus(fw.NewMemBus()), fw.WithTools(files), fw.WithProfile(prof),
+		fw.WithLogger(slog.New(slog.NewTextHandler(io.Discard, nil))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	defer a.Close(ctx)
+	var out [][]fw.Event
+	for run = 0; run < n; run++ {
+		file = line(run)
+		r, err := a.Run(ctx, "Acknowledge today's stock file.", fw.AsAgent("clerk"))
+		if err != nil || r.State != fw.StateCompleted {
+			t.Fatalf("run %d: %+v, %v", run, r, err)
+		}
+		var evs []fw.Event
+		for e, err := range l.Read(ctx, r.ID, 0) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			evs = append(evs, e)
+		}
+		out = append(out, evs)
+	}
+	return out
+}
+
+// The calls of the checks of done are no steps of a proposal, and a line
+// that the agent read from a file and copied stays a line that the routine
+// reads, although it was the same in every run. On a run where the file
+// changed, the routine writes the new line, and an agent that wrote the
+// old one differs from it.
+func TestProposeReadsWhatTheAgentRead(t *testing.T) {
+	const old, now = "STOCK pens=120 paper=40 ink=12", "STOCK pens=90 paper=40 ink=12"
+	same := func(int) string { return old }
+	runs := stockRuns(t, 12, same, same)
+	for _, e := range runs[0] {
+		var d fw.ToolRequestedData
+		if e.Type == fw.EvToolRequested && e.Decode(&d) == nil && fw.KernelCall(d.CallID) {
+			goto checked
+		}
+	}
+	t.Fatal("the runs have no call of a check of done")
+checked:
+	r, prop := Propose(runs, ProposeOptions{Name: "stock-ack"})
+	if !prop.Complete || len(prop.Runs) != 12 || strings.Join(prop.Sequence, " ") != "files files" || len(r.Steps) != 2 {
+		t.Fatalf("proposal = %+v\nroutine = %+v", prop, r)
+	}
+	if r.Steps[0].As != "files" || !strings.Contains(r.Steps[1].Input, `"file_text": {{ json (find .files `) ||
+		strings.Contains(r.Steps[1].Input, "pens=120") {
+		t.Fatalf("steps = %+v", r.Steps)
+	}
+	if !strings.Contains(r.Answer, `"line": {{ json (find .files `) || strings.Contains(r.Answer, "pens=120") {
+		t.Fatalf("answer = %s", r.Answer)
+	}
+	if loo := LeaveOneOut(context.Background(), runs, ProposeOptions{Name: "stock-ack"}); !loo.Holds() {
+		t.Fatalf("leave one out = %+v", loo)
+	}
+	// The file changed: an agent that copied the new line matches, and
+	// one that wrote the old value differs at the write.
+	changed := func(int) string { return now }
+	right := stockRuns(t, 1, changed, changed)
+	stale := stockRuns(t, 1, changed, same)
+	res := Replay(context.Background(), r, append(right, stale...), ReplayOptions{})
+	if len(res.Matched) != 1 || res.Matched[0] != right[0][0].Subject || len(res.Diverged) != 1 ||
+		res.Diverged[0].Step != 2 || res.Diverged[0].Reason != "the key file_text differs" || !strings.Contains(res.Diverged[0].Rendered, "pens=90") {
+		t.Fatalf("replay = %+v", res)
+	}
+	data := fw.RoutineData("Acknowledge today's stock file.", nil)
+	data["files"] = "Here's the content of /data/stock/levels.txt with line numbers:\n     1\t" + now + "\n     2\tThe clerk copies the first line only."
+	if in, err := fw.RenderRoutineInput(r.Steps[1].Input, data); err != nil || !strings.Contains(string(in), now) {
+		t.Fatalf("step 2 renders %s, %v", in, err)
+	}
+}
+
+// A constant that is a name, a path, or a number without a label stays a
+// constant, although an earlier result holds it.
+func TestProposeKeepsConstants(t *testing.T) {
+	runs, _ := proposeRuns(t)
+	r, _ := Propose(runs, ProposeOptions{Name: "triage", Decider: "clef"})
+	if !strings.Contains(r.Steps[1].Input, "}}, 22]") || !strings.Contains(r.Answer, `"status": "status/triaged"`) {
+		t.Fatalf("step 2 = %s\nanswer = %s", r.Steps[1].Input, r.Answer)
 	}
 }

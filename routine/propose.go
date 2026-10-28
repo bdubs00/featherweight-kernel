@@ -76,11 +76,16 @@ type Hole struct {
 }
 
 // Propose makes a routine from verified runs of an agent (docs/ROUTINES.md
-// section 3.6): the runs that completed and that no one sent back. The most
+// section 3.6): the runs that completed and that no one sent back. The
+// calls of a run are the calls of the model: the calls of the checks of
+// done and of the routine runner are not steps (fw.ModelCalls). The most
 // common sequence of tool names is the sequence of the steps, and a list
 // in an input has the length that most runs give it. For each value of the
 // input of each call, and of a JSON answer:
-//   - a value that is the same in every run is a constant;
+//   - a value that is the same in every run and that the agent read in an
+//     earlier result stays a value that the routine reads: a find over
+//     that result (read);
+//   - any other value that is the same in every run is a constant;
 //   - a key that some runs leave out and the others set to one value is
 //     left out;
 //   - a value that the input of the run or an earlier result holds becomes
@@ -473,12 +478,16 @@ func (p *proposer) answerShape(leaves *[]*leafVal) (string, *node) {
 // without JSON.
 func (l *leafVal) whole() bool { return l.step < 0 && l.path == "" }
 
-// constant marks a leaf that is the same in every run.
+// constant marks a leaf that is the same in every run, unless the agent
+// read it in an earlier result (read).
 func (p *proposer) constant(l *leafVal) bool {
 	for _, v := range l.vals[1:] {
 		if v != l.vals[0] {
 			return false
 		}
+	}
+	if p.read(l) {
+		return true
 	}
 	l.kind = "constant"
 	if l.whole() {
@@ -506,7 +515,7 @@ func (p *proposer) find(l *leafVal, withQuestion bool) bool {
 	for _, src := range p.sourcesOf(l) {
 		for _, q := range names {
 			texts := src.texts
-			pattern, ok := p.context(texts, l.vals, isNumber(l), q, func(patterns []string) bool {
+			pattern, ok := p.context(texts, l.vals, isNumber(l), q, false, func(patterns []string) bool {
 				return matchesEach(patterns, texts, l.vals)
 			})
 			if !ok {
@@ -523,6 +532,41 @@ func (p *proposer) find(l *leafVal, withQuestion bool) bool {
 			}
 			return true
 		}
+	}
+	return false
+}
+
+// read makes a leaf that is the same in every run a find over an earlier
+// result, when the agent read the value there: a text with a space in it,
+// such as a line of a file, with any context that reads every run, or a
+// number with the word that labels it, such as pens= before 120. The
+// routine then reads the value again on each run, so a file that changed
+// gives the changed value, never the value of the runs that it learned
+// from. A name, a path, a key, or a number without a label stays a
+// constant, and so does a value that only the input holds.
+func (p *proposer) read(l *leafVal) bool {
+	number := isNumber(l)
+	if !number && !(l.str && strings.ContainsAny(strings.TrimSpace(l.vals[0]), " \t\n")) {
+		return false
+	}
+	for _, src := range p.sourcesOf(l) {
+		if src.step < 0 {
+			continue
+		}
+		texts := src.texts
+		pattern, ok := p.context(texts, l.vals, number, "", number, func(patterns []string) bool {
+			return matchesEach(patterns, texts, l.vals)
+		})
+		if !ok {
+			continue
+		}
+		field := p.field(src.step)
+		expr := "find ." + field + " " + quoteArg(pattern)
+		l.kind, l.name, l.tmpl = HoleFind, field, "{{ "+expr+" }}"
+		if l.str && !l.whole() {
+			l.tmpl = "{{ json (" + expr + ") }}"
+		}
+		return true
 	}
 	return false
 }
@@ -597,9 +641,10 @@ var (
 // after. It builds the pattern of each run from the context in the text of
 // the first run. With the question q, the context holds the value of the
 // question, which the pattern of each run takes from its run, and the
-// result has %s in its place. fits decides whether the patterns of the
+// result has %s in its place. With labelOnly, only the word that labels
+// the value counts as a context. fits decides whether the patterns of the
 // runs fit.
-func (p *proposer) context(texts, vals []string, number bool, q string, fits func(patterns []string) bool) (string, bool) {
+func (p *proposer) context(texts, vals []string, number bool, q string, labelOnly bool, fits func(patterns []string) bool) (string, bool) {
 	for i, t := range texts {
 		if vals[i] == "" || !strings.Contains(t, vals[i]) {
 			return "", false
@@ -614,11 +659,14 @@ func (p *proposer) context(texts, vals []string, number bool, q string, fits fun
 		qv = p.answers[q]
 	}
 	try := func(pre, post string) (string, bool) {
+		// A text needs a mark after it: the next character, or else the
+		// end of the text, such as the last line of a file.
+		end := ""
 		if !number && post == "" {
-			return "", false // a text needs a mark after it
+			end = `\z`
 		}
 		if q == "" {
-			pattern := regexp.QuoteMeta(pre) + group + regexp.QuoteMeta(post)
+			pattern := regexp.QuoteMeta(pre) + group + regexp.QuoteMeta(post) + end
 			return pattern, fits(slices.Repeat([]string{pattern}, len(texts)))
 		}
 		if qv[0] == "" || !strings.Contains(pre+"\x00"+post, qv[0]) {
@@ -626,13 +674,13 @@ func (p *proposer) context(texts, vals []string, number bool, q string, fits fun
 		}
 		patterns := make([]string, len(texts))
 		for i := range texts {
-			patterns[i] = regexp.QuoteMeta(strings.Replace(pre, qv[0], qv[i], 1)) + group + regexp.QuoteMeta(strings.Replace(post, qv[0], qv[i], 1))
+			patterns[i] = regexp.QuoteMeta(strings.Replace(pre, qv[0], qv[i], 1)) + group + regexp.QuoteMeta(strings.Replace(post, qv[0], qv[i], 1)) + end
 		}
 		if !fits(patterns) {
 			return "", false
 		}
 		mark := "\x01"
-		pattern := regexp.QuoteMeta(strings.Replace(pre, qv[0], mark, 1)) + group + regexp.QuoteMeta(strings.Replace(post, qv[0], mark, 1))
+		pattern := regexp.QuoteMeta(strings.Replace(pre, qv[0], mark, 1)) + group + regexp.QuoteMeta(strings.Replace(post, qv[0], mark, 1)) + end
 		return strings.Replace(pattern, mark, "%s", 1), true
 	}
 	t0, v0 := texts[0], vals[0]
@@ -656,6 +704,9 @@ func (p *proposer) context(texts, vals []string, number bool, q string, fits fun
 				return pattern, true
 			}
 		}
+	}
+	if labelOnly {
+		return "", false
 	}
 	for size := 1; size <= 40; size++ {
 		for before := size; before >= 0; before-- {
@@ -722,7 +773,7 @@ func (p *proposer) question(l *leafVal) bool {
 	}
 	// The pattern must read the value of every run as ObserveAnswer reads
 	// it: over the answer, or over the calls of the tool, the first match.
-	pattern, ok := p.context(texts, l.vals, isNumber(l), "", func(patterns []string) bool {
+	pattern, ok := p.context(texts, l.vals, isNumber(l), "", false, func(patterns []string) bool {
 		o := obs
 		if l.step >= 0 {
 			o.Match = patterns[0]
@@ -789,9 +840,11 @@ func (p *proposer) newName(base string) string {
 	return name
 }
 
-// quoteArg writes a string argument of a template: raw when it can be.
+// quoteArg writes a string argument of a template: raw when it can be,
+// and quoted with escapes when it holds a backtick or a tab or a line
+// break, so a person reads "\t(.+?)\n" and not the marks themselves.
 func quoteArg(s string) string {
-	if !strings.Contains(s, "`") {
+	if !strings.ContainsAny(s, "`\t\r\n") {
 		return "`" + s + "`"
 	}
 	return strconv.Quote(s)

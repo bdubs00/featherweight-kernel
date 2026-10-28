@@ -392,14 +392,23 @@ fw routine replay --routine r.yaml [--ledger <dir>] [--agent name] [--decide] [-
 Without `--ledger`, the verb reads the ledger of the configuration.
 
 `Propose(runs [][]Event, opts) (Routine, Proposal)` is anti-unification of
-the tool calls of verified runs. It takes the sequence of tool names of
-each run. The most common sequence is the template. A list in an input
+the tool calls of verified runs. The calls of a run are the calls of the
+model (`fw.ModelCalls`): the calls of the runner and of the checks of
+done, whose call ids start with `routine_` and `done_`, are no steps. It
+takes the sequence of tool names of each run. The most common sequence is the template. A list in an input
 takes the length that most runs give it. The runs with another sequence or
 another length are listed as divergent, with the reason. For each call
 position and each leaf of the input JSON, across runs, Propose decides the
 kind of the leaf:
 
-- A value that is equal everywhere is a constant.
+- A value that is equal everywhere and that the agent read in an earlier
+  result stays a value that the routine reads: a `find` over that result.
+  This holds for a text with a space in it, such as a line of a file, and
+  for a number after the word that labels it, such as `pens=` before
+  `120`. So a routine that copies a line of a file writes the line that
+  the file holds on its run, not the line of the runs that it came from.
+- Any other value that is equal everywhere is a constant: a name, a path,
+  a key, a number without a label, or a value that only the input holds.
 - A key that some runs leave out and the others set to one value is left
   out, as an optional key. A key that some runs leave out and the others
   set to several values is a free hole of its own.
@@ -408,6 +417,8 @@ kind of the leaf:
   becomes a `find` template over that source. The context is the word
   that labels the value, such as `Number: (\d+)`. Only for a labeled
   context that is ambiguous, Propose takes the shortest unambiguous one.
+  A text needs a mark after it: the next character, or the end of the
+  text (`\z`), as for the last line of a file.
 - A value from a small set becomes a question, with those values as
   options plus `other`. A small set holds at most 8 distinct values over
   at least 10 runs. The `observe` of the question comes from the tool and
