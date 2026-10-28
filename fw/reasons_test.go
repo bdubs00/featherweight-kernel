@@ -126,7 +126,10 @@ func TestStopOnEachEnd(t *testing.T) {
 		stop  string
 	}{
 		{name: "answered", model: newScript(endTurn("hi")).Model(), state: StateCompleted, stop: RunStopAnswered},
-		{name: "checked", model: newScript(endTurn("fixed")).Model(), state: StateCompleted, stop: RunStopChecked,
+		{name: "checked", model: newScript(callTools(use("c1", "probe", `{}`)), endTurn("fixed")).Model(), state: StateCompleted, stop: RunStopChecked,
+			prof: &AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{{Tool: "probe"}}}}},
+		// A run that changed nothing passes its checks with a weak pass.
+		{name: "weak", model: newScript(endTurn("fixed")).Model(), state: StateCompleted, stop: RunStopAnswered,
 			prof: &AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{{Tool: "probe"}}}}},
 		{name: "not done", model: newScript(endTurn("fixed")).Model(), state: StateFailed, stop: RunStopNotDone,
 			prof: &AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{{Tool: "tests"}}, Attempts: 1}}},
@@ -246,6 +249,7 @@ func TestReasonsOfAnOlderKernel(t *testing.T) {
 	}{
 		{RunFinishedData{Outcome: OutcomeCompleted, Output: "hi"}, RunStopAnswered},
 		{RunFinishedData{Outcome: OutcomeCompleted, Done: DoneChecked}, RunStopChecked},
+		{RunFinishedData{Outcome: OutcomeCompleted, Done: DoneChecked, DoneWeak: true}, RunStopAnswered},
 		{RunFinishedData{Outcome: OutcomeFailed, Done: DoneFailed, Error: "not done: check 1 (tests) failed"}, RunStopNotDone},
 		{RunFinishedData{Outcome: OutcomeFailed, Error: "budget exceeded: maxTurns"}, "budget:maxTurns"},
 		{RunFinishedData{Outcome: OutcomeFailed, Error: "budget exceeded: maxCostUSD of the run tree (this run used 2 of 1)"}, "budget:maxCostUSD"},

@@ -305,6 +305,11 @@ type routineRun struct {
 	// check is true for the calls of a check run: a call that the policy
 	// asks for does not run, because nobody answers a check.
 	check bool
+	// ownBudget is true for the calls of a definition of done, which have
+	// a tool budget of their own (done.go). The limits of tool calls of
+	// the run and of its tree then do not refuse them, and the count of
+	// the calls of the run leaves them out (doneCall).
+	ownBudget bool
 }
 
 // routineVerdict is the decision on one routine.
@@ -616,16 +621,20 @@ func (rr *routineRun) apply(ctx context.Context, r Routine, q RunQueuedData, sai
 func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input json.RawMessage) (ToolResult, string, error) {
 	a, rs := rr.a, rr.rs
 	spec := t.Spec()
-	if o, spent := a.limitSpent(rs); spent {
+	if rr.ownBudget {
+		if o, spent := a.costSpent(rs); spent {
+			return ToolResult{}, "not run: " + o.why(), nil
+		}
+	} else if o, spent := a.limitSpent(rs); spent {
 		return ToolResult{}, "not run: " + o.why(), nil
 	}
 	if d, past := a.pastDeadline(rs); past {
 		return ToolResult{}, "not run: " + d.why(rs), nil
 	}
-	if b := a.budgetOf(rs); b.MaxToolCalls > 0 && rr.calls >= b.MaxToolCalls {
+	if b := a.budgetOf(rs); !rr.ownBudget && b.MaxToolCalls > 0 && rr.calls >= b.MaxToolCalls {
 		return ToolResult{}, fmt.Sprintf("not run: the run reached its limit of %d tool calls (budget.maxToolCalls)", b.MaxToolCalls), nil
 	}
-	if calls := a.roomOf(rs).calls; calls.set && calls.left <= 0 {
+	if calls := a.roomOf(rs).calls; !rr.ownBudget && calls.set && calls.left <= 0 {
 		return ToolResult{}, fmt.Sprintf("not run: the runs of this tree used the %d tool calls of the budget of run %s (budget.maxToolCalls)", int(calls.max), calls.owner.id), nil
 	}
 	callID := rr.prefix + NewID()

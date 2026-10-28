@@ -446,7 +446,9 @@ func (r *Run) Apply(e Event, prices Prices) {
 			r.budget = d.Budget.Merge(r.budget)
 		}
 	case EvToolRequested:
-		if !r.keptEvent(e) {
+		// The calls of the checks of a definition of done have a tool
+		// budget of their own, so the usage of the run leaves them out.
+		if !r.keptEvent(e) && !doneCall(e) {
 			r.Usage.ToolCalls++
 		}
 	case EvApprovalRequested:
@@ -506,6 +508,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 				done = *r.Done
 				done.State = d.Done
 			}
+			done.Weak = d.Done == DoneChecked && d.DoneWeak
 			r.Done = &done
 		}
 	}

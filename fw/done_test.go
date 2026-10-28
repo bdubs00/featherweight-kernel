@@ -101,13 +101,13 @@ var testsPass = DoneCheck{Name: "the tests pass", Tool: "tests", Input: `{"packa
 // run finished, and the model gets no other call.
 func TestDoneChecked(t *testing.T) {
 	ctx := testCtx(t)
-	g := &gate{fixed: true}
-	s := newScript(endTurn("The retries work now."))
+	g := &gate{}
+	s := newScript(callTools(use("c1", "fix", `{}`)), endTurn("The retries work now."))
 	prof := AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{testsPass}}}
 	a := newTestAgent(t, s.Model(), WithTools(g.tools()...), WithProfile(prof))
 	r, err := a.Run(ctx, "Fix the checkout retries.", AsAgent("fixer"))
 	mustState(t, r, err, StateCompleted)
-	if r.Output != "The retries work now." || len(s.requests()) != 1 || g.count() != 1 {
+	if r.Output != "The retries work now." || len(s.requests()) != 2 || g.count() != 1 {
 		t.Fatalf("run = %+v, model calls %d, checks %d", r, len(s.requests()), g.count())
 	}
 	evs := ledgerEvents(t, a.Ledger(), r.ID)
@@ -124,7 +124,9 @@ func TestDoneChecked(t *testing.T) {
 		t.Fatalf("events = %v", types)
 	}
 	var req ToolRequestedData
-	firstOf(t, evs, EvToolRequested, &req)
+	if err := evs[n-4].Decode(&req); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.HasPrefix(req.CallID, doneCallPrefix) || req.Tool != "tests" {
 		t.Fatalf("check call = %+v", req)
 	}
@@ -133,11 +135,11 @@ func TestDoneChecked(t *testing.T) {
 		passes[0].Answer != lastSeqOf(evs, EvModelResponded) || len(passes[0].Checks) != 1 || !passes[0].Checks[0].Passed {
 		t.Fatalf("passes = %+v", passes)
 	}
-	if d := finishedOf(t, evs); d.Done != DoneChecked || d.Outcome != OutcomeCompleted {
+	if d := finishedOf(t, evs); d.Done != DoneChecked || d.DoneWeak || d.Stop != RunStopChecked || d.Outcome != OutcomeCompleted {
 		t.Fatalf("finished = %+v", d)
 	}
 	for _, got := range []*Run{r, ProjectRun(evs)} {
-		if got.Done == nil || got.Done.State != DoneChecked || len(got.Done.Checks) != 1 {
+		if got.Done == nil || got.Done.State != DoneChecked || got.Done.Weak || len(got.Done.Checks) != 1 || got.Stop != RunStopChecked {
 			t.Fatalf("run done = %+v", got.Done)
 		}
 	}
@@ -485,5 +487,202 @@ func TestDoneCheckAsksForFreshState(t *testing.T) {
 	defer mu.Unlock()
 	if len(seen) != 2 || seen[0] || !seen[1] {
 		t.Fatalf("fresh per call = %v, want [false true]", seen)
+	}
+}
+
+// The static rule of a weak check: a view or a read of a path that names
+// no contains and no lacks.
+func TestDoneCheckWeak(t *testing.T) {
+	for _, c := range []struct {
+		chk  DoneCheck
+		weak bool
+	}{
+		{DoneCheck{Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`}, true},
+		{DoneCheck{Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`, Contains: []string{"# "}}, false},
+		{DoneCheck{Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`, Lacks: []string{"TODO"}}, false},
+		{DoneCheck{Tool: "memory", Input: `{"command": "view", "path": "/memories"}`}, true},
+		{DoneCheck{Tool: "front.pages_read", Input: `{"path": "launch/quillwork-3.md"}`}, true},
+		{DoneCheck{Tool: "fs.read_text_file", Input: `{"path": "/data/report.md"}`}, true},
+		{DoneCheck{Tool: "view", Input: `{"file_path": "a.txt"}`}, true},
+		{DoneCheck{Tool: "files", Input: `{"command": "create", "path": "a.txt", "file_text": "x"}`}, false},
+		{DoneCheck{Tool: "front.pages_read", Input: `{}`}, false},
+		{DoneCheck{Tool: "bash", Input: `{"command": "go test ./..."}`}, false},
+		{DoneCheck{Tool: "tests", Input: `{"package": "./..."}`}, false},
+		{DoneCheck{Tool: "thread_reader", Input: `{"path": "x"}`}, false},
+		{DoneCheck{Tool: "files"}, false},
+	} {
+		if got := c.chk.Weak(); got != c.weak {
+			t.Errorf("Weak(%s %s) = %v, want %v", c.chk.Tool, c.chk.Input, got, c.weak)
+		}
+	}
+}
+
+// pathTools are tools for the tests of a weak pass: files, a text editor
+// whose view reads and whose other commands write; memory, a tool of
+// Know-how that writes notes; and lookup, a read-only tool.
+func pathTools(t *testing.T) []Tool {
+	t.Helper()
+	var mu sync.Mutex
+	texts := map[string]string{"drafts/latest.md": "# Draft from yesterday\n"}
+	files := NewTool(ToolSpec{Name: "files"}, func(_ context.Context, in json.RawMessage) (ToolResult, error) {
+		var d struct {
+			Command  string `json:"command"`
+			Path     string `json:"path"`
+			FileText string `json:"file_text"`
+		}
+		if err := json.Unmarshal(in, &d); err != nil {
+			return ErrorResult(err.Error()), nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if d.Command == "view" {
+			text, ok := texts[d.Path]
+			if !ok {
+				return ErrorResult("no file " + d.Path), nil
+			}
+			return TextResult(text), nil
+		}
+		texts[d.Path] = d.FileText
+		return TextResult("File created successfully at: " + d.Path), nil
+	})
+	memory := NewTool(ToolSpec{Name: "memory"}, func(context.Context, json.RawMessage) (ToolResult, error) {
+		return TextResult("File created successfully at: /memories/n.md"), nil
+	})
+	lookup := NewTool(ToolSpec{Name: "lookup", ReadOnly: true}, func(context.Context, json.RawMessage) (ToolResult, error) {
+		return TextResult("found"), nil
+	})
+	return []Tool{files, memory, lookup}
+}
+
+// A pass that passed is weak when the run changed nothing, or when no
+// check of it is strong. A weak run completes as answered, with done
+// checked and weak on its end and on its run object, and a consumer of
+// the lifecycle events alone sees the mark too.
+func TestDoneWeak(t *testing.T) {
+	ctx := testCtx(t)
+	view := DoneCheck{Name: "the draft is saved", Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`}
+	title := DoneCheck{Name: "the draft has a title", Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`, Contains: []string{"# "}}
+	write := callTools(use("c1", "files", `{"command": "create", "path": "drafts/latest.md", "file_text": "# Launch\n"}`))
+	for _, c := range []struct {
+		name   string
+		script []*Response
+		checks []DoneCheck
+		weak   bool
+	}{
+		// The finding of the stack: "Do not call a tool", and the checks
+		// read the draft of an earlier run.
+		{"no call", []*Response{endTurn("Done.")}, []DoneCheck{view, title}, true},
+		{"a read only", []*Response{callTools(use("c1", "files", `{"command": "view", "path": "drafts/latest.md"}`)), endTurn("Done.")}, []DoneCheck{title}, true},
+		{"a read-only tool", []*Response{callTools(use("c1", "lookup", `{}`)), endTurn("Done.")}, []DoneCheck{title}, true},
+		{"a note only", []*Response{callTools(use("c1", "memory", `{"command": "create", "path": "/memories/n.md", "file_text": "x"}`)), endTurn("Done.")}, []DoneCheck{title}, true},
+		{"a write and a weak check", []*Response{write, endTurn("Done.")}, []DoneCheck{view}, true},
+		{"a write and a strong check", []*Response{write, endTurn("Done.")}, []DoneCheck{view, title}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prof := AgentProfile{Name: "writer", Done: &Done{Checks: c.checks}}
+			a := newTestAgent(t, newScript(c.script...).Model(), WithTools(pathTools(t)...), WithProfile(prof))
+			r, err := a.Run(ctx, "Write the draft. Do not call a tool.", AsAgent("writer"))
+			mustState(t, r, err, StateCompleted)
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			passes := donePassesOf(t, evs)
+			if len(passes) != 1 || !passes[0].Passed || passes[0].Weak != c.weak {
+				t.Fatalf("passes = %+v", passes)
+			}
+			stop := RunStopChecked
+			if c.weak {
+				stop = RunStopAnswered
+			}
+			d := finishedOf(t, evs)
+			if d.Done != DoneChecked || d.DoneWeak != c.weak || d.Stop != stop || CheckedDone(d.Done, d.DoneWeak) == c.weak {
+				t.Fatalf("finished = %+v", d)
+			}
+			var life []Event
+			for _, e := range evs {
+				if e.Type == EvRunQueued || e.Type == EvRunStarted || e.Type == EvRunFinished {
+					life = append(life, e)
+				}
+			}
+			for _, got := range []*Run{r, ProjectRun(evs), ProjectRun(life)} {
+				if got.Done == nil || got.Done.State != DoneChecked || got.Done.Weak != c.weak || got.Stop != stop {
+					t.Fatalf("run done = %+v, stop %q", got.Done, got.Stop)
+				}
+			}
+		})
+	}
+}
+
+// The checks have a tool budget of their own. A run that used its tool
+// calls still runs every check, and the calls of the checks neither count
+// in the usage of the run nor take a call from the turn that fixes the
+// work.
+func TestDoneOwnBudget(t *testing.T) {
+	ctx := testCtx(t)
+	// The model leaves one tool call of the run, and both checks run.
+	g := &gate{}
+	other := DoneCheck{Name: "the lint passes", Tool: "tests", Input: `{"lint": true}`}
+	s := newScript(callTools(use("c1", "fix", `{}`)), endTurn("Fixed."))
+	prof := AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{testsPass, other}}}
+	a := newTestAgent(t, s.Model(), WithTools(g.tools()...), WithProfile(prof))
+	r, err := a.Run(ctx, "Fix the checkout retries.", AsAgent("fixer"), WithRunBudget(Budget{MaxToolCalls: 2}))
+	mustState(t, r, err, StateCompleted)
+	if g.count() != 2 || r.Stop != RunStopChecked || r.Usage.ToolCalls != 1 {
+		t.Fatalf("checks %d, stop %q, tool calls %d, done %+v", g.count(), r.Stop, r.Usage.ToolCalls, r.Done)
+	}
+	evs := ledgerEvents(t, a.Ledger(), r.ID)
+	if ProjectRun(evs).Usage.ToolCalls != 1 {
+		t.Fatalf("projected tool calls = %d", ProjectRun(evs).Usage.ToolCalls)
+	}
+
+	// The first pass fails, and the model still has its calls to fix the
+	// work, because the two calls of the first pass did not take them.
+	g = &gate{}
+	s = newScript(endTurn("Done."), callTools(use("c1", "fix", `{}`)), endTurn("Fixed now."))
+	prof.Done.Attempts = 2
+	a = newTestAgent(t, s.Model(), WithTools(g.tools()...), WithProfile(prof))
+	r, err = a.Run(ctx, "Fix the checkout retries.", AsAgent("fixer"), WithRunBudget(Budget{MaxToolCalls: 2}))
+	mustState(t, r, err, StateCompleted)
+	if r.Output != "Fixed now." || r.Stop != RunStopChecked || g.count() != 4 || r.Usage.ToolCalls != 1 {
+		t.Fatalf("run = %+v, checks %d", r, g.count())
+	}
+}
+
+// In a run that is held back from Know-how, a check of the memory tool is
+// skipped, not failed, because the kernel took the tool out of the run. A
+// pass whose every check was skipped is weak. A normal run runs the same
+// check.
+func TestDoneHeldBackSkips(t *testing.T) {
+	ctx := testCtx(t)
+	notes := DoneCheck{Name: "a note exists", Tool: "memory", Input: `{"command": "view", "path": "/memories"}`, Contains: []string{"File"}}
+	write := callTools(use("c1", "files", `{"command": "create", "path": "drafts/latest.md", "file_text": "# Launch\n"}`))
+	prof := AgentProfile{Name: "writer", Done: &Done{Checks: []DoneCheck{notes}, Attempts: 1}}
+	held := WithMetadata(map[string]string{MetaKnowhow: KnowhowOff})
+
+	a := newTestAgent(t, newScript(write, endTurn("Done.")).Model(), WithTools(pathTools(t)...), WithProfile(prof))
+	r, err := a.Run(ctx, "Write the draft.", AsAgent("writer"), held)
+	mustState(t, r, err, StateCompleted)
+	if r.Done == nil || len(r.Done.Checks) != 1 || !r.Done.Checks[0].Passed || !strings.Contains(r.Done.Checks[0].Skipped, "held back") ||
+		!r.Done.Weak || r.Stop != RunStopAnswered {
+		t.Fatalf("held back: done %+v, stop %q", r.Done, r.Stop)
+	}
+	if n := countType(ledgerEvents(t, a.Ledger(), r.ID), EvToolRequested); n != 1 {
+		t.Fatalf("a skipped check made a call: %d calls", n)
+	}
+
+	// The same check with a strong check beside it: the strong check makes
+	// the pass count.
+	prof.Done.Checks = []DoneCheck{notes, {Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`, Contains: []string{"# Launch"}}}
+	a = newTestAgent(t, newScript(write, endTurn("Done.")).Model(), WithTools(pathTools(t)...), WithProfile(prof))
+	r, err = a.Run(ctx, "Write the draft.", AsAgent("writer"), held)
+	mustState(t, r, err, StateCompleted)
+	if r.Done == nil || r.Done.Weak || r.Stop != RunStopChecked || r.Done.Checks[0].Skipped == "" || r.Done.Checks[1].Skipped != "" {
+		t.Fatalf("held back with a strong check: done %+v, stop %q", r.Done, r.Stop)
+	}
+
+	// A normal run runs the check of the memory tool.
+	a = newTestAgent(t, newScript(write, endTurn("Done.")).Model(), WithTools(pathTools(t)...), WithProfile(prof))
+	r, err = a.Run(ctx, "Write the draft.", AsAgent("writer"))
+	mustState(t, r, err, StateCompleted)
+	if r.Done == nil || r.Done.Checks[0].Skipped != "" || !r.Done.Checks[0].Passed || r.Stop != RunStopChecked {
+		t.Fatalf("normal run: done %+v, stop %q", r.Done, r.Stop)
 	}
 }

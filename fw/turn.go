@@ -89,7 +89,7 @@ type cursor struct {
 	context    string    // the context of fw.run.started (ContextBriefer)
 	fromAgent  bool      // a message from another agent arrived (MessageNote)
 	compactSeq uint64    // the latest fw.context.compacted
-	toolCalls  int       // fw.tool.requested events in the run
+	toolCalls  int       // fw.tool.requested events in the run, without the calls of the checks of done
 	keptTurns  int       // the turns that a branch kept from its source (RunQueuedData.Kept)
 	keptOpen   bool      // a kept turn is open, and the branch did not make its model call yet
 	keptCalls  int       // the tool calls that a branch kept from its source
@@ -266,7 +266,7 @@ func analyze(events []Event) *cursor {
 				}
 			}
 		case EvToolRequested, EvToolResponded:
-			if e.Type == EvToolRequested {
+			if e.Type == EvToolRequested && !doneCall(e) {
 				c.toolCalls++
 				if e.Seq <= c.queued.Kept {
 					c.keptCalls++
@@ -843,12 +843,14 @@ func (a *Agent) endTurn(ctx context.Context, rs *runState, c *cursor, n int) err
 	if err := a.compareLocked(ctx, rs, c, output); err != nil {
 		return err
 	}
-	done := doneStateOf(rs)
+	// A weak pass of the checks completes the run as answered, so it
+	// lands with the runs that a person checks (done.go, weakPass).
+	done, weak := doneOfLocked(rs, c)
 	stop := RunStopAnswered
-	if done == DoneChecked {
+	if CheckedDone(done, weak) {
 		stop = RunStopChecked
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: output, Done: done, Stop: stop})
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: output, Done: done, DoneWeak: weak, Stop: stop})
 	return err
 }
 

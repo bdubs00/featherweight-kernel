@@ -336,7 +336,10 @@ type Approval struct {
 // usages of several runs add field by field.
 type RunUsage struct {
 	Usage
-	Turns     int     `json:"turns"`
+	Turns int `json:"turns"`
+	// ToolCalls counts the tool calls of the model, of a routine, and of a
+	// check run. The calls of the checks of a definition of done have a
+	// tool budget of their own, so it leaves them out.
 	ToolCalls int     `json:"toolCalls,omitempty"`
 	CostUSD   float64 `json:"costUSD,omitempty"`
 	// UnpricedTokens counts the tokens of the model calls whose model has

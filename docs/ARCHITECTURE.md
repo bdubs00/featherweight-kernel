@@ -1363,7 +1363,7 @@ The `metrics` projection maintains this registry. The route `/metrics` carries n
 | `fw_successful_task_cost_usd` | histogram | `basis` |
 | `fw_successful_task_cost_excluded_total` | counter | `reason` |
 | `fw_budget_exceeded_total` | counter | `agent`, `limit` (`maxTurns`, `maxTokens`, `maxCostUSD`, `maxToolCalls`, `deadline`, `maxRepeats`, `other`) |
-| `fw_done_passes_total` | counter | `agent`, `result` (`passed`, `retried`, `failed`): the passes of a definition of done (section 24) |
+| `fw_done_passes_total` | counter | `agent`, `result` (`passed`, `weak`, `retried`, `failed`): the passes of a definition of done (section 24) |
 | `fw_model_requests_total` | counter | `provider`, `model`, `outcome` (`ok`, `error`, `canceled`) |
 | `fw_model_request_duration_seconds` | histogram | `provider`, `model` |
 | `fw_model_tokens_total` | counter | `provider`, `model`, `kind` (`input`, `output`, `cache_read`, `cache_write`) |
@@ -3172,11 +3172,17 @@ agents:
 
 A check passes on four conditions. Its call runs. Its result is not an error. Its exit code is zero, for a tool that reports one, such as `bash`. Its text holds every string of `contains` and no string of `lacks`.
 
+A check is weak when it only reads a file or a page by its path and names no `contains` and no `lacks` (`DoneCheck.Weak`). Such a check passes for any path that exists, also a file that was there before the run. "Only reads a path" means that the input names a path (the key `path`, `file`, `file_path`, `filePath`, or `filename`), and either its `command` is `view` or `read`, as for `files` and `memory`, or the first or the last word of the tool name is `read` or `view`, as for `read_file` or `front.pages_read` (`fw.ReadsPath`). The profile editor of the workbench warns a person who saves a weak check, with the same rule.
+
 The kernel resolves the block once, at the queue of the run. It records the block with its defaults in the field `done` of `fw.run.queued`. A run keeps its definition of done for its life, as it keeps its outcome (section 20). A child run never takes the block of its named profile, as for an outcome. An inline profile adds its checks to the checks of the named profile and removes none. So a request cannot weaken the definition of done of the owner of an agent. A process that hosts another agent program (section 19) refuses the block, because the checks need the turn loop.
 
 ### 24.2 A pass
 
-When the model ends a turn with its answer, the kernel closes the turn. Then it runs every check once, in order, with no model. The calls go through the tool path of the routine runner. So the budget, the policy, the limits, and the ledger treat them as calls of the model. Their call ids start with `done_`, and they never enter the history of the model. A check never asks a person: a call that the policy asks for fails the check, as in a check run (section 23).
+When the model ends a turn with its answer, the kernel closes the turn. Then it runs every check once, in order, with no model. The calls go through the tool path of the routine runner. So the policy, the limits of each tool, and the ledger treat them as calls of the model. Their call ids start with `done_`, and they never enter the history of the model. A check never asks a person: a call that the policy asks for fails the check, as in a check run (section 23).
+
+The checks have a tool budget of their own: at most 8 calls a pass, one per check, each within the `timeout` of the block. The limits of tool calls of the run and of its tree (`budget.maxToolCalls`) neither refuse a check nor count it, and the usage of the run (`usage.toolCalls`) leaves the calls of the checks out. So a run that used its tool calls still has its work checked, and a failed pass takes no call from the turn that fixes the work. A limit of tokens or of cost, and the deadline of the run, still stop a check.
+
+A run that is held back from Know-how (`fw.knowhow: off`, docs/KNOWHOW.md section 4.6) has no `memory` and no `recall` tool. A check of one of these tools is skipped there, not failed. Its result has `"passed": true` and `skipped` with the reason.
 
 Each call of a check gets fresh tool state. The kernel sets `RunInfo.Fresh` on the call. `bash` then runs the command in a new shell in the directory of the run, and it kills that shell after the call. The shell of the run keeps its directory and its variables. So a `cd` or an `export` of the model cannot change a check, and a check cannot change the shell of the model. A check that needs a directory below the directory of the run names it in its command.
 
@@ -3188,6 +3194,7 @@ The kernel records the pass as `fw.done.checked`:
 ```
 
 - If every check passed, the run goes on to the grader of its outcome, when it has one, and then completes. Its `fw.run.finished` carries `"done": "checked"`.
+- A pass that passed is weak when it shows nothing about the work of this run. That is so in two cases. No check of the pass that ran is strong: each one is weak or was skipped. Or the run changed nothing: it made no call of its own that ran without an error result to a tool that is not read-only, that is not a view or a read of a path, and that is not `memory` or `recall`, and no such call changed a file of the workspace. Then each check saw only what was there before the run, such as a draft of an earlier run. The pass carries `"weak": true`, and the run completes with `"done": "checked"`, `"doneWeak": true`, and the stop `answered`, not `checked`. So it lands with the runs that a person checks. A consumer counts a run as checked with `fw.CheckedDone(done, doneWeak)`.
 - If a check failed and attempts are left, the model gets a message from the kernel with the note kind `done`. The message names each failed check with the head and the tail of its result. The model gets one more turn to fix the work.
 - If a check failed at the last attempt, or the budget leaves no room for another turn, the run fails. Its output is the last answer of the model, its error starts with `not done:` and names the failed checks, and its `fw.run.finished` carries `"done": "failed"`.
 
@@ -3195,7 +3202,7 @@ The checks run before the grader, because a check is cheap and certain, and a gr
 
 ### 24.3 What a consumer sees
 
-The run object has `done`: the state `checked`, `fixing`, or `failed`, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, beside the stop `checked` or `not-done` (section 25). `fw_done_passes_total` counts the passes by agent and result. The front of a fleet reads the lifecycle events of the egress stream. So it tells a checked result from a run whose model stopped, with no change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
+The run object has `done`: the state `checked`, `fixing`, or `failed`, `weak` for a weak pass, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, with `doneWeak`, beside the stop `checked`, `answered` for a weak pass, or `not-done` (section 25). Checked work is `fw.CheckedDone(state, weak)`: the state `checked` and a pass that is not weak. `fw_done_passes_total` counts the passes by agent and result: `passed`, `weak`, `retried`, or `failed`. The front of a fleet reads the lifecycle events of the egress stream. So it tells a checked result from a run whose model stopped, with no change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
 
 ### 24.4 Restarts
 
@@ -3224,8 +3231,8 @@ The pending approval of the run object carries the same `wait`.
 
 | Value | The run stopped because |
 |---|---|
-| `answered` | the model ended its turn with an answer, or a live routine or a check run gave the output |
-| `checked` | the model answered, and every check of the definition of done passed (section 24) |
+| `answered` | the model ended its turn with an answer, or a live routine or a check run gave the output, or the checks of the definition of done passed with a weak pass (section 24.2) |
+| `checked` | the model answered, and every check of the definition of done passed, with a pass that is not weak (section 24) |
 | `not-done` | the checks of the definition of done failed at the last attempt |
 | `budget:<limit>` | the run reached a limit of its budget, such as `budget:maxTurns` or `budget:maxCostUSD` |
 | `loop` | the model repeated the same call, or the same cycle of calls, up to `budget.maxRepeats` |

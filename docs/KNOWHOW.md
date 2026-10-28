@@ -45,7 +45,9 @@ Know-how does not learn from the opinion of a model about its own work. It
 learns only from results that a system records. These are a receipt of
 `accepted` or `satisfied`, an outcome grader that passed, and a person's
 thumbs up. A definition of done that passed counts too: `done: checked`
-on the newest `fw.run.finished` (docs/ARCHITECTURE.md section 24).
+on the newest `fw.run.finished`, without `doneWeak` (`fw.CheckedDone`,
+docs/ARCHITECTURE.md section 24). A weak pass, such as a check that only
+views a file that an earlier run wrote, verifies nothing.
 
 ## 2. One word for one thing
 
@@ -253,6 +255,11 @@ The kernel then does three things:
 - It adds no memory block.
 - It takes the tools `memory` and `recall` out of the run.
 - It skips the routine runner.
+
+A check of the definition of done that names `memory` or `recall` is
+skipped in a held-back run, not failed (docs/ARCHITECTURE.md section
+24.2). So the run is not counted as a failure that only the comparison
+caused.
 
 `fw.run.started` records `knowhow: "off"`. Every other run is a normal run.
 A held-back run of Claude Code or opencode gets no memory tools either.

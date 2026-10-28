@@ -20,6 +20,17 @@ package fw
 // in a new shell in the directory of the run, never in the shell of the
 // run, so the model cannot change a check with a cd or a variable.
 //
+// The checks have a tool budget of their own: at most MaxDoneChecks calls
+// a pass, each within the time limit of the block. The limits of tool
+// calls of the run and of its tree neither refuse them nor count them, so
+// a run that used its tool calls still has its work checked.
+//
+// A pass that passed can be weak: it shows nothing about the work of this
+// run (weakPass). Then the run completes as answered, not as checked
+// (CheckedDone). In a run that is held back from Know-how, a check of the
+// memory or the recall tool is skipped, not failed, because the kernel
+// took that tool out of the run.
+//
 // Every step reads the ledger. A restart that cuts a pass off runs the
 // pass again, so a check must be safe to run twice, as a test or a read
 // is. The author of the profile writes the checks, not the model.
@@ -119,6 +130,53 @@ type DoneCheck struct {
 	Input    string   `yaml:"input,omitempty" json:"input,omitempty"`
 	Contains []string `yaml:"contains,omitempty" json:"contains,omitempty"`
 	Lacks    []string `yaml:"lacks,omitempty" json:"lacks,omitempty"`
+}
+
+// Weak reports whether the check alone can show nothing about the work of
+// a run: its call only reads a file or a page by its path (ReadsPath), and
+// it names no Contains and no Lacks. Such a check passes for every path
+// that exists, also one that was there before the run. A pass whose every
+// check is weak is a weak pass. The profile editor of the workbench warns
+// about such a check with the same rule.
+func (c DoneCheck) Weak() bool {
+	return len(c.Contains) == 0 && len(c.Lacks) == 0 && ReadsPath(c.Tool, json.RawMessage(c.Input))
+}
+
+// pathKeys are the keys of an input that name the path of a file or a
+// page.
+var pathKeys = []string{"path", "file", "file_path", "filePath", "filename"}
+
+// ReadsPath reports whether a call of the tool name with the input only
+// reads a file or a page by its path. The input names a path (the key
+// path, file, file_path, filePath, or filename), and either its command
+// is view or read, as for the files and the memory tools, or the first or
+// the last word of the name of the tool is read or view, as for read_file
+// or front.pages_read. The words of a name are split at '_' and '-', after
+// the prefix of an MCP server, which ends at the last '.'.
+func ReadsPath(tool string, input json.RawMessage) bool {
+	var in map[string]json.RawMessage
+	if json.Unmarshal(input, &in) != nil {
+		return false
+	}
+	named := false
+	for _, k := range pathKeys {
+		var p string
+		if json.Unmarshal(in[k], &p) == nil && strings.TrimSpace(p) != "" {
+			named = true
+			break
+		}
+	}
+	if !named {
+		return false
+	}
+	reads := func(w string) bool { w = strings.ToLower(w); return w == "view" || w == "read" }
+	if raw, ok := in["command"]; ok {
+		var cmd string
+		return json.Unmarshal(raw, &cmd) == nil && reads(cmd)
+	}
+	name := tool[strings.LastIndex(tool, ".")+1:]
+	words := strings.FieldsFunc(name, func(r rune) bool { return r == '_' || r == '-' })
+	return len(words) > 0 && (reads(words[0]) || reads(words[len(words)-1]))
 }
 
 // label names the check for a person: its name, else its tool.
@@ -277,9 +335,11 @@ func (a *Agent) resolveDone(req RunRequest, named AgentProfile, parent *runState
 // number of failed passes that end the run. Answer is the sequence number
 // of the fw.model.responded whose answer the pass checked. Continue is
 // true when the model gets one more turn with the failures. Reason says
-// why a failed pass does not continue.
+// why a failed pass does not continue. Weak is true for a pass that passed
+// and shows nothing about the work of the run (weakPass).
 type DoneCheckedData struct {
 	Passed   bool         `json:"passed"`
+	Weak     bool         `json:"weak,omitempty"`
 	Checks   []DoneResult `json:"checks"`
 	Attempt  int          `json:"attempt"`
 	Attempts int          `json:"attempts"`
@@ -289,20 +349,25 @@ type DoneCheckedData struct {
 }
 
 // DoneResult is the result of one check of a pass. Why says why a check
-// failed, with the head and the tail of the result.
+// failed, with the head and the tail of the result. Skipped says why the
+// kernel did not run a check, such as a check of the memory tool in a run
+// that is held back from Know-how. A skipped check counts as passed, and
+// it shows nothing about the work of the run.
 type DoneResult struct {
-	Name   string `json:"name,omitempty"`
-	Tool   string `json:"tool"`
-	Passed bool   `json:"passed"`
-	Why    string `json:"why,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Tool    string `json:"tool"`
+	Passed  bool   `json:"passed"`
+	Why     string `json:"why,omitempty"`
+	Skipped string `json:"skipped,omitempty"`
 }
 
 // RunDone is the state of the definition of done of a run, as the run
-// object shows it: State is DoneChecked, DoneFixing, or DoneFailed, Attempt
-// and Attempts are those of the latest pass, and Checks are its results. A
-// consumer that sees only the lifecycle events of the run, such as the
-// front of a fleet, gets the state from fw.run.finished and no checks. A
-// follow-up to a finished run clears it with the output.
+// object shows it: State is DoneChecked, DoneFixing, or DoneFailed, Weak
+// marks a pass that passed and shows nothing about the work of the run,
+// Attempt and Attempts are those of the latest pass, and Checks are its
+// results. A consumer that sees only the lifecycle events of the run, such
+// as the front of a fleet, gets the state and Weak from fw.run.finished and
+// no checks. A follow-up to a finished run clears it with the output.
 type RunDone struct {
 	State    string       `json:"state"`
 	Weak     bool         `json:"weak,omitempty"`
@@ -325,7 +390,7 @@ func (r *Run) applyDone(e Event) {
 	default:
 		state = DoneFailed
 	}
-	r.Done = &RunDone{State: state, Attempt: d.Attempt, Attempts: d.Attempts, Checks: d.Checks}
+	r.Done = &RunDone{State: state, Weak: d.Passed && d.Weak, Attempt: d.Attempt, Attempts: d.Attempts, Checks: d.Checks}
 }
 
 // donePasses returns the passes that count for the answer at the sequence
@@ -490,18 +555,26 @@ func notDoneText(pass DoneCheckedData) string {
 	return s
 }
 
-// runDone runs every check of d once and sets the results and Passed in
-// pass. It returns an error only when the run stops: its context ended or
-// the agent shuts down. A restart then runs the pass again.
+// runDone runs every check of d once and sets the results, Passed, and
+// Weak in pass. The checks have a tool budget of their own (ownBudget), so
+// a run that used its tool calls still runs them. In a run that is held
+// back from Know-how, a check of a tool that the kernel took out of the
+// run (KnowhowTool) is skipped. It returns an error only when the run
+// stops: its context ended or the agent shuts down. A restart then runs
+// the pass again.
 func (a *Agent) runDone(ctx context.Context, rs *runState, c *cursor, d *Done, pass *DoneCheckedData) error {
 	prof := a.profileOf(c.queued)
 	_, tools := a.runTools(ctx, rs, prof)
-	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), prefix: doneCallPrefix, check: true}
-	// The limit of tool calls of the run counts the calls of the model too.
-	rr.calls = c.toolCalls - c.keptCalls
+	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), prefix: doneCallPrefix, check: true, ownBudget: true}
+	held := HeldBack(c.queued.Metadata)
 	pass.Passed = true
 	pass.Checks = make([]DoneResult, 0, len(d.Checks))
 	for i, chk := range d.Checks {
+		if _, ok := tools[chk.Tool]; !ok && held && KnowhowTool(chk.Tool) {
+			pass.Checks = append(pass.Checks, DoneResult{Name: chk.Name, Tool: chk.Tool, Passed: true,
+				Skipped: "this run is held back from what the agent learned, so it has no tool " + chk.Tool})
+			continue
+		}
 		why, err := a.oneDone(ctx, rr, tools, chk, d.timeout())
 		if err != nil {
 			return err
@@ -514,7 +587,76 @@ func (a *Agent) runDone(ctx context.Context, rs *runState, c *cursor, d *Done, p
 		}
 		pass.Checks = append(pass.Checks, r)
 	}
+	pass.Weak = pass.Passed && weakPass(d, pass.Checks, rs.eventLog(), tools)
 	return nil
+}
+
+// doneCall reports whether the event fw.tool.requested is a call of a
+// check of a definition of done. Such a call has a tool budget of its own,
+// so the count of the tool calls of a run and its usage leave it out.
+func doneCall(e Event) bool {
+	var d struct {
+		CallID string `json:"callId"`
+	}
+	return e.Decode(&d) == nil && strings.HasPrefix(d.CallID, doneCallPrefix)
+}
+
+// weakPass reports whether a pass that passed shows nothing about the work
+// of the run. That is so when no check of the pass that ran is strong: each
+// one is weak (DoneCheck.Weak) or was skipped. It is so too when the run
+// changed nothing (changedWork), because then every check saw only what
+// was there before the run. results are the results of the pass, in the
+// order of the checks of d.
+func weakPass(d *Done, results []DoneResult, events []Event, tools map[string]Tool) bool {
+	strong := false
+	for i, r := range results {
+		if i < len(d.Checks) && r.Skipped == "" && !d.Checks[i].Weak() {
+			strong = true
+			break
+		}
+	}
+	return !strong || !changedWork(events, tools)
+}
+
+// changedWork reports whether the run made a call of its own that can have
+// changed something: a call of the model or of a routine, not of a check,
+// that ran without an error result, of a tool that is not read-only, that
+// is not a view or a read of a path (ReadsPath), and that is not a tool of
+// Know-how (KnowhowTool), because a note of the agent is not the work of
+// the run. A call that a restart cut off before its result counts too, and
+// so does a change of a file of the workspace by such a call. A tool that
+// the run lacks counts as one that changes, because nothing says that it
+// only reads.
+func changedWork(events []Event, tools map[string]Tool) bool {
+	open := map[string]bool{}
+	for _, e := range events {
+		switch e.Type {
+		case EvToolRequested:
+			var d ToolRequestedData
+			if e.Decode(&d) != nil || strings.HasPrefix(d.CallID, doneCallPrefix) || KnowhowTool(d.Tool) || ReadsPath(d.Tool, d.Input) {
+				continue
+			}
+			if t, ok := tools[d.Tool]; ok && t.Spec().ReadOnly {
+				continue
+			}
+			open[d.CallID] = true
+		case EvToolResponded:
+			var d ToolRespondedData
+			if e.Decode(&d) != nil || !open[d.CallID] {
+				continue
+			}
+			if !d.IsError {
+				return true
+			}
+			delete(open, d.CallID)
+		case EvFileChanged:
+			var d FileChangedData
+			if e.Decode(&d) == nil && d.CallID != "" && !strings.HasPrefix(d.CallID, doneCallPrefix) {
+				return true
+			}
+		}
+	}
+	return len(open) > 0
 }
 
 // oneDone runs one check and returns why it failed, or "" when it passed.
@@ -581,14 +723,19 @@ func doneMessage(pass DoneCheckedData) MessageReceivedData {
 	return MessageReceivedData{Role: RoleUser, Content: []Block{Text(b.String())}, Origin: OriginKernel, Note: NoteDone}
 }
 
-// doneStateOf returns RunFinishedData.Done for a run that completes at the
-// answer of the cursor: DoneChecked when the run has a definition of done,
-// and "" when it has none.
-func doneStateOf(rs *runState) string {
-	if rs.queuedData().Done.on() {
-		return DoneChecked
+// doneOfLocked returns RunFinishedData.Done and DoneWeak for a run that
+// completes at the answer of the cursor: DoneChecked when the run has a
+// definition of done, with the mark of the pass of that answer that
+// passed, and "" when it has none. The caller holds rs.emitMu.
+func doneOfLocked(rs *runState, c *cursor) (string, bool) {
+	if !rs.queuedData().Done.on() {
+		return "", false
 	}
-	return ""
+	passes := donePasses(rs.events, c.respSeq)
+	if k := len(passes); k > 0 && passes[k-1].Passed {
+		return DoneChecked, passes[k-1].Weak
+	}
+	return DoneChecked, false
 }
 
 // oneLineOf returns s on one line, cut to n bytes, for a log line.

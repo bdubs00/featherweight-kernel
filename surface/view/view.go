@@ -631,6 +631,9 @@ func describe(e fw.Event) string {
 					failed++
 				}
 			}
+			if d.Passed && d.Weak {
+				return fmt.Sprintf("done: %d checks passed, but they show nothing about the work of this run", len(d.Checks))
+			}
 			if d.Passed {
 				return fmt.Sprintf("done: %d checks passed", len(d.Checks))
 			}

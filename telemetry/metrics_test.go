@@ -678,6 +678,11 @@ func TestMetricsBudgetAndOrigin(t *testing.T) {
 	h.emit(fw.EvDoneChecked, fw.DoneCheckedData{Attempt: 1, Attempts: 2, Continue: true})
 	h.emit(fw.EvDoneChecked, fw.DoneCheckedData{Attempt: 2, Attempts: 2})
 	h.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeFailed, Done: fw.DoneFailed})
+	w := newFeed(m, "r4", "reviewer")
+	w.emit(fw.EvRunQueued, fw.RunQueuedData{Agent: "reviewer", Input: "x", Origin: fw.OriginCLI})
+	w.emit(fw.EvRunStarted, fw.RunStartedData{})
+	w.emit(fw.EvDoneChecked, fw.DoneCheckedData{Passed: true, Weak: true, Attempt: 1, Attempts: 2})
+	w.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Done: fw.DoneChecked, DoneWeak: true})
 	for _, c := range []struct {
 		name   string
 		labels map[string]string
@@ -692,6 +697,7 @@ func TestMetricsBudgetAndOrigin(t *testing.T) {
 		{"fw_runs_total", map[string]string{"agent": "reviewer", "outcome": "failed"}, 3},
 		{"fw_done_passes_total", map[string]string{"agent": "reviewer", "result": "retried"}, 1},
 		{"fw_done_passes_total", map[string]string{"agent": "reviewer", "result": "failed"}, 1},
+		{"fw_done_passes_total", map[string]string{"agent": "reviewer", "result": "weak"}, 1},
 	} {
 		if got := value(t, reg, c.name, c.labels); got != c.want {
 			t.Errorf("%s%v = %v, want %v", c.name, c.labels, got, c.want)
