@@ -84,7 +84,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.file.changed` | call id, tool, operation, path, old path, size, SHA-256 (section 7.9) |
 | `fw.run.child` | child, member, `started`, and for a child whose start is open its kind (`spawn` or `branch`) and its facts: person, metadata, profile name, input, idempotency key, and the runs of the tree that it reserved; for a start that ended without a child for its caller, the outcome and the reason; and why a look kept a child that can still run (sections 4.7 and 11.9) |
 | `fw.child.reported` | child, member, state, the usage of the tree of the child, its open runs and its working runs, and `lost` when the parent no longer reaches it: what a child in another process last reported (section 11.9) |
-| `fw.approval.requested` | approval id, tool, call id, input, reason, form schema of a question, connect request (section 7.11) |
+| `fw.approval.requested` | approval id, tool, call id, input, reason, form schema of a question, connect request (section 7.11), wait (`approval`, `question`, `connect`, `rerun`, section 25) |
 | `fw.approval.decided` | approval id, decision, decider (the subject of the caller, or the person that a trusted relay names, section 8.2), `deciderKind`, the kind of the decider (section 10.2), note |
 | `fw.context.compacted` | epoch, summary block, kept messages, usage of the summary calls |
 | `fw.budget.exceeded` | limit name, value, the limit, for a limit of a tree the scope `tree` and the run whose budget holds it, and `report` when the final report call follows (section 5.2) |
@@ -92,9 +92,9 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | `fw.loop.detected` | tool, count, period, action (`warned`, `failed`) |
 | `fw.error` | message, retryable |
 | `fw.turn.finished` | turn number |
-| `fw.run.suspended` | reason, totals (the usage of the run so far, section 8.2) |
+| `fw.run.suspended` | reason, stop (`interrupted`, section 25), totals (the usage of the run so far, section 8.2) |
 | `fw.run.resumed` | from seq |
-| `fw.run.finished` | outcome (`completed`, `failed`, `canceled`), output, error, totals (the usage of the run so far, section 8.2). A cancel adds `by`, who canceled the run (section 8.2). |
+| `fw.run.finished` | outcome (`completed`, `failed`, `canceled`), output, error, stop (why the run stopped, section 25), done (section 24), totals (the usage of the run so far, section 8.2). A cancel adds `by`, who canceled the run (section 8.2). |
 | `fw.routine.decided` | the decision on one routine at the start of a run: routine, version, standing, and mode (`shadow`, `live`, or `canary`). Then `applies`, the reason, the answers of the decider, the decider, the model, and the latency (section 22.3) |
 | `fw.routine.applied` | a live routine that ran: routine, version, `ok`, the steps that ran, the failed step, the reason, and the answer of a routine that completed (section 22.3) |
 | `fw.routine.compared` | the end of a run that the model completed: routine, version, mode, question, what the routine said, what the agent did, and `agree` (section 22.3) |
@@ -3166,8 +3166,53 @@ The checks run before the grader, because a check is cheap and certain, and a gr
 
 ### 24.3 What a consumer sees
 
-The run object has `done`: the state `checked`, `fixing`, or `failed`, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, and `fw_done_passes_total` counts the passes by agent and result. The front of a fleet reads the lifecycle events of the egress stream. So it tells a checked result from a run whose model stopped, with no change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
+The run object has `done`: the state `checked`, `fixing`, or `failed`, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, beside the stop `checked` or `not-done` (section 25). `fw_done_passes_total` counts the passes by agent and result. The front of a fleet reads the lifecycle events of the egress stream. So it tells a checked result from a run whose model stopped, with no change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
 
 ### 24.4 Restarts
 
 Every step reads the ledger. A restart that cut a pass off runs the whole pass again. So a check must be safe to run twice, as a test or a read is. The author of the profile writes the checks, not the model, so the kernel does not ask before it runs one again. A restart between a failed pass and its message gives the message once. A restart between the last failed pass and the end of the run ends the run at the next step.
+
+## 25. Typed reasons of waits and stops
+
+A flow view counts where work waits and why it stops. Before this section, the kernel said most of that in free text: the reason of an approval, the error of a run, and the reason of a suspend. A view therefore had to match strings, such as "rerun after resume" or "budget exceeded:". Two fields now carry the reason in one word. Both ride on events that the egress stream of a fleet carries already (`fleet.EgressTypes` of the workbench). So the change adds no event type and changes no egress list. The code is `fw/reasons.go`.
+
+### 25.1 The wait of an approval request
+
+`fw.approval.requested` carries `wait`:
+
+| Value | The run waits for |
+|---|---|
+| `approval` | a person to allow or deny a tool call that the policy asks about |
+| `question` | a person to answer a question of a tool, with a form |
+| `connect` | a person to connect a service, so a tool can act as that person (section 7.11) |
+| `rerun` | a person to decide whether a call that a restart cut off runs again (section 4.5) |
+
+The pending approval of the run object carries the same `wait`.
+
+### 25.2 The stop of a run
+
+`fw.run.finished` and `fw.run.suspended` carry `stop`. The run object carries it too, while the run is finished or suspended. A run that works or waits has none, and a follow-up or a resume clears it.
+
+| Value | The run stopped because |
+|---|---|
+| `answered` | the model ended its turn with an answer, or a live routine or a check run gave the output |
+| `checked` | the model answered, and every check of the definition of done passed (section 24) |
+| `not-done` | the checks of the definition of done failed at the last attempt |
+| `budget:<limit>` | the run reached a limit of its budget, such as `budget:maxTurns` or `budget:maxCostUSD` |
+| `loop` | the model repeated the same call, or the same cycle of calls, up to `budget.maxRepeats` |
+| `refusal` | the model refused the task |
+| `max-tokens` | the model stopped at its output limit again after a continuation |
+| `model-error` | the call of the model failed after the retries of its adapter |
+| `canceled` | a person or a process canceled the run |
+| `interrupted` | the process stopped while the run worked: a shutdown suspended it, or a restart cut off a call that cannot run twice |
+| `error` | the kernel failed the run for another reason, such as a check run whose step failed |
+
+The limit `maxRepeats` is a loop, so its stop is `loop` and not `budget:maxRepeats`. `fw.StopLimit` returns the limit of a `budget:` stop.
+
+### 25.3 Old ledgers
+
+An event of an older kernel has neither field, and it still loads. `fw.WaitOf` and `fw.StopOf` derive the reason of such an event from its other fields. For an approval request, these are the connect request, the form schema, and the reason. For an end, these are the outcome, the definition of done, and the start of the error. The projection uses them, so the run object of an old run has the same fields as a new one. The kernel also sets each field on a new event that a site or a linked runner (section 19) left empty.
+
+### 25.4 What a flow view adds
+
+A count of the waits by `wait` and of the stops by `stop` answers where work waits on people and which limits stop it. The time of a wait is the time from `fw.approval.requested` to `fw.approval.decided`. Two waits stay outside these fields. A wait for a free slot shows as the state `queued`. A wait for a rate limit of a provider stays inside the adapter, with no event.

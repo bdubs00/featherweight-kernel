@@ -615,7 +615,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	selector := a.selectorOf(c.queued, prof)
 	model, err := a.openModel(ctx, selector)
 	if err != nil {
-		return a.fail(ctx, rs, "model: "+err.Error())
+		return a.failAs(ctx, rs, "model: "+err.Error(), RunStopModelError)
 	}
 	req, effort, err := a.callRequest(ctx, rs, c, prof)
 	if err != nil {
@@ -664,7 +664,7 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 	h, tokens := rs.historyLocked(extra)
 	if endsWithAnswer(h.Messages, c) {
 		rs.emitMu.Unlock()
-		return a.fail(ctx, rs, "fw: the history of the next model call ends with an answer of the model and no message after it, and a provider refuses such a request")
+		return a.failAs(ctx, rs, "fw: the history of the next model call ends with an answer of the model and no message after it, and a provider refuses such a request", RunStopError)
 	}
 	req.Messages = withRunContext(c.context, a.readFiles(h.Messages, MediaTypesOf(model), a.dirOf(rs)))
 	_, err = a.emitLocked(ctx, rs, EvModelRequested, ModelRequestedData{
@@ -732,12 +732,12 @@ func (a *Agent) stepModel(ctx context.Context, rs *runState, c *cursor) error {
 			if err != nil || ok {
 				return err
 			}
-			return a.finish(ctx, rs, OutcomeFailed, "", msg)
+			return a.finishAs(ctx, rs, OutcomeFailed, "", msg, RunStopModelError)
 		}
-		return a.fail(ctx, rs, "model: "+err.Error())
+		return a.failAs(ctx, rs, "model: "+err.Error(), RunStopModelError)
 	}
 	if resp == nil {
-		return a.fail(ctx, rs, "model: no response")
+		return a.failAs(ctx, rs, "model: no response", RunStopModelError)
 	}
 	if resp.Provider != "" {
 		provider = resp.Provider
@@ -787,7 +787,7 @@ func (a *Agent) stepResponse(ctx context.Context, rs *runState, c *cursor, n int
 			if err := a.closeTurn(ctx, rs, c); err != nil {
 				return err
 			}
-			return a.finish(ctx, rs, OutcomeFailed, TextOf(c.resp.Content), "max_tokens")
+			return a.finishAs(ctx, rs, OutcomeFailed, TextOf(c.resp.Content), "max_tokens", RunStopMaxTokens)
 		}
 		if _, err := a.emit(ctx, rs, EvError, ErrorData{Message: "the model stopped at max_tokens; asking it to continue", Retryable: true}); err != nil {
 			return err
@@ -804,7 +804,7 @@ func (a *Agent) stepResponse(ctx context.Context, rs *runState, c *cursor, n int
 		if detail == "" {
 			detail = "refusal"
 		}
-		return a.finish(ctx, rs, OutcomeFailed, "", detail)
+		return a.finishAs(ctx, rs, OutcomeFailed, "", detail, RunStopRefusal)
 	}
 	return a.endTurn(ctx, rs, c, n)
 }
@@ -842,7 +842,12 @@ func (a *Agent) endTurn(ctx context.Context, rs *runState, c *cursor, n int) err
 	if err := a.compareLocked(ctx, rs, c, output); err != nil {
 		return err
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: output, Done: doneStateOf(rs)})
+	done := doneStateOf(rs)
+	stop := RunStopAnswered
+	if done == DoneChecked {
+		stop = RunStopChecked
+	}
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: output, Done: done, Stop: stop})
 	return err
 }
 
@@ -855,16 +860,27 @@ func (a *Agent) closeTurn(ctx context.Context, rs *runState, c *cursor) error {
 }
 
 func (a *Agent) finish(ctx context.Context, rs *runState, outcome, output, msg string) error {
-	_, err := a.emit(ctx, rs, EvRunFinished, RunFinishedData{Outcome: outcome, Output: output, Error: msg})
+	return a.finishAs(ctx, rs, outcome, output, msg, "")
+}
+
+// finishAs is finish with the stop of the run. An empty stop takes the
+// stop that StopOf derives from the outcome and the error.
+func (a *Agent) finishAs(ctx context.Context, rs *runState, outcome, output, msg, stop string) error {
+	_, err := a.emit(ctx, rs, EvRunFinished, RunFinishedData{Outcome: outcome, Output: output, Error: msg, Stop: stop})
 	return err
 }
 
 // fail records an error and finishes the run as failed.
 func (a *Agent) fail(ctx context.Context, rs *runState, msg string) error {
+	return a.failAs(ctx, rs, msg, "")
+}
+
+// failAs is fail with the stop of the run (see finishAs).
+func (a *Agent) failAs(ctx context.Context, rs *runState, msg, stop string) error {
 	if _, err := a.emit(ctx, rs, EvError, ErrorData{Message: msg}); err != nil {
 		return err
 	}
-	return a.finish(ctx, rs, OutcomeFailed, "", msg)
+	return a.finishAs(ctx, rs, OutcomeFailed, "", msg, stop)
 }
 
 // profileOf returns the effective profile of a run: the profile that the
@@ -1162,7 +1178,7 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 		if err := a.closeTurn(ctx, rs, c); err != nil {
 			return err
 		}
-		return a.finish(ctx, rs, OutcomeFailed, TextOf(c.resp.Content), fmt.Sprintf("budget exceeded: maxRepeats (the model made the same %s call %d times in a row)", describeLoop(tool, period), count))
+		return a.finishAs(ctx, rs, OutcomeFailed, TextOf(c.resp.Content), fmt.Sprintf("budget exceeded: maxRepeats (the model made the same %s call %d times in a row)", describeLoop(tool, period), count), RunStopLoop)
 	}
 
 	// A run whose tree, or the tree of an ancestor, used up its tokens or
@@ -1252,7 +1268,7 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 			if !rerunSafe(p.tool, p.spec, u.Input) {
 				answered, ok := continueAsk(p.tool, rec)
 				if !ok {
-					return a.requestApproval(ctx, rs, u, "rerun after resume")
+					return a.requestApproval(ctx, rs, u, reasonRerun, WaitRerun)
 				}
 				p.answered = answered
 			}
@@ -1265,7 +1281,7 @@ func (a *Agent) stepTools(ctx context.Context, rs *runState, c *cursor) error {
 			case VerdictAllow:
 				p.run = true
 			case VerdictAsk:
-				return a.requestApproval(ctx, rs, u, d.Reason)
+				return a.requestApproval(ctx, rs, u, d.Reason, WaitApproval)
 			default:
 				p.result = ErrorResult("denied by policy: " + d.Reason)
 			}
@@ -1350,13 +1366,14 @@ func continueAsk(t Tool, rec *callRecord) ([]AnsweredQuestion, bool) {
 
 // requestApproval appends fw.approval.requested for a call. The run moves to
 // input-required, and the driver goes idle until Decide.
-func (a *Agent) requestApproval(ctx context.Context, rs *runState, u Block, reason string) error {
+func (a *Agent) requestApproval(ctx context.Context, rs *runState, u Block, reason, wait string) error {
 	_, err := a.emit(ctx, rs, EvApprovalRequested, ApprovalRequestedData{
 		ApprovalID: NewID(),
 		Tool:       u.Name,
 		CallID:     u.ID,
 		Input:      u.Input,
 		Reason:     reason,
+		Wait:       wait,
 	})
 	return err
 }
@@ -1554,6 +1571,7 @@ func (a *Agent) asker(runCtx context.Context, rs *runState, use Block, aborted *
 			CallID: use.ID,
 			Reason: question,
 			Schema: json.RawMessage(schema),
+			Wait:   WaitQuestion,
 		}, aborted)
 		if err != nil {
 			return nil, err
@@ -1579,6 +1597,7 @@ func (a *Agent) connecter(runCtx context.Context, rs *runState, use Block, abort
 			CallID:  use.ID,
 			Reason:  req.Message(),
 			Connect: &req,
+			Wait:    WaitConnect,
 		}, aborted)
 		if err != nil {
 			return err

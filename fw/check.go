@@ -203,13 +203,13 @@ type CheckResult struct {
 // call can have changed something.
 func (a *Agent) stepCheck(ctx context.Context, rs *runState, c *cursor) error {
 	if c.toolCalls > c.keptCalls {
-		return a.fail(ctx, rs, checkInterrupted)
+		return a.failAs(ctx, rs, checkInterrupted, RunStopInterrupted)
 	}
 	// The start resolved the check. A ledger that another process wrote
 	// gets the defaults here too.
 	chk, err := c.queued.Check.Resolved()
 	if err != nil {
-		return a.fail(ctx, rs, strings.TrimPrefix(err.Error(), ErrInvalidRequest.Error()+": "))
+		return a.failAs(ctx, rs, strings.TrimPrefix(err.Error(), ErrInvalidRequest.Error()+": "), RunStopError)
 	}
 	prof := a.profileOf(c.queued)
 	_, tools := a.runTools(ctx, rs, prof)
@@ -241,7 +241,7 @@ func (a *Agent) stepCheck(ctx context.Context, rs *runState, c *cursor) error {
 	if err != nil {
 		return a.failCheck(ctx, rs, CheckOutput{}, "the output of the check: "+err.Error())
 	}
-	return a.finish(ctx, rs, OutcomeCompleted, text, "")
+	return a.finishAs(ctx, rs, OutcomeCompleted, text, "", RunStopAnswered)
 }
 
 // failCheck records the reason of a check that failed and finishes the
@@ -254,7 +254,7 @@ func (a *Agent) failCheck(ctx context.Context, rs *runState, out CheckOutput, wh
 	if len(out.Results) > 0 {
 		text, _ = checkText(out)
 	}
-	return a.finish(ctx, rs, OutcomeFailed, text, why)
+	return a.finishAs(ctx, rs, OutcomeFailed, text, why, RunStopError)
 }
 
 // checkText returns the output of a check as JSON text.

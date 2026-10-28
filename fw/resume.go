@@ -192,7 +192,7 @@ type recovery struct {
 func (a *Agent) recover(rec recovery) {
 	k := a.k
 	for _, rs := range rec.cut {
-		if _, err := a.emit(nil, rs, EvRunFinished, RunFinishedData{Outcome: "failed", Error: "the record of a child that never ran lost its end in a restart"}); err != nil {
+		if _, err := a.emit(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeFailed, Error: "the record of a child that never ran lost its end in a restart", Stop: RunStopInterrupted}); err != nil {
 			a.log.Error("end the record of a child", "run", rs.id, "error", err)
 		}
 	}

@@ -130,7 +130,7 @@ func (a *Agent) stopOver(ctx context.Context, rs *runState, c *cursor, o overrun
 		}
 		return nil
 	}
-	if err := a.finish(ctx, rs, OutcomeFailed, c.lastReport(), "budget exceeded: "+o.text(rs.id)); err != nil {
+	if err := a.finishAs(ctx, rs, OutcomeFailed, c.lastReport(), "budget exceeded: "+o.text(rs.id), RunStopBudget(o.limit)); err != nil {
 		return err
 	}
 	if o.shared() {
@@ -232,7 +232,7 @@ func (a *Agent) stepReport(ctx context.Context, rs *runState, c *cursor, n int) 
 		if _, err := a.emit(ctx, rs, EvError, ErrorData{Message: "model: " + err.Error()}); err != nil {
 			return err
 		}
-		return a.finish(ctx, rs, OutcomeFailed, "", "budget exceeded: "+r.data.text(rs.id))
+		return a.finishAs(ctx, rs, OutcomeFailed, "", "budget exceeded: "+r.data.text(rs.id), RunStopBudget(r.data.Limit))
 	}
 	req, effort, err := a.callRequest(ctx, rs, c, prof)
 	if err != nil {
@@ -321,7 +321,7 @@ func (a *Agent) finishReport(ctx context.Context, rs *runState, c *cursor, n int
 			return nil
 		}
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeFailed, Output: c.rep.text, Error: "budget exceeded: " + c.rep.data.text(rs.id)})
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeFailed, Output: c.rep.text, Error: "budget exceeded: " + c.rep.data.text(rs.id), Stop: RunStopBudget(c.rep.data.Limit)})
 	return err
 }
 

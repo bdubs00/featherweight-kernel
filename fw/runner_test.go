@@ -86,6 +86,10 @@ func TestRunnerDrivesRuns(t *testing.T) {
 	if r.State != StateCompleted || r.Output != "hosted" || r.Usage.InputTokens != 7 || r.Usage.Turns != 1 {
 		t.Fatalf("run = %+v", r)
 	}
+	// The kernel fills the stop that the runner left empty.
+	if r.Stop != RunStopAnswered || finishedOf(t, ledgerEvents(t, a.Ledger(), r.ID)).Stop != RunStopAnswered {
+		t.Fatalf("stop = %q", r.Stop)
+	}
 	// A follow-up reopens the run, and the runner drives it again.
 	if err := a.Send(ctx, r.ID, Message{Role: RoleUser, Content: []Block{Text("again")}}, OriginCLI); err != nil {
 		t.Fatal(err)
@@ -108,7 +112,7 @@ func TestRunnerWaitsForADecision(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, err = a.WaitFor(ctx, r.ID, func(r *Run) bool { return r.State == StateInputRequired })
-	if err != nil || r.Pending == nil || r.Pending.ID != "ap1" {
+	if err != nil || r.Pending == nil || r.Pending.ID != "ap1" || r.Pending.Wait != WaitApproval {
 		t.Fatalf("run = %+v, %v", r, err)
 	}
 	if err := a.Decide(ctx, r.ID, ApprovalDecision{ApprovalID: "ap1", Decision: "allow"}); err != nil {

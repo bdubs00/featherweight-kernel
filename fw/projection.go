@@ -347,6 +347,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 		if r.State.Terminal() {
 			return
 		}
+		r.Stop = ""
 		if r.Pending != nil {
 			r.State = StateInputRequired
 		} else {
@@ -368,7 +369,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 		if r.State.Terminal() {
 			r.Output, r.Error, r.Outcome, r.Done = "", "", nil, nil
 		}
-		r.State = StateRunning
+		r.State, r.Stop = StateRunning, ""
 	case EvModelResponded:
 		var d struct {
 			Usage    Usage  `json:"usage"`
@@ -463,8 +464,9 @@ func (r *Run) Apply(e Event, prices Prices) {
 			RequestState: d.RequestState,
 			RequestedAt:  e.Time,
 			Connect:      d.Connect,
+			Wait:         WaitOf(d),
 		}
-		r.State = StateInputRequired
+		r.State, r.Stop = StateInputRequired, ""
 	case EvApprovalDecided:
 		var d struct {
 			ApprovalID string `json:"approvalId"`
@@ -474,14 +476,14 @@ func (r *Run) Apply(e Event, prices Prices) {
 		}
 		r.Pending = nil
 		if !r.State.Terminal() {
-			r.State = StateRunning
+			r.State, r.Stop = StateRunning, ""
 		}
 	case EvRunSuspended:
 		var d RunSuspendedData
 		if e.Decode(&d) == nil {
 			r.setTotals(d.Totals, e)
 		}
-		r.State = StateSuspended
+		r.State, r.Stop = StateSuspended, suspendStopOf(d)
 	case EvRunFinished:
 		var d RunFinishedData
 		if e.Decode(&d) != nil {
@@ -497,7 +499,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 		default:
 			r.State = StateFailed
 		}
-		r.Output, r.Error = d.Output, d.Error
+		r.Output, r.Error, r.Stop = d.Output, d.Error, StopOf(d)
 		if d.Done != "" {
 			done := RunDone{State: d.Done}
 			if r.Done != nil {

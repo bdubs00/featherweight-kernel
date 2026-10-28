@@ -347,7 +347,7 @@ func (a *Agent) finishRoutine(ctx context.Context, rs *runState, c *cursor, n in
 	if messageSince(rs.events, n) {
 		return nil
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: c.routine.answer})
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: c.routine.answer, Stop: RunStopAnswered})
 	return err
 }
 
@@ -601,7 +601,7 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 			return ToolResult{}, why + ", and a check runs only tools that the policy allows without a question", nil
 		}
 		var aborted atomic.Bool
-		dec, err := a.waitDecision(ctx, ctx, rs, ApprovalRequestedData{Tool: spec.Name, CallID: callID, Input: input, Reason: d.Reason}, &aborted)
+		dec, err := a.waitDecision(ctx, ctx, rs, ApprovalRequestedData{Tool: spec.Name, CallID: callID, Input: input, Reason: d.Reason, Wait: WaitApproval}, &aborted)
 		if err != nil {
 			if aborted.Load() || ctx.Err() != nil {
 				return ToolResult{}, "", errStopped

@@ -332,7 +332,7 @@ func (a *Agent) shutdownKernel(ctx context.Context) {
 			st := rs.run.State
 			rs.mu.Unlock()
 			if st == StateRunning || st == StateQueued {
-				if _, err := a.emitLocked(nil, rs, EvRunSuspended, RunSuspendedData{Reason: "shutdown"}); err != nil {
+				if _, err := a.emitLocked(nil, rs, EvRunSuspended, RunSuspendedData{Reason: "shutdown", Stop: RunStopInterrupted}); err != nil {
 					a.log.Error("suspend run", "run", rs.id, "error", err)
 				}
 			}
@@ -1505,7 +1505,7 @@ func (a *Agent) cancelOne(rs *runState, reason, by string) error {
 	if cancel != nil {
 		cancel()
 	}
-	_, err := a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: reason, By: by})
+	_, err := a.emitLocked(nil, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCanceled, Error: reason, By: by, Stop: RunStopCanceled})
 	rs.mu.Lock()
 	rs.canceling = false
 	rs.mu.Unlock()
@@ -1524,7 +1524,7 @@ func (a *Agent) emit(guard context.Context, rs *runState, typ string, data any) 
 // its run context, so a canceled or suspended driver never appends after the
 // event that stopped it.
 func (a *Agent) emitLocked(guard context.Context, rs *runState, typ string, data any) (Event, error) {
-	e, err := NewEvent(rs.id, typ, withTotals(rs, data))
+	e, err := NewEvent(rs.id, typ, withReasons(withTotals(rs, data)))
 	if err != nil {
 		return Event{}, err
 	}
@@ -1702,7 +1702,7 @@ func (a *Agent) failRun(rs *runState) {
 	if terminal {
 		return
 	}
-	d := RunFinishedData{Outcome: OutcomeFailed, Error: "the driver of the run stopped on an error; the log of the process has the cause"}
+	d := RunFinishedData{Outcome: OutcomeFailed, Error: "the driver of the run stopped on an error; the log of the process has the cause", Stop: RunStopError}
 	if _, err := a.emitLocked(nil, rs, EvRunFinished, d); err != nil {
 		a.log.Error("record the failure of a run driver", "run", rs.id, "error", a.Redact(err.Error()))
 	}

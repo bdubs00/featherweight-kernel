@@ -327,6 +327,9 @@ type Approval struct {
 	// Connect is set when the call waits for the person to connect a
 	// service. Only the end of the connection allows it.
 	Connect *ConnectRequest `json:"connect,omitempty"`
+	// Wait says what the run waits for (see ApprovalRequestedData.Wait),
+	// also for the request of an older kernel (WaitOf).
+	Wait string `json:"wait,omitempty"`
 }
 
 // RunUsage is the usage of a run so far. Every field is a sum, so the
@@ -437,6 +440,10 @@ type Run struct {
 	// fw.done.checked and fw.run.finished (see RunDone). It is nil for a
 	// run without one.
 	Done *RunDone `json:"done,omitempty"`
+	// Stop says why a finished or a suspended run stopped (see
+	// RunFinishedData.Stop), also for the end of an older kernel (StopOf).
+	// A run that works or waits has none.
+	Stop string `json:"stop,omitempty"`
 	// Reactions counts the reactions of people on the run and its events,
 	// from fw.run.reacted, by reaction: ReactionUp, ReactionDown, and
 	// ReactionHeart. It holds nothing more; the front of a fleet keeps

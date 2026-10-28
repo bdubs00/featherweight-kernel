@@ -461,6 +461,7 @@ func (a *Agent) notDoneLocked(ctx context.Context, rs *runState, c *cursor, n in
 		Output:  TextOf(c.resp.Content),
 		Error:   notDoneText(pass),
 		Done:    DoneFailed,
+		Stop:    RunStopNotDone,
 	})
 	return err
 }

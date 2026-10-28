@@ -432,6 +432,10 @@ type ApprovalRequestedData struct {
 	// Connect is set when the call waits for the person to connect a
 	// service (see ConnectRequest). Reason then holds its Message.
 	Connect *ConnectRequest `json:"connect,omitempty"`
+	// Wait says what the run waits for: WaitApproval, WaitQuestion,
+	// WaitConnect, or WaitRerun. The kernel sets it on every request. An
+	// event of an older kernel has none; WaitOf derives it.
+	Wait string `json:"wait,omitempty"`
 }
 
 // ApprovalDecidedData is the payload of fw.approval.decided. Decider names
@@ -599,6 +603,9 @@ type ErrorData struct {
 // RunSuspendedData is the payload of fw.run.suspended.
 type RunSuspendedData struct {
 	Reason string `json:"reason"`
+	// Stop says why the run stopped, as for RunFinishedData. A suspend is
+	// RunStopInterrupted today.
+	Stop string `json:"stop,omitempty"`
 	// Totals is the usage of the run before this event, as for
 	// RunFinishedData.
 	Totals *RunUsage `json:"totals,omitempty"`
@@ -636,6 +643,13 @@ type RunFinishedData struct {
 	// So a consumer of the lifecycle events tells a checked result from a
 	// run whose model stopped.
 	Done string `json:"done,omitempty"`
+	// Stop says why the run stopped, in one word that a flow view counts:
+	// RunStopAnswered, RunStopChecked, RunStopNotDone, RunStopBudget of a
+	// limit, RunStopLoop, RunStopRefusal, RunStopMaxTokens,
+	// RunStopModelError, RunStopCanceled, RunStopInterrupted, or
+	// RunStopError. The kernel sets it on every end. An event of an older
+	// kernel has none; StopOf derives it.
+	Stop string `json:"stop,omitempty"`
 }
 
 // IDTime returns the time that an id from NewID holds, to the
