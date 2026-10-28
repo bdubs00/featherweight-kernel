@@ -1014,6 +1014,11 @@ func TestRoutineLiveRunsTheChecksOfDone(t *testing.T) {
 		if len(passes) != 1 || !passes[0].Passed || passes[0].Answer != 0 || passes[0].Continue {
 			t.Fatalf("passes = %+v", passes)
 		}
+		var app RoutineAppliedData
+		firstOf(t, evs, EvRoutineApplied, &app)
+		if !app.OK || app.Done != DoneChecked {
+			t.Fatalf("applied = %+v", app)
+		}
 		if d := finishedOf(t, evs); d.Done != DoneChecked || d.Stop != RunStopChecked {
 			t.Fatalf("finished = %+v", d)
 		}
@@ -1043,7 +1048,7 @@ func TestRoutineLiveRunsTheChecksOfDone(t *testing.T) {
 		var app RoutineAppliedData
 		firstOf(t, evs, EvRoutineApplied, &app)
 		want := `done: check 1 "the report holds the line of today" (stock.read) failed: the result lacks "pens=90"`
-		if app.OK || app.Answer != "" || app.FailedStep != 2 || app.Reason != want {
+		if app.OK || app.Answer != "" || app.FailedStep != 2 || app.Reason != want || app.Done != DoneFailed {
 			t.Fatalf("applied = %+v", app)
 		}
 		passes := donePassesOf(t, evs)

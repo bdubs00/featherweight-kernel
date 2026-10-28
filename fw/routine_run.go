@@ -378,6 +378,7 @@ func (a *Agent) checkRoutineDone(ctx context.Context, rs *runState, r Routine, a
 		return err
 	}
 	if pass.Passed {
+		applied.Done = DoneChecked
 		return nil
 	}
 	var failed []string
@@ -388,7 +389,7 @@ func (a *Agent) checkRoutineDone(ctx context.Context, rs *runState, r Routine, a
 		}
 	}
 	place := len(r.Steps) + len(r.After) + 1
-	applied.OK, applied.Answer, applied.Steps, applied.FailedStep = false, "", place, place
+	applied.OK, applied.Answer, applied.Steps, applied.FailedStep, applied.Done = false, "", place, place, DoneFailed
 	applied.Reason = ClipText("done: "+strings.Join(failed, "; "), 500, "the reason")
 	return nil
 }

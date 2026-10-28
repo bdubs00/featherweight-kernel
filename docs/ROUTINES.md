@@ -251,9 +251,9 @@ again.
    records the pass as `fw.done.checked` with `answer` 0, because no model
    answered. The passes of the model leave that pass out, so the model
    keeps every attempt. When a check fails, the routine did not complete:
-   `fw.routine.applied` has `ok: false`, the failed step one place after
-   its steps and its checks, and a reason that starts with `done:` and
-   names the failed checks. After a routine that completed, the run
+   `fw.routine.applied` has `ok: false`, `done: failed`, the failed step
+   one place after its steps and its checks, and a reason that starts
+   with `done:` and names the failed checks. After a routine that completed, the run
    finishes with the rendered `answer` as its output and no model call.
    With a definition of done, its end carries `done: checked` and the stop
    `checked`, so it counts as checked only as any run does. In every
@@ -332,6 +332,7 @@ type RoutineAppliedData struct {
     FailedStep int    `json:"failedStep,omitempty"`   // 1-based, among steps then after; one more for the checks of done
     Reason     string `json:"reason,omitempty"`
     Answer     string `json:"answer,omitempty"`       // the rendered answer of a routine that completed
+    Done       string `json:"done,omitempty"`         // the checks of done on its work: checked or failed
 }
 type RoutineComparedData struct {
     Routine  string `json:"routine"`

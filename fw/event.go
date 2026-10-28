@@ -584,7 +584,10 @@ const (
 // one, from 1, among the steps and then the checks, one place after them
 // for the checks of done; 0 when none failed. Reason says why the routine
 // stopped. Answer is the rendered answer of a routine that completed,
-// which is the output of the run.
+// which is the output of the run. Done is the state of the checks of done
+// of the run on the work of the routine: DoneChecked or DoneFailed, and
+// empty for a run without a definition of done or a routine that stopped
+// before them.
 type RoutineAppliedData struct {
 	Routine    string `json:"routine"`
 	Version    int    `json:"version"`
@@ -593,6 +596,7 @@ type RoutineAppliedData struct {
 	FailedStep int    `json:"failedStep,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	Answer     string `json:"answer,omitempty"`
+	Done       string `json:"done,omitempty"`
 }
 
 // RoutineComparedData is the payload of fw.routine.compared: at the end of

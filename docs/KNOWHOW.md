@@ -488,9 +488,11 @@ These rules change `docs/ROUTINES.md` section 4.
   results (`docs/ROUTINES.md` section 3.3, item 6). So a routine without
   questions, the only kind that Know-how proposes without a decider,
   gains agreement and can become ready.
-- Step back. One disagreement in a canary run, or a run that the routine
-  applied and that came back with a `rejected` receipt, moves a live
-  routine to `rehearsing`. The journal says `stepped-back` with the run.
+- Step back. One disagreement in a canary run, a run that the routine
+  applied and that came back with a `rejected` receipt, or a run whose
+  checks of done failed on the work of the routine (`fw.routine.applied`
+  with `done: failed`), moves a live routine to `rehearsing`. The journal
+  says `stepped-back` with the run.
 - Ready by risk. A rehearsing routine is ready under three conditions:
   - `acted` reaches the bound of its risk: `read` 20 and `write` 50, the
     defaults of `workbench.routines.readyAfter`.
