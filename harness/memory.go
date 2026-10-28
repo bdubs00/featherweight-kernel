@@ -180,7 +180,8 @@ func builtin(cfg *fw.Config, name string) bool {
 
 // memoryTools reports which tools of memory the run can use: notes, the
 // memory tool of the kernel, and recall, the recall tool, which also reads
-// runs, files, and skills.
+// runs, files, and skills. A run that is held back from Know-how
+// (fw.HeldBack) gets neither.
 //
 // The host cannot see the resolved tools of a run: the turn loop builds
 // them for each turn, and Agent.Tools also asks each tool source,
@@ -190,7 +191,7 @@ func builtin(cfg *fw.Config, name string) bool {
 // matches them. The profiles of the ancestors do not count, because a
 // harness starts no child run.
 func (h *host) memoryTools(q fw.RunQueuedData) (notes, recall bool) {
-	if h.mem == nil {
+	if h.mem == nil || fw.HeldBack(q.Metadata) {
 		return false, false
 	}
 	cfg := h.a.Config()
@@ -258,18 +259,23 @@ func memRights(tool string, notes, recall bool) string {
 
 // systemText returns the added system text of the harness: the
 // instructions of the run, then, for a run with the memory tool, the
-// memory section of the system prompt, the names of the tools of the
-// memory server when the harness has the server, and the sentence that
-// says that a context block holds data, and last, from the first message
-// from another agent on, the sentence that says what the block of such a
+// memory section of the system prompt and the names of the tools of the
+// memory server when the harness has the server, then, for a run with the
+// memory tool or with data blocks of its caller, the sentence that says
+// that a context block holds data, and last, from the first message from
+// another agent on, the sentence that says what the block of such a
 // message is. It never holds a note.
 func (r *run) systemText(server bool) string {
-	parts := []string{strings.TrimSpace(r.hr.Queued().Instructions)}
-	if notes, _ := r.h.memoryTools(r.hr.Queued()); notes {
-		parts = append(parts, memory.SystemSection)
+	q := r.hr.Queued()
+	parts := []string{strings.TrimSpace(q.Instructions)}
+	notes, _ := r.h.memoryTools(q)
+	if notes {
+		parts = append(parts, r.h.mem.Section(r.h.mem.Scope(r.info(r.dir))))
 		if server {
 			parts = append(parts, memToolsNote)
 		}
+	}
+	if notes || fw.RunContextText(q.Context) != "" {
 		parts = append(parts, fw.ContextNote)
 	}
 	if r.st != nil && r.st.fromAgent {
@@ -280,55 +286,62 @@ func (r *run) systemText(server bool) string {
 
 // memoryBlock returns the index of the notes of the run as a context
 // block for the start of the first prompt of the session, or "" when the
-// run has no memory tool or no note. When the index leaves notes out, its
-// last line says how many, and with the memory server, server true, which
-// tools find them. A walk that stopped at its bound adds memory.CutNote.
-func (r *run) memoryBlock(ctx context.Context, server bool) string {
+// run has no memory tool or no note, and the notes that the block lists.
+// When the index leaves notes out, its last line says how many, and with
+// the memory server, server true, which tools find them. A walk that
+// stopped at its bound adds memory.CutNote. With a front, the store takes
+// the notes of the front first (memory.Store.Brief).
+func (r *run) memoryBlock(ctx context.Context, server bool) (string, []fw.MemoryUsedRef) {
 	if notes, _ := r.h.memoryTools(r.hr.Queued()); !notes {
-		return ""
+		return "", nil
+	}
+	hint := ""
+	if server {
+		hint = "The tool list of fw-memory shows every note, and its tool recall searches them."
 	}
 	info := r.info(r.dir)
-	lines, more, cut, err := r.h.mem.Index(fw.WithRunInfo(fw.WithAgent(ctx, r.h.a), info), r.h.mem.Scope(info))
+	b, err := r.h.mem.Brief(fw.WithRunInfo(fw.WithAgent(ctx, r.h.a), info), r.h.mem.Scope(info), hint)
 	if err != nil {
 		r.h.log.Warn("harness: read the index of the notes", "run", r.hr.ID(), "error", err)
-		return ""
+		return "", nil
 	}
-	if len(lines) == 0 && !cut {
-		return ""
+	if b.Text == "" {
+		return "", nil
 	}
-	text := memory.ContextList
-	for _, l := range lines {
-		text += "\n" + l
-	}
-	if more > 0 {
-		text += fmt.Sprintf("\n%d more notes are not listed.", more)
-		if server {
-			text += " The tool list of fw-memory shows every note, and its tool recall searches them."
-		}
-	}
-	if cut {
-		text += "\n" + memory.CutNote
-	}
-	return fw.ContextBlock("memory", text)
+	return fw.ContextBlock("memory", b.Text), b.Used
 }
 
-// brief puts the index of the notes before the text of the first prompt
-// with text of the session, as data, and records fw.brief before the
-// prompt goes out, so a stop, a resume, or a cold boot never sends the
-// index again, while the text of a prompt that did not go out goes out
-// again. It returns the text and whether it starts with the index. A later
-// prompt, and a run without the memory tool, gets the text as it is.
-// server tells that the harness has the memory server.
+// brief puts the index of the notes, and after it the data blocks of the
+// caller of the run (fw.RunRequest.Context), before the text of the first
+// prompt with text of the session, as data, and records fw.brief before
+// the prompt goes out, so a stop, a resume, or a cold boot never sends the
+// blocks again, while the text of a prompt that did not go out goes out
+// again. It returns the text and whether it starts with a block. A later
+// prompt, and a run without the memory tool and without blocks of its
+// caller, gets the text as it is. server tells that the harness has the
+// memory server.
 func (r *run) brief(ctx context.Context, st *state, text string, server bool) (string, bool, error) {
 	if st.briefed {
 		return text, false, nil
 	}
-	if notes, _ := r.h.memoryTools(r.hr.Queued()); !notes {
+	q := r.hr.Queued()
+	caller := fw.RunContextText(q.Context)
+	notes, _ := r.h.memoryTools(q)
+	if !notes && caller == "" {
 		return text, false, nil
 	}
-	block := r.memoryBlock(ctx, server)
+	block, used := "", []fw.MemoryUsedRef(nil)
+	if notes {
+		block, used = r.memoryBlock(ctx, server)
+	}
+	block = joinText(block, caller)
 	if err := r.mark(ctx, EventData{Kind: KindBrief, Context: block != ""}); err != nil {
 		return "", false, err
+	}
+	if len(used) > 0 {
+		if _, err := r.hr.Emit(ctx, fw.EvMemoryUsed, fw.MemoryUsedData{How: fw.MemoryUsedBrief, Refs: used}); err != nil {
+			r.h.log.Warn("harness: record the notes of the start of the run", "run", r.hr.ID(), "error", err)
+		}
 	}
 	st.briefed = true
 	if block == "" {
@@ -347,6 +360,7 @@ type memRun struct {
 	recall bool // the run has the recall tool: recall reads runs and skills too
 	files  bool // recall can read the workspace: the run works in its root
 	emit   func(context.Context, fw.MemoryChangedData)
+	use    func(context.Context, fw.MemoryUsedData)
 }
 
 // denied returns why the run cannot use a tool of the memory server, or
@@ -368,6 +382,11 @@ func (r *run) memRun() *memRun {
 		emit: func(ctx context.Context, d fw.MemoryChangedData) {
 			if _, err := hr.Emit(ctx, fw.EvMemoryChanged, d); err != nil {
 				log.Warn("harness: record a change of the memory", "run", hr.ID(), "error", err)
+			}
+		},
+		use: func(ctx context.Context, d fw.MemoryUsedData) {
+			if _, err := hr.Emit(ctx, fw.EvMemoryUsed, d); err != nil {
+				log.Warn("harness: record a note that the run read", "run", hr.ID(), "error", err)
 			}
 		},
 	}
@@ -952,6 +971,9 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		d.CallID, d.Tool = a.callID, a.tool
 		run.emit(base, d)
 	})
+	if run.use != nil {
+		ctx = fw.WithMemoryUseRecorder(ctx, func(d fw.MemoryUsedData) { run.use(base, d) })
+	}
 	store, scope := h.mem, run.scope
 	switch a.tool {
 	case memRecall:
@@ -985,6 +1007,8 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		ifHash := strings.TrimSpace(in.IfHash)
 		rec, err := store.Remember(ctx, scope, fw.MemoryRecord{Ref: memory.NoteRef(scope, name), Body: in.Text}, ifHash)
 		switch {
+		case errors.Is(err, memory.ErrFrontConflict):
+			return "Error: " + memory.ConflictText, true
 		case errors.Is(err, fw.ErrMemoryConflict) && ifHash == "absent":
 			return "Error: " + show + " exists already. Recall it, and pass its hash to replace it.", true
 		case errors.Is(err, fw.ErrMemoryConflict):
@@ -1006,6 +1030,8 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		}
 		show := memory.Prefix + "/" + name
 		switch err := store.Forget(ctx, scope, memory.NoteRef(scope, name)); {
+		case errors.Is(err, memory.ErrFrontConflict):
+			return "Error: " + memory.ConflictText, true
 		case errors.Is(err, fw.ErrMemoryNotFound):
 			return "Error: no note at " + show + ".", true
 		case err != nil:
@@ -1069,6 +1095,9 @@ func (h *host) memGet(ctx context.Context, run *memRun, ref string) (string, boo
 		return "Error: " + ref + " cannot be read here.", true
 	case err != nil:
 		return "Error: " + err.Error(), true
+	}
+	if rec.Kind == fw.MemoryKindNote {
+		fw.RecordMemoryUse(ctx, fw.MemoryUsedData{How: fw.MemoryUsedRecall, Refs: []fw.MemoryUsedRef{{Ref: rec.Ref, Hash: rec.Hash}}})
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", rec.Ref)

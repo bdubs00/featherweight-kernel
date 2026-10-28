@@ -60,10 +60,14 @@ type MemoryField struct {
 	Value string `json:"value"`
 }
 
-// MemoryLink names another record and the relation.
+// MemoryLink names another record and the relation. For a note, a link is
+// a source of the note (docs/KNOWHOW.md section 5.2), such as run:<id>,
+// page:<path>, or item:<source>/<key>, and Version is the version of the
+// source that the note matches, such as the hash of a page.
 type MemoryLink struct {
-	Ref  string `json:"ref"`
-	Kind string `json:"kind"`
+	Ref     string `json:"ref"`
+	Kind    string `json:"kind"`
+	Version string `json:"version,omitempty"`
 }
 
 // MemoryQuery asks for records that match Text. Kinds and Tags narrow the
@@ -117,6 +121,30 @@ type MemoryChangedData struct {
 	Size   int64           `json:"size"`
 	SHA256 string          `json:"sha256,omitempty"`
 }
+
+// MemoryUsedData is the payload of fw.memory.used: the notes that a run
+// read. How is MemoryUsedBrief for the block at the start of the run,
+// MemoryUsedView for the memory tool, and MemoryUsedRecall for a hit of
+// recall that the run read. It never holds the text of a note or the
+// principal. The front counts the uses of each note from it.
+type MemoryUsedData struct {
+	How  string          `json:"how"`
+	Refs []MemoryUsedRef `json:"refs"`
+}
+
+// MemoryUsedRef names one note that a run read, with the hash of the text
+// that it read.
+type MemoryUsedRef struct {
+	Ref  string `json:"ref"`
+	Hash string `json:"hash,omitempty"`
+}
+
+// The ways a run reads a note (MemoryUsedData.How).
+const (
+	MemoryUsedBrief  = "brief"
+	MemoryUsedView   = "view"
+	MemoryUsedRecall = "recall"
+)
 
 type memoryRecorderKey struct{}
 

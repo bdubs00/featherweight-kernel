@@ -308,6 +308,11 @@ func (s *server) failMemory(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, fw.ErrMemoryNotFound):
 		problem(w, r, http.StatusNotFound, "no note has the path "+strconv.Quote(r.PathValue("path")))
+	case errors.Is(err, memory.ErrFrontConflict):
+		problem(w, r, http.StatusPreconditionFailed, memory.ConflictText)
+	case errors.Is(err, memory.ErrNotKept):
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+		problem(w, r, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, fw.ErrMemoryConflict):
 		problem(w, r, http.StatusPreconditionFailed, "the note changed: its hash differs from If-Match, or it exists and If-None-Match is *")
 	case errors.Is(err, memory.ErrLimit):

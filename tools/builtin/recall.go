@@ -95,6 +95,7 @@ func (t *recallTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 	if err := ctx.Err(); err != nil {
 		return canceled(ctx, "recall")
 	}
+	t.store.GuardToken(fw.AgentFrom(ctx))
 	info := fw.RunInfoFrom(ctx)
 	scope := t.store.Scope(info)
 	ctx = fw.WithRunPrincipal(ctx, info)
@@ -107,6 +108,9 @@ func (t *recallTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 			return fw.ErrorResult(fmt.Sprintf("Error: %s cannot be read here.", ref)), nil
 		case err != nil:
 			return fw.ErrorResult("Error: " + err.Error()), nil
+		}
+		if rec.Kind == fw.MemoryKindNote {
+			fw.RecordMemoryUse(ctx, fw.MemoryUsedData{How: fw.MemoryUsedRecall, Refs: []fw.MemoryUsedRef{{Ref: rec.Ref, Hash: rec.Hash}}})
 		}
 		return fw.TextResult(formatRecord(rec)), nil
 	}

@@ -375,6 +375,14 @@ func validate(c *fw.Config, servers bool) error {
 	default:
 		p = append(p, fmt.Sprintf("tools.memory.scope %q is not one of %s, %s, %s", c.Tools.Memory.Scope, fw.MemoryScopeAgent, fw.MemoryScopePrincipal, fw.MemoryScopeShared))
 	}
+	if f := c.Tools.Memory.Front; f != nil && strings.TrimSpace(f.URL) != "" {
+		if u, err := url.Parse(strings.TrimSpace(f.URL)); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			p = append(p, fmt.Sprintf("tools.memory.front.url %q is not an http or https address", f.URL))
+		}
+		if strings.TrimSpace(f.TokenEnv) == "" {
+			p = append(p, "tools.memory.front.tokenEnv must name the variable that holds the static token of the front")
+		}
+	}
 	p = append(p, checkBudget("budget", c.Budget)...)
 	if c.Compaction.At < 0 {
 		p = append(p, fmt.Sprintf("compaction.at %d is negative", c.Compaction.At))

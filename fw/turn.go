@@ -503,7 +503,7 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	if o := a.k.override(rs.id); o != nil && o.zone != nil && *o.zone != "" {
 		zone = *o.zone
 	}
-	d := RunStartedData{Tools: names, TimeZone: zone}
+	d := RunStartedData{Tools: names, TimeZone: zone, Knowhow: knowhowOf(c.queued)}
 	// A check run calls no model, so it names none, and no tool writes a
 	// brief or a context for it.
 	if c.queued.Check == nil {
@@ -511,6 +511,7 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	}
 	_, err := a.emit(ctx, rs, EvRunStarted, d)
 	if err == nil {
+		a.recordBriefUse(ctx, rs)
 	}
 	return err
 }
@@ -1017,12 +1018,13 @@ func (a *Agent) runTools(ctx context.Context, rs *runState, prof AgentProfile) (
 		globs = append(globs, a.profileOf(anc.queuedData()).Tools)
 	}
 	o := a.k.override(rs.id)
+	held := HeldBack(rs.queuedData().Metadata)
 	var out []Tool
 	byName := map[string]Tool{}
 	for _, t := range all {
 		spec := t.Spec()
 		name := spec.Name
-		allowed := true
+		allowed := !held || !KnowhowTool(name)
 		for _, g := range globs {
 			if !toolAllowed(g, spec) {
 				allowed = false
@@ -1530,6 +1532,7 @@ func (a *Agent) callTool(ctx context.Context, rs *runState, p plannedCall, input
 		d.CallID, d.Tool = callID, p.use.Name
 		_, _ = a.emit(ctx, rs, EvMemoryChanged, d)
 	})
+	tctx = WithMemoryUseRecorder(tctx, func(d MemoryUsedData) { _, _ = a.emit(ctx, rs, EvMemoryUsed, d) })
 	if a.files != nil {
 		tool := p.use.Name
 		ws, err := a.runWorkspace(a.dirOf(rs), func(d FileChangedData) {

@@ -76,6 +76,7 @@ func newSurface(keepAlive time.Duration, exts []Extension, opts ...func(*server)
 	return fw.SurfaceFunc(func(mux *http.ServeMux, a *fw.Agent) error {
 		s := &server{a: a, keepAlive: keepAlive}
 		s.mem, s.memErr = memory.New(a.Config())
+		s.mem.GuardToken(a)
 		for _, o := range opts {
 			o(s)
 		}
@@ -246,6 +247,9 @@ type createBody struct {
 	// Check makes the run a check run (fw.Check), whose input can be
 	// empty.
 	Check *checkBody `json:"check"`
+	// Context holds data blocks for the first user message
+	// (fw.RunRequest.Context). The kernel checks the bounds.
+	Context []fw.RunContext `json:"context"`
 }
 
 // checkBody is the check of a request: fw.Check with the timeout as a
@@ -617,6 +621,7 @@ func (s *server) createRun(w http.ResponseWriter, r *http.Request) {
 		Principal:     strings.TrimSpace(body.Principal),
 		PrincipalKind: strings.TrimSpace(body.PrincipalKind),
 		Check:         body.Check.check(),
+		Context:       body.Context,
 	}
 	run, ok := s.start(w, r, req)
 	if !ok {

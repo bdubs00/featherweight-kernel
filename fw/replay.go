@@ -107,6 +107,7 @@ func Replay(ctx context.Context, a *Agent, src Ledger, runID string, opts ...Run
 		Profile:      queued.Profile,
 		Budget:       queued.Budget,
 		Metadata:     meta,
+		Context:      queued.Context,
 	}
 	for _, o := range opts {
 		o(&req)

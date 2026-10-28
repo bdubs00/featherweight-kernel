@@ -41,6 +41,7 @@ const (
 	EvToolProgress      = "fw.tool.progress"
 	EvFileChanged       = "fw.file.changed"
 	EvMemoryChanged     = "fw.memory.changed" // a tool changed a memory note; see MemoryChangedData
+	EvMemoryUsed        = "fw.memory.used"    // a run read memory notes; see MemoryUsedData
 	EvApprovalRequested = "fw.approval.requested"
 	EvApprovalDecided   = "fw.approval.decided"
 	EvContextCompacted  = "fw.context.compacted"
@@ -179,6 +180,9 @@ type RunQueuedData struct {
 	// Check is the check of a check run, with its defaults (Check.Resolved),
 	// or nil for a run that calls a model.
 	Check *Check `json:"check,omitempty"`
+	// Context is RunRequest.Context: the data blocks of the caller, which
+	// fw.run.started puts after the blocks of the tools.
+	Context []RunContext `json:"context,omitempty"`
 }
 
 // ResolvedProfile is the configuration of a run that the kernel resolves
@@ -242,11 +246,15 @@ type RunStartedData struct {
 	Tools []string `json:"tools"`
 	Brief string   `json:"brief,omitempty"` // the sections that tools add to the system prompt (see Briefer)
 	// Context is the data that tools add to the first user message (see
-	// ContextBriefer). It is never part of the system prompt.
+	// ContextBriefer), followed by the data blocks of the caller
+	// (RunRequest.Context). It is never part of the system prompt.
 	Context string `json:"context,omitempty"`
 	// TimeZone is the zone of the run for its life: the clock tool and the
 	// time notes read and write times in it (see LoadZone).
 	TimeZone string `json:"timeZone,omitempty"`
+	// Knowhow is KnowhowOff for a run that is held back from Know-how
+	// (HeldBack), and empty for every other run.
+	Knowhow string `json:"knowhow,omitempty"`
 }
 
 // MessageReceivedData is the payload of fw.message.received.
@@ -558,7 +566,16 @@ type RoutineDecidedData struct {
 	Decider   string            `json:"decider,omitempty"`
 	Model     string            `json:"model,omitempty"`
 	LatencyMS int64             `json:"latencyMs,omitempty"`
+	// Risk is RiskRead when the annotations of every tool of the steps
+	// say read-only, and RiskWrite otherwise.
+	Risk string `json:"risk,omitempty"`
 }
+
+// The risks of a routine (RoutineDecidedData.Risk).
+const (
+	RiskRead  = "read"
+	RiskWrite = "write"
+)
 
 // RoutineAppliedData is the payload of fw.routine.applied: a live routine
 // that applies ran. OK is true when every step and every check passed.

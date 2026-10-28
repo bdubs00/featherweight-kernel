@@ -75,6 +75,12 @@ type Store struct {
 	scope string // fw.MemoryScopeAgent, fw.MemoryScopePrincipal, or fw.MemoryScopeShared
 	index noteIndex
 	swept sync.Map // the scope directories that this Store swept of temporary files
+	// front keeps the notes of the scopes agent and principal when
+	// tools.memory.front is set, or is nil (front.go).
+	front *front
+	// runs holds the runs of the archive of the front that recall found,
+	// so a ref of one of them reads it (recall.go).
+	runs runCache
 }
 
 var (
@@ -103,10 +109,22 @@ func New(cfg *fw.Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("memory: home %s: %w", home, err)
 	}
-	s := &Store{base: base, scope: scope}
+	var fc *fw.MemoryFrontConfig
+	if cfg != nil {
+		fc = cfg.Tools.Memory.Front
+	}
+	f, err := newFront(fc)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{base: base, scope: scope, front: f}
 	s.index = newNoteIndex(base)
 	return s, nil
 }
+
+// Front reports whether the front of a fleet keeps the notes of a scope,
+// and the files of the scope are a copy (docs/KNOWHOW.md section 4.2).
+func (s *Store) Front(scope fw.MemoryScope) bool { return s.front != nil && frontScope(scope) }
 
 // Close closes the optional index.
 func (s *Store) Close() error {
@@ -433,7 +451,14 @@ type noteFiles struct {
 	scope  fw.MemoryScope
 	store  *Store
 	locked bool // the caller holds the lock of the scope (Locked)
+	// links and meta are the sources and the fields of the record of a
+	// write through Remember, which the note keeps with its text.
+	links []fw.MemoryLink
+	meta  []fw.MemoryField
 }
+
+// pushes reports whether each change of these notes goes to the front.
+func (f *noteFiles) pushes() bool { return f.store != nil && f.store.Front(f.scope) }
 
 // lock takes the lock of the scope, unless the caller holds it.
 func (f *noteFiles) lock() (func(), error) {
@@ -464,7 +489,9 @@ func (f *noteFiles) writeLocked(name string, data []byte) error {
 		return &limitError{fmt.Sprintf("a note holds at most %d KB, and this text has %d KB", MaxNoteBytes>>10, (len(data)+1023)>>10)}
 	}
 	op := fw.FileChanged
-	if _, err := f.Files.Stat(name); errors.Is(err, fs.ErrNotExist) {
+	var old []byte
+	existed := false
+	if info, err := f.Files.Stat(name); errors.Is(err, fs.ErrNotExist) {
 		op = fw.FileCreated
 		n, cut, err := countNotes(f.ctx, f.Files)
 		switch {
@@ -477,18 +504,30 @@ func (f *noteFiles) writeLocked(name string, data []byte) error {
 		case n >= MaxNotes:
 			return &limitError{fmt.Sprintf("the memory holds %d notes, the most that one scope holds; update, merge, or delete a note first", n)}
 		}
+	} else if err == nil && !info.IsDir() && f.pushes() {
+		if old, err = fs.ReadFile(f.Files, name); err != nil {
+			return err
+		}
+		existed = true
 	}
 	if err := writeAtomic(f.dir, name, data); err != nil {
 		return err
 	}
 	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+	if f.pushes() {
+		if err := f.push(name, data, hash, old, existed); err != nil {
+			return err
+		}
+	}
+	f.keepExtra(name, hash)
 	fw.RecordMemoryChange(f.ctx, fw.MemoryChangedData{
 		Op:     op,
 		Ref:    NoteRef(f.scope, name),
 		Scope:  f.scope.Kind,
 		Agent:  f.scope.Agent,
 		Size:   int64(len(data)),
-		SHA256: hex.EncodeToString(sum[:]),
+		SHA256: hash,
 	})
 	return nil
 }
@@ -505,14 +544,35 @@ func (f *noteFiles) Remove(name string) error {
 
 // removeLocked is Remove for a caller that holds the lock of the scope. It
 // also removes the rows of the derived index, so the text of the note
-// leaves the index at once and not at the next search.
+// leaves the index at once and not at the next search. With a front, it
+// removes one note, never a directory, and the front puts the note away
+// (pushRemove).
 func (f *noteFiles) removeLocked(name string) error {
+	var old []byte
+	if f.pushes() {
+		info, err := f.Files.Stat(name)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return errDirAtFront
+		}
+		if old, err = fs.ReadFile(f.Files, name); err != nil {
+			return err
+		}
+	}
 	if err := f.Files.Remove(name); err != nil {
 		return err
 	}
 	if err := syncParent(f.dir, name); err != nil {
 		return err
 	}
+	if f.pushes() {
+		if err := f.pushRemove(name, old); err != nil {
+			return err
+		}
+	}
+	f.dropExtra(name)
 	f.store.dropFromIndex(f.ctx, f.scope, name)
 	fw.RecordMemoryChange(f.ctx, fw.MemoryChangedData{
 		Op:    fw.FileRemoved,
@@ -523,7 +583,9 @@ func (f *noteFiles) removeLocked(name string) error {
 	return nil
 }
 
-// Rename implements fw.Files.
+// Rename implements fw.Files. With a front, it renames one note, never a
+// directory, and the front gets the note under the new name and puts the
+// old name away (pushRename).
 func (f *noteFiles) Rename(oldname, newname string) error {
 	if err := CheckName(newname); err != nil {
 		return err
@@ -533,6 +595,22 @@ func (f *noteFiles) Rename(oldname, newname string) error {
 		return err
 	}
 	defer unlock()
+	var data []byte
+	if f.pushes() {
+		info, err := f.Files.Stat(oldname)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return errDirAtFront
+		}
+		if _, err := f.Files.Stat(newname); err == nil {
+			return &fs.PathError{Op: "rename", Path: newname, Err: fs.ErrExist}
+		}
+		if data, err = fs.ReadFile(f.Files, oldname); err != nil {
+			return err
+		}
+	}
 	if err := f.Files.Rename(oldname, newname); err != nil {
 		return err
 	}
@@ -542,6 +620,12 @@ func (f *noteFiles) Rename(oldname, newname string) error {
 	if err := syncParent(f.dir, newname); err != nil {
 		return err
 	}
+	if f.pushes() {
+		if err := f.pushRename(oldname, newname, data); err != nil {
+			return err
+		}
+	}
+	f.moveExtra(oldname, newname)
 	// The next search indexes the text under the new name.
 	f.store.dropFromIndex(f.ctx, f.scope, oldname)
 	fw.RecordMemoryChange(f.ctx, fw.MemoryChangedData{
@@ -702,7 +786,10 @@ func walkScope(ctx context.Context, fsys fs.FS, limit int, fn func(p string, d f
 // fw.ErrMemoryConflict unless the current note has that hash. The hash
 // "absent" requires that no note exists, and "present" that one exists. The
 // lock of the scope holds from the read to the answer, so two writers with
-// the same hash never both succeed. It returns the note as Get does.
+// the same hash never both succeed. The note keeps rec.Links as its
+// sources and rec.Metadata as its fields, for this text: Get returns them,
+// and a front gets the links as the sources of the note. It returns the
+// note as Get does.
 func (s *Store) Remember(ctx context.Context, scope fw.MemoryScope, rec fw.MemoryRecord, ifHash string) (fw.MemoryRecord, error) {
 	name, err := noteName(scope, rec.Ref)
 	if err != nil {
@@ -743,6 +830,7 @@ func (s *Store) Remember(ctx context.Context, scope fw.MemoryScope, rec fw.Memor
 			return fw.MemoryRecord{}, fw.ErrMemoryConflict
 		}
 	}
+	files.links, files.meta = rec.Links, rec.Metadata
 	if err := files.writeLocked(name, []byte(rec.Body)); err != nil {
 		return fw.MemoryRecord{}, err
 	}
@@ -901,7 +989,7 @@ func (s *Store) getNote(scope fw.MemoryScope, ref string) (fw.MemoryRecord, erro
 		return fw.MemoryRecord{}, err
 	}
 	title := firstLine(files, name)
-	return fw.MemoryRecord{
+	rec := fw.MemoryRecord{
 		Ref:         NoteRef(scope, name),
 		Kind:        fw.MemoryKindNote,
 		Scope:       scope,
@@ -913,7 +1001,11 @@ func (s *Store) getNote(scope fw.MemoryScope, ref string) (fw.MemoryRecord, erro
 		Size:        info.Size(),
 		Hash:        hex.EncodeToString(h.Sum(nil)),
 		Updated:     info.ModTime(),
-	}, nil
+	}
+	if e, ok := readStateAt(dir).Notes[name]; ok && e.Hash == rec.Hash {
+		rec.Links, rec.Metadata = e.Links, e.Metadata
+	}
+	return rec, nil
 }
 
 // hashFile returns the hex SHA-256 of the whole file name.

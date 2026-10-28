@@ -486,6 +486,16 @@ const (
 // of every profile live under $FW_HOME/memory/shared.
 type MemoryToolConfig struct {
 	Scope string `yaml:"scope" json:"scope"`
+	// Front keeps the notes at the front of a fleet. The files under
+	// $FW_HOME/memory are then a copy (docs/KNOWHOW.md section 4.2).
+	Front *MemoryFrontConfig `yaml:"front,omitempty" json:"front,omitempty"`
+}
+
+// MemoryFrontConfig names the front that keeps the notes, and the name of
+// the variable of the environment that holds its static token.
+type MemoryFrontConfig struct {
+	URL      string `yaml:"url" json:"url"`
+	TokenEnv string `yaml:"tokenEnv" json:"tokenEnv"`
 }
 
 // SpawnConfig bounds the child runs that a run starts through spawn_task.

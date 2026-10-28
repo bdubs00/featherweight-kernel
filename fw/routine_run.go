@@ -235,12 +235,15 @@ func answersText(answers map[string]Answer) string {
 }
 
 // routineDue reports whether the runner acts now: the run started, did not
-// finish, has made no model turn, is no replay, no branch, and no check
-// run, and its profile has a routine to act on. The runner acts once: any
-// routine event or call of the runner in the log means that it acted, also
-// before a restart.
+// finish, has made no model turn, is no replay, no branch, no check run,
+// and not held back from Know-how (HeldBack), and its profile has a
+// routine to act on. The runner acts once: any routine event or call of
+// the runner in the log means that it acted, also before a restart.
 func (a *Agent) routineDue(rs *runState, c *cursor) bool {
 	if !c.started || c.routine.seen || c.terminal || c.turns > 0 || c.answered || c.rep != nil || c.queued.Kept > 0 || c.queued.Check != nil {
+		return false
+	}
+	if HeldBack(c.queued.Metadata) {
 		return false
 	}
 	// A replay keeps the mark of its source in its metadata, also after
@@ -248,7 +251,45 @@ func (a *Agent) routineDue(rs *runState, c *cursor) bool {
 	if c.queued.Metadata["replayOf"] != "" || a.k.override(rs.id) != nil {
 		return false
 	}
-	return len(a.profileOf(c.queued).Routines) > 0
+	return len(routinesFor(a.profileOf(c.queued).Routines, c.queued.Metadata)) > 0
+}
+
+// routinesFor returns the routines that the runner considers for a run, in
+// profile order: a routine bound to a Duty (Routine.Duty) only when the
+// metadata MetaDuty of the run names that Duty, and every routine without
+// a Duty.
+func routinesFor(routines []Routine, meta map[string]string) []Routine {
+	duty := strings.TrimSpace(meta[MetaDuty])
+	var out []Routine
+	for _, r := range routines {
+		if r.Duty == "" || r.Duty == duty {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// routineRisk returns RiskRead when every tool of the steps and of the
+// checks of a routine is a tool of the run whose annotations say that it
+// is read-only (ToolSpec.ReadOnly), and RiskWrite otherwise. A tool that
+// the run lacks counts as a write, because nothing says that it only
+// reads.
+func routineRisk(r Routine, tools map[string]Tool) string {
+	readOnly := func(name string) bool {
+		t, ok := tools[name]
+		return ok && t.Spec().ReadOnly
+	}
+	for _, s := range r.Steps {
+		if !readOnly(s.Tool) {
+			return RiskWrite
+		}
+	}
+	for _, c := range r.After {
+		if !readOnly(c.Tool) {
+			return RiskWrite
+		}
+	}
+	return RiskRead
 }
 
 // routineRun is the work of the runner on one run. A check run makes its
@@ -278,7 +319,7 @@ type routineVerdict struct {
 // that a restart between the two events takes.
 func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
-	routines := prof.Routines
+	routines := routinesFor(prof.Routines, c.queued.Metadata)
 	_, tools := a.runTools(ctx, rs, prof)
 	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), calls: c.toolCalls - c.keptCalls, prefix: routineCallPrefix}
 	verdicts, err := rr.decide(ctx, routines, c.queued.Input)
@@ -383,7 +424,8 @@ func (rr *routineRun) decide(ctx context.Context, routines []Routine, input stri
 			mode = RoutineCanary
 		}
 		out[i] = routineVerdict{
-			data: RoutineDecidedData{Routine: r.Name, Version: r.Version, Standing: r.Standing, Mode: mode, Applies: true, Decider: r.Decider},
+			data: RoutineDecidedData{Routine: r.Name, Version: r.Version, Standing: r.Standing, Mode: mode, Applies: true, Decider: r.Decider,
+				Risk: routineRisk(r, rr.tools)},
 			said: map[string]string{},
 		}
 		if len(r.Questions) == 0 {

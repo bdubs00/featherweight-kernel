@@ -141,6 +141,10 @@ type runState struct {
 	depth  int           // 0 for a top-level run
 	queued RunQueuedData // the request, as fw.run.queued recorded it
 	text   *runText      // the text of the run, in memory only (textOf)
+	// briefUse holds the notes that the tools listed in the data of the
+	// start of the run, which fw.memory.used records after fw.run.started
+	// (recordBriefUse). Only the driver of the run touches it.
+	briefUse []MemoryUsedData
 	// maxDesc is the most runs that the run can have under it, from
 	// MetaMaxDescendants, or -1 when the metadata sets no limit.
 	maxDesc int
@@ -538,6 +542,12 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 	if len(req.Instructions) > maxInstructionBytes {
 		return nil, fmt.Errorf("%w: the instructions are longer than %d bytes", ErrInvalidRequest, maxInstructionBytes)
 	}
+	if err := CheckRunContext(req.Context); err != nil {
+		return nil, err
+	}
+	if req.Check != nil && len(req.Context) > 0 {
+		return nil, fmt.Errorf("%w: a check run calls no model, so it takes no field context", ErrInvalidRequest)
+	}
 	var parent *runState
 	var parentRun *Run
 	depth := 0
@@ -640,6 +650,7 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 		Outcome:       outcome,
 		Done:          done,
 		Check:         req.Check,
+		Context:       slices.Clone(req.Context),
 	}
 	text := a.pinText(named, &queued)
 	ev, err := NewEvent(req.ID, EvRunQueued, queued)
@@ -1948,6 +1959,9 @@ func WithRequest(req RunRequest) RunOption {
 			c := *req.Check
 			c.Steps = slices.Clone(c.Steps)
 			r.Check = &c
+		}
+		if len(req.Context) > 0 {
+			r.Context = append(r.Context, req.Context...)
 		}
 	}
 }
