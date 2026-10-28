@@ -411,3 +411,30 @@ func TestRemovalDropsEditRecords(t *testing.T) {
 		t.Fatalf("the state keeps the text of a removed note: %s", b)
 	}
 }
+
+// TestFrontWriteAfterPutAway checks that a note that the run deleted, which
+// the front put away, can get a new text under the same name.
+func TestFrontWriteAfterPutAway(t *testing.T) {
+	s, f, _ := frontStore(t, "agent")
+	ctx := asRun()
+	scope := s.Scope(fw.RunInfoFrom(ctx))
+	ref := NoteRef(scope, "a.md")
+	if _, err := s.Remember(ctx, scope, fw.MemoryRecord{Ref: ref, Body: "one\n"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Forget(ctx, scope, ref); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Remember(ctx, scope, fw.MemoryRecord{Ref: ref, Body: "two\n"}, ""); err != nil {
+		t.Fatalf("a new text after a removal = %v", err)
+	}
+	if n, _ := f.Get("triage", "agent", "", "a.md"); n.Text != "two\n" || n.State == "put-away" {
+		t.Fatalf("front = %+v", n)
+	}
+	if res := s.Pull(ctx, scope); !res.Answered || res.Removed != 0 {
+		t.Fatalf("pull = %+v", res)
+	}
+	if text, ok := readNote(t, s, scope, "a.md"); !ok || text != "two\n" {
+		t.Fatalf("copy = %q, %v", text, ok)
+	}
+}

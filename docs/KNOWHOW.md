@@ -375,8 +375,11 @@ runs (`memory/front.go`, and the fake front `memory/fronttest`):
 - One note answers `{"name", "text", "hash", "state", "sources": [{"ref",
   "version"}]}`. A note that is put away answers 404, or its record with
   `state: put-away`. The kernel treats both as no note.
-- A `PUT` with `ifHash: absent` for a name that the front holds, put away
-  too, answers 412. A `PUT` answers any 2xx on success.
+- A `PUT` with `ifHash: absent` for a note that the front keeps answers
+  412. A note that is put away counts as absent: the new text takes its
+  place, and the journal keeps the old one for undo. Otherwise an agent
+  can never write a note again under a name that it deleted. A `PUT`
+  answers any 2xx on success.
 - A `DELETE` answers any 2xx on success, 404 for a note that the front does
   not have, which the kernel treats as done, and 412 for another hash.
 - The runs answer `{"runs": [{"id", "title", "input", "output", "at",

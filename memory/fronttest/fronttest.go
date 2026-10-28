@@ -237,8 +237,9 @@ func (f *Front) note(w http.ResponseWriter, r *http.Request, agent, scope, princ
 			return
 		}
 		c := Change{Method: "PUT", Name: name, Principal: principal, IfHash: b.IfHash, Text: b.Text, By: b.By, Run: b.Run, Sources: b.Sources}
+		// A note that is put away is absent: a new text takes its place.
 		live := exists && cur.State != "put-away"
-		if (b.IfHash == "absent" && exists) || (b.IfHash != "absent" && (!live || cur.Hash() != b.IfHash)) {
+		if (b.IfHash == "absent" && live) || (b.IfHash != "absent" && (!live || cur.Hash() != b.IfHash)) {
 			c.Status = http.StatusPreconditionFailed
 			f.changes = append(f.changes, c)
 			w.WriteHeader(c.Status)
