@@ -252,19 +252,20 @@ again.
    answered. The passes of the model leave that pass out, so the model
    keeps every attempt. When a check fails, the routine did not complete:
    `fw.routine.applied` has `ok: false`, `done: failed`, the failed step
-   one place after its steps and its checks, and a reason that starts
-   with `done:` and names the failed checks. After a routine that completed, the run
-   finishes with the rendered `answer` as its output and no model call.
-   With a definition of done, its end carries `done: checked` and the stop
-   `checked`, so it counts as checked only as any run does. In every
-   other case, the run goes to the model: the routine did not complete, or no live routine
-   applies. For a live routine that did not apply or did not complete, the
-   first user message gets one `<context source="routine">` block. The
-   block holds the data of the decision and of what the routine did: the
-   answers with their probabilities, the steps that ran with their results
-   in brief, and the reason it stopped. The model therefore starts warm. A
-   shadow or canary run gets no block. The model must not see the answers
-   of the routine, or the comparison is worthless.
+   one place after its steps and its checks, and a reason that starts with
+   `done:` and names the failed checks. After a routine that completed,
+   the run finishes with the rendered `answer` as its output and no model
+   call. With a definition of done, its end carries `done: checked` and
+   the stop `checked`, so it counts as checked only as any run does. In
+   every other case, the run goes to the model: the routine did not
+   complete, or no live routine applies. For a live routine that did not
+   apply or did not complete, the first user message gets one
+   `<context source="routine">` block. The block holds the data of the
+   decision and of what the routine did: the answers with their
+   probabilities, the steps that ran with their results in brief, and the
+   reason it stopped. The model therefore starts warm. A shadow or canary
+   run gets no block. The model must not see the answers of the routine,
+   or the comparison is worthless.
 5. At the end of a run that the model completed, the runner compares the
    answers with what the agent did (section 3.5). It does so for each
    routine in the mode `shadow` or `canary`, and for each live routine
@@ -406,11 +407,11 @@ Without `--ledger`, the verb reads the ledger of the configuration.
 the tool calls of verified runs. The calls of a run are the calls of the
 model (`fw.ModelCalls`): the calls of the runner and of the checks of
 done, whose call ids start with `routine_` and `done_`, are no steps. It
-takes the sequence of tool names of each run. The most common sequence is the template. A list in an input
-takes the length that most runs give it. The runs with another sequence or
-another length are listed as divergent, with the reason. For each call
-position and each leaf of the input JSON, across runs, Propose decides the
-kind of the leaf:
+takes the sequence of tool names of each run. The most common sequence is
+the template. A list in an input takes the length that most runs give it.
+The runs with another sequence or another length are listed as divergent,
+with the reason. For each call position and each leaf of the input JSON,
+across runs, Propose decides the kind of the leaf:
 
 - A value that is equal everywhere and that the agent read in an earlier
   result stays a value that the routine reads: a `find` over that result.
