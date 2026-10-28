@@ -18,7 +18,7 @@ import (
 
 // NoAnswerNote is the line of the block of the notes when the front did not
 // answer the pull within PullWait.
-const NoAnswerNote = "The front of the fleet did not answer, so this list comes from the copy in this Task and can miss recent changes."
+const NoAnswerNote = "The front of the fleet did not answer. This list comes from the copy in this Task and can miss recent changes."
 
 // PullResult says what a pull did.
 type PullResult struct {

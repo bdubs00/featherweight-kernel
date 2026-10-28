@@ -116,7 +116,16 @@ Context []RunContext `json:"context,omitempty"`
 - `fw.run.started` records the blocks in its field `context`, as it records
   the blocks of the tools. A resume, a replay, and a fork keep them.
 - The native API (`POST /v1/runs`), the bus job, and `send` with a new run
-  accept the field. `WithRunContext(source, text)` is the Go option.
+  accept the field. `WithRunContext(source, text)` is the Go option. The
+  kernel has no `send` of its own that starts a run. A `send` of the
+  workbench starts a run through the native API or the bus, so it takes
+  the same field.
+- A check run calls no model, so a request with a check and blocks fails
+  with a 400.
+- A hosted run gets the blocks after the index of the notes, at the start
+  of its first prompt.
+- `ContextNote` now says that tools and the caller of the run add the
+  blocks.
 
 ### 4.2 Notes kept at the front
 
@@ -132,13 +141,19 @@ tools:
 ```
 
 With `front` set, the front holds the notes, and the files in
-`$FW_HOME/memory` are a copy. Without it, nothing changes.
+`$FW_HOME/memory` are a copy. Without it, nothing changes. The front keeps
+the scopes `agent` and `principal`. The scope `shared` of a process stays
+in the files of the process, because the front has no such scope.
 
 - Pull: when a run starts, before the tools brief, the store asks the front
   for the list of the notes of the scope of the run (section 5.3). It
-  fetches each note whose hash differs from the copy, and it removes copies
-  that the front no longer lists. If the front does not answer within 5 s,
-  the run uses the copy, and the block says so in one line.
+  fetches each note whose hash differs from the copy. It removes each copy
+  that the front lists as put away or waiting. It also removes each copy
+  that the front listed before and no longer lists. Some copies were never
+  on the list, such as notes from before the front was set. Each of them
+  goes to the front as a new note with `by: agent`. So the first pull of a
+  Task never removes notes that the front never had. If the front does not answer
+  within 5 s, the run uses the copy, and the block says so in one line.
 - Push: every change through `memory.Store` sends the new text to the
   front. This includes the memory tool, the native API, and the hosted
   `fw-memory` server. The push carries the hash that the copy had as
@@ -147,22 +162,37 @@ With `front` set, the front holds the notes, and the files in
 - Conflict: if the front answers 412, the store puts back the text of the
   front in the copy and returns an error to the caller: "This note changed
   in another run. View it again before you change it."
-- No answer: if the front does not answer, the store undoes the local
-  write. It then returns an error that says the note was not kept.
+- No answer: if the front does not answer within 10 s, or refuses the
+  change with another status, the store undoes the local write. It then
+  returns an error that says the note was not kept. The native API answers
+  503.
 - What the kernel sends with a push: the text, `by`, the run id, and the
   sources. `by` is `agent`, or `person:<subject>` for the native API. The
   sources come from `MemoryRecord.Links`. A model cannot set `by` or the
-  run.
-- `Remember` keeps `Links` (as sources) and `Metadata`. They no longer
-  disappear.
+  run. A write without links sends `"sources": []`. The front must not
+  keep the sources of an older text for the new one, because the agent did
+  not check them.
+- A removal sends `DELETE` with the hash of the copy. A rename sends the
+  note under its new name with `absent`, and then removes the old name.
+  With a front, the memory tool deletes and renames one note at a time. It
+  refuses a directory, because each note needs a change of its own.
+- `Remember` keeps `Links` (as sources) and `Metadata` beside the text, in
+  a hidden file of the scope. `Get` returns them while the text stays the
+  same. A new text drops them.
+- The token never enters a log line or an event. Each holder of a store
+  gives it to the redactor of the agent, whatever the name of its
+  variable.
 
 ### 4.3 Safe to repeat
 
 `insert` and `str_replace` become safe to repeat. Before the write, the
 tool records the call id, the hash before, and the hash after, in the
 scope. A repeated call whose note already has the hash after returns the
-first result. The whole memory tool is then `IdempotentCall` true, and an
-unattended run never waits for a person on a note.
+first result. A repeated call whose note has neither hash fails, because
+another write came between. The whole memory tool is then
+`IdempotentCall` true, and an unattended run never waits for a person on a
+note. `ToolSpec.Idempotent` of the tool stays false, so a policy rule
+`idempotent` does not match a tool that writes notes.
 
 ### 4.4 The block at the start of a run
 
@@ -181,6 +211,22 @@ of the block. One line counts them: "3 notes are out of date. View
 "Notes: 23 kept, 3.1 of 4 KB shown." Hermes Agent shows the same, and an
 agent that sees the limit keeps its notes short.
 
+What the kernel reads for this block:
+
+- The group and the label come from the list of the front: `by`, `state`,
+  `uses`, and `at`. The date of `(checked <date>)` is `at`.
+- Group 3 holds every other note that the copy keeps, such as an
+  `unchecked` note with a source of a run. A note whose copy has another
+  hash than the list gets no label.
+- The line that counts the notes left out counts the out-of-date and the
+  resting notes, because only those stay in `/memories`. The pull keeps no
+  copy of a note that is put away or waiting.
+- When the front does not answer, the second line says so: "The front of
+  the fleet did not answer. This list comes from the copy in this Task and
+  can miss recent changes." The labels then come from the last answer.
+- The memory section of the system prompt names this order in place of
+  "newest first".
+
 ### 4.5 The event `fw.memory.used`
 
 ```json
@@ -193,6 +239,11 @@ agent that sees the limit keeps its notes short.
   per call of a tool and one at the start.
 - The workbench adds `fw.memory.used` to `fleet.EgressTypes`. The front
   counts the uses of each note from it.
+- A view of a directory reads no note and records nothing. A search of
+  recall records nothing either: only a read with a ref counts.
+- Without a front, `brief` names its notes without a hash.
+- A hosted run records `brief` for its first prompt and `recall` for a
+  read of `fw-memory` with a ref.
 
 ### 4.6 Held back
 
@@ -204,6 +255,7 @@ The kernel then does three things:
 - It skips the routine runner.
 
 `fw.run.started` records `knowhow: "off"`. Every other run is a normal run.
+A held-back run of Claude Code or opencode gets no memory tools either.
 
 ### 4.7 Recall across Tasks
 
@@ -211,7 +263,10 @@ With `front` set, the run search of `recall` also asks the front
 (`GET /v1/knowhow/runs`, section 5.3). The front searches the archive for
 the runs of the same agent and the same principal. The kernel merges the
 hits with the local runs, keeps one hit per run id, and keeps the bound of
-20 hits. Every hit stays `untrusted`.
+20 hits. Every hit stays `untrusted`. A run that both hold keeps the local
+hit. A ref of a run that only the front holds reads the run that the last
+search of the same scope found. If the front does not answer within 5 s,
+the result says so in a note.
 
 ### 4.8 Routines bound to a Duty, and their risk
 
@@ -222,7 +277,9 @@ Two small changes to `fw.Routine` (`docs/ROUTINES.md` section 2):
   sets). A routine bound to a Duty needs no choice among routines.
 - The runner adds `risk` to `fw.routine.decided`. The risk is `read` if
   the annotations of every tool of the steps say read-only. Otherwise it
-  is `write`.
+  is `write`. The tools of the checks (`after`) count too, and a tool that
+  the run lacks counts as a write.
+- The metadata key is `workbench.duty` (`fw.MetaDuty`).
 
 `routine.LeaveOneOut(runs, opts)` proposes a routine from all runs but one
 and replays it on the one that it left out, for each run. It returns the
@@ -308,6 +365,24 @@ principals, such as `duty:<name>`.
 | `GET /v1/knowhow/waiting?agent=` | the changes that wait for a person |
 | `POST /v1/knowhow/waiting/{id}` | `{"keep": true}` or `{"keep": false}`. Each change pins the hash of its target. A target that changed since gets 409. |
 | `GET /v1/knowhow/summary?agent=&days=7` | the four numbers of section 1, split into normal and held-back runs |
+
+The kernel reads and sends these shapes on the routes of the notes and the
+runs (`memory/front.go`, and the fake front `memory/fronttest`):
+
+- The list answers `{"notes": [...]}`. Each item holds `name`, `hash`,
+  `state`, `description`, `by`, `at` (RFC 3339), `uses`, and `sources`.
+  The kernel takes `sources` as a count or as a list.
+- One note answers `{"name", "text", "hash", "state", "sources": [{"ref",
+  "version"}]}`. A note that is put away answers 404, or its record with
+  `state: put-away`. The kernel treats both as no note.
+- A `PUT` with `ifHash: absent` for a name that the front holds, put away
+  too, answers 412. A `PUT` answers any 2xx on success.
+- A `DELETE` answers any 2xx on success, 404 for a note that the front does
+  not have, which the kernel treats as done, and 412 for another hash.
+- The runs answer `{"runs": [{"id", "title", "input", "output", "at",
+  "outcome"}]}`. An empty `principal` asks for the runs without a
+  principal.
+- For the scope `agent`, the kernel sends no `principal`.
 
 The bossmode stream carries `{"kind": "knowhow", "agent": "…"}` on each
 change of a note, the journal, the switch, or the waiting list. It sends
