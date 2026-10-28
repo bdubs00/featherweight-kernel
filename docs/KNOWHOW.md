@@ -44,8 +44,8 @@ Know-how promises three things. The design must keep each one.
 Know-how does not learn from the opinion of a model about its own work. It
 learns only from results that a system records. These are a receipt of
 `accepted` or `satisfied`, an outcome grader that passed, and a person's
-thumbs up. After the `flow` branches land, a definition of done that
-passed also counts.
+thumbs up. A definition of done that passed counts too: `done: checked`
+on the newest `fw.run.finished` (docs/ARCHITECTURE.md section 24).
 
 ## 2. One word for one thing
 
@@ -531,7 +531,7 @@ candidates by code, without a model:
 |---|---|
 | `gotcha` | A tool call that failed, and a later call of the same tool in the same run that passed with a different input |
 | `place` | The same read call (tool and input) in two or more runs of an agent, with the same result |
-| `outcome` | A run with a receipt, an outcome grader verdict, or a thumbs up or down |
+| `outcome` | A run with a receipt, an outcome grader verdict, a definition of done that passed, or a thumbs up or down |
 | `recheck` | A note that went out of date |
 
 Each candidate holds its runs, its sources, and its origin. If its text
