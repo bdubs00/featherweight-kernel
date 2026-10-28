@@ -165,6 +165,9 @@ tools:
     timeout: 0s                 # one command; 0 leaves the limit to tools.limits
   memory:
     scope: ""                   # empty is agent, and principal under ax | agent: notes per profile under <home>/memory/agents/<agent> | principal: notes per person and profile under <home>/memory/principals/<agent>/<hash> | shared: one set under <home>/memory/shared, which only access.admins write through the API
+    # front:                    # the front of a fleet keeps the notes of the scopes agent and principal, and <home>/memory is a copy (docs/KNOWHOW.md section 4.2); the workbench sets it for each pool
+    #   url: http://fw-front:8080
+    #   tokenEnv: FW_API_TOKEN  # the variable that holds the static token of the front
   limits:                       # every tool call, from the built-in tools, MCP servers, and Go options alike
     maxInputBytes: 262144       # a larger input does not run
     maxOutputBytes: 102400      # a larger result keeps its head and its tail, and the full text goes to .fw-tool/<call id>.txt of the run; a local model wants less, such as 16384
