@@ -342,8 +342,55 @@ func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor) error 
 	if err != nil {
 		return err
 	}
+	if applied.OK {
+		if err := a.checkRoutineDone(ctx, rs, routines[chosen], &applied); err != nil {
+			return err
+		}
+	}
 	_, err = a.emit(ctx, rs, EvRoutineApplied, applied)
 	return err
+}
+
+// checkRoutineDone runs the checks of the definition of done of the run
+// on the work of a live routine that completed, before fw.routine.applied,
+// as on an answer of the model. A run that a routine finishes therefore
+// counts as checked only as any run does (CheckedDone). The pass has the
+// answer 0, because no model answered: the passes of the model leave it
+// out, so the model keeps every attempt. When a check fails, the routine
+// did not complete. Its fw.routine.applied names the failed checks, one
+// place after its steps and its checks, and the model takes the run with
+// the context block of the routine.
+func (a *Agent) checkRoutineDone(ctx context.Context, rs *runState, r Routine, applied *RoutineAppliedData) error {
+	d := rs.queuedData().Done
+	if !d.on() {
+		return nil
+	}
+	// The cursor of the step that ran the routine does not count its
+	// calls yet.
+	c, _ := rs.executionCursor()
+	pass := DoneCheckedData{Attempt: 1, Attempts: d.attempts()}
+	if err := a.runDone(ctx, rs, c, d, &pass); err != nil {
+		return err
+	}
+	pass.Continue = !pass.Passed
+	a.log.Info("done checked after a routine", "run", rs.id, "routine", r.Name, "passed", pass.Passed)
+	if _, err := a.emit(ctx, rs, EvDoneChecked, pass); err != nil {
+		return err
+	}
+	if pass.Passed {
+		return nil
+	}
+	var failed []string
+	for i, res := range pass.Checks {
+		if !res.Passed {
+			why, _, _ := strings.Cut(res.Why, "\n")
+			failed = append(failed, DoneCheck{Name: res.Name, Tool: res.Tool}.label(i)+" failed: "+strings.TrimSuffix(why, ":"))
+		}
+	}
+	place := len(r.Steps) + len(r.After) + 1
+	applied.OK, applied.Answer, applied.Steps, applied.FailedStep = false, "", place, place
+	applied.Reason = ClipText("done: "+strings.Join(failed, "; "), 500, "the reason")
+	return nil
 }
 
 // closeRoutine records the end of a live routine that a restart or a
@@ -380,15 +427,22 @@ func (rs *runState) routineWaits() bool {
 }
 
 // finishRoutine finishes a run whose routine completed, with its answer as
-// the output. A message that arrived meanwhile goes to the model instead,
-// which starts with the context block of the routine.
+// the output. A routine completes only when the checks of done of the run
+// passed (checkRoutineDone), so the end carries them as the end of a run
+// of the model does (endTurn). A message that arrived meanwhile goes to
+// the model instead, which starts with the context block of the routine.
 func (a *Agent) finishRoutine(ctx context.Context, rs *runState, c *cursor, n int) error {
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
 	if messageSince(rs.events, n) {
 		return nil
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: c.routine.answer, Stop: RunStopAnswered})
+	done := doneStateOf(rs)
+	stop := RunStopAnswered
+	if done == DoneChecked {
+		stop = RunStopChecked
+	}
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: c.routine.answer, Done: done, Stop: stop})
 	return err
 }
 

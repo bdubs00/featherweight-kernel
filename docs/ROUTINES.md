@@ -245,9 +245,19 @@ again.
    fails ends the routine: an error result, a denied call, a template
    error, or an empty hole. A check that fails ends it too. The runner
    records `fw.routine.applied` with `ok` and the reason.
-4. After a routine that completed, the run finishes with the rendered
-   `answer` as its output and no model call. In every other case, the run
-   goes to the model: the routine did not complete, or no live routine
+4. A run with a definition of done (`ARCHITECTURE.md` section 24) checks
+   the work of a routine that completed, as it checks an answer of the
+   model. The kernel runs the checks before `fw.routine.applied` and
+   records the pass as `fw.done.checked` with `answer` 0, because no model
+   answered. The passes of the model leave that pass out, so the model
+   keeps every attempt. When a check fails, the routine did not complete:
+   `fw.routine.applied` has `ok: false`, the failed step one place after
+   its steps and its checks, and a reason that starts with `done:` and
+   names the failed checks. After a routine that completed, the run
+   finishes with the rendered `answer` as its output and no model call.
+   With a definition of done, its end carries `done: checked` and the stop
+   `checked`, so it counts as checked only as any run does. In every
+   other case, the run goes to the model: the routine did not complete, or no live routine
    applies. For a live routine that did not apply or did not complete, the
    first user message gets one `<context source="routine">` block. The
    block holds the data of the decision and of what the routine did: the
@@ -319,7 +329,7 @@ type RoutineAppliedData struct {
     Version    int    `json:"version"`
     OK         bool   `json:"ok"`
     Steps      int    `json:"steps"`                  // steps that ran, failed one included
-    FailedStep int    `json:"failedStep,omitempty"`   // 1-based, among steps then after
+    FailedStep int    `json:"failedStep,omitempty"`   // 1-based, among steps then after; one more for the checks of done
     Reason     string `json:"reason,omitempty"`
     Answer     string `json:"answer,omitempty"`       // the rendered answer of a routine that completed
 }

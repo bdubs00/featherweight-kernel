@@ -982,3 +982,81 @@ func TestModelCallsLeavesOutTheCallsOfTheKernel(t *testing.T) {
 		t.Fatalf("calls = %+v", calls)
 	}
 }
+
+// A run that a live routine finishes runs the checks of done of the run,
+// as a run of the model does. When they pass, the run ends as checked with
+// no model call. When one fails, the routine did not complete: the model
+// takes the run with the reason in its block, and its own answer gets
+// every attempt.
+func TestRoutineLiveRunsTheChecksOfDone(t *testing.T) {
+	check := DoneCheck{Name: "the report holds the line of today", Tool: "stock.read", Input: `{"path": "report.txt"}`, Contains: []string{"pens=90"}}
+	t.Run("passed", func(t *testing.T) {
+		ctx := testCtx(t)
+		s := newScript() // the model must not be called
+		st := &stock{text: "STOCK pens=90"}
+		prof := AgentProfile{Name: "clerk", Routines: []Routine{stockRoutine(RoutineLive)}, Done: &Done{Checks: []DoneCheck{check}, Attempts: 1}}
+		a := newTestAgent(t, s.Model(), WithTools(st.tools()...), WithProfile(prof))
+		r, err := a.Run(ctx, "Acknowledge the stock file.", AsAgent("clerk"))
+		mustState(t, r, err, StateCompleted)
+		if r.Output != "ACK STOCK pens=90" || len(s.requests()) != 0 {
+			t.Fatalf("output %q, model calls %d", r.Output, len(s.requests()))
+		}
+		if r.Done == nil || r.Done.State != DoneChecked || r.Stop != RunStopChecked || !CheckedDone(r.Done.State, r.Done.Weak) {
+			t.Fatalf("run done = %+v, stop %q", r.Done, r.Stop)
+		}
+		evs := ledgerEvents(t, a.Ledger(), r.ID)
+		types := eventTypes(evs)
+		n := len(types)
+		if types[n-5] != EvToolRequested || types[n-3] != EvDoneChecked || types[n-2] != EvRoutineApplied || types[n-1] != EvRunFinished {
+			t.Fatalf("events = %v", types)
+		}
+		passes := donePassesOf(t, evs)
+		if len(passes) != 1 || !passes[0].Passed || passes[0].Answer != 0 || passes[0].Continue {
+			t.Fatalf("passes = %+v", passes)
+		}
+		if d := finishedOf(t, evs); d.Done != DoneChecked || d.Stop != RunStopChecked {
+			t.Fatalf("finished = %+v", d)
+		}
+		checkCursorPrefixes(t, evs)
+	})
+	t.Run("failed", func(t *testing.T) {
+		ctx := testCtx(t)
+		// The routine writes an old line as a constant. The check of done
+		// catches it, and the model writes the right line.
+		zero := 0.0
+		stale := Routine{Name: "stock-ack", Version: 1, Standing: RoutineLive, Canary: &zero,
+			Steps:  []RoutineStep{{Tool: "stock.write", Input: `{"path": "report.txt", "text": "STOCK pens=120"}`}},
+			Answer: "ACK STOCK pens=120"}
+		s := newScript(
+			callTools(use("t1", "stock.write", `{"path": "report.txt", "text": "STOCK pens=90"}`)),
+			endTurn("ACK STOCK pens=90"),
+		)
+		st := &stock{text: "STOCK pens=90"}
+		prof := AgentProfile{Name: "clerk", Routines: []Routine{stale}, Done: &Done{Checks: []DoneCheck{check}, Attempts: 1}}
+		a := newTestAgent(t, s.Model(), WithTools(st.tools()...), WithProfile(prof))
+		r, err := a.Run(ctx, "Acknowledge the stock file.", AsAgent("clerk"))
+		mustState(t, r, err, StateCompleted)
+		if r.Output != "ACK STOCK pens=90" || len(s.requests()) != 2 || st.report != "STOCK pens=90" {
+			t.Fatalf("output %q, model calls %d, report %q", r.Output, len(s.requests()), st.report)
+		}
+		evs := ledgerEvents(t, a.Ledger(), r.ID)
+		var app RoutineAppliedData
+		firstOf(t, evs, EvRoutineApplied, &app)
+		want := `done: check 1 "the report holds the line of today" (stock.read) failed: the result lacks "pens=90"`
+		if app.OK || app.Answer != "" || app.FailedStep != 2 || app.Reason != want {
+			t.Fatalf("applied = %+v", app)
+		}
+		passes := donePassesOf(t, evs)
+		if len(passes) != 2 || passes[0].Passed || passes[0].Answer != 0 || !passes[0].Continue ||
+			!passes[1].Passed || passes[1].Attempt != 1 || passes[1].Answer == 0 {
+			t.Fatalf("passes = %+v", passes)
+		}
+		if first := firstMessage(s.requests()[0]); !strings.Contains(first, `<context source="routine">`) || !strings.Contains(first, "It stopped: "+want) {
+			t.Fatalf("first message =\n%s", first)
+		}
+		if d := finishedOf(t, evs); d.Done != DoneChecked || d.Stop != RunStopChecked {
+			t.Fatalf("finished = %+v", d)
+		}
+		checkCursorPrefixes(t, evs)
+	})
+}

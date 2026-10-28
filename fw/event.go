@@ -578,10 +578,11 @@ const (
 )
 
 // RoutineAppliedData is the payload of fw.routine.applied: a live routine
-// that applies ran. OK is true when every step and every check passed.
-// Steps counts the steps and checks that ran, the failed one included.
-// FailedStep is the place of the failed one, from 1, among the steps and
-// then the checks; 0 when none failed. Reason says why the routine
+// that applies ran. OK is true when every step and every check passed, and
+// so did the checks of done of the run. Steps counts the steps and checks
+// that ran, the failed one included. FailedStep is the place of the failed
+// one, from 1, among the steps and then the checks, one place after them
+// for the checks of done; 0 when none failed. Reason says why the routine
 // stopped. Answer is the rendered answer of a routine that completed,
 // which is the output of the run.
 type RoutineAppliedData struct {
