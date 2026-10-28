@@ -115,7 +115,7 @@ func Propose(runs [][]fw.Event, opts ProposeOptions) (fw.Routine, Proposal) {
 		prop.Runs = append(prop.Runs, r.id)
 	}
 	for _, c := range used[0].calls {
-		prop.Sequence = append(prop.Sequence, c.tool)
+		prop.Sequence = append(prop.Sequence, c.Tool)
 	}
 	p := &proposer{runs: used, names: map[string]bool{"input": true, "json": true, "meta": true}, answers: map[string][]string{}}
 	r := p.build()
@@ -164,7 +164,7 @@ func majority(runs []record, key func(record) string, reason string, prop *Propo
 func sequenceOf(r record) string {
 	var names []string
 	for _, c := range r.calls {
-		names = append(names, c.tool)
+		names = append(names, c.Tool)
 	}
 	return strings.Join(names, "\x00")
 }
@@ -188,7 +188,7 @@ func listsOf(r record) string {
 		}
 	}
 	for i, c := range r.calls {
-		walk(strconv.Itoa(i), decodeJSON(c.input))
+		walk(strconv.Itoa(i), decodeJSON(c.Input))
 	}
 	return b.String()
 }
@@ -254,9 +254,9 @@ func (p *proposer) build() fw.Routine {
 	for c := 0; c < calls; c++ {
 		vals := make([]any, len(p.runs))
 		for i, r := range p.runs {
-			vals[i] = decodeJSON(r.calls[c].input)
+			vals[i] = decodeJSON(r.calls[c].Input)
 		}
-		trees[c] = p.shape(vals, "", c, p.runs[0].calls[c].tool, &leaves)
+		trees[c] = p.shape(vals, "", c, p.runs[0].calls[c].Tool, &leaves)
 	}
 	prefix, answerTree := p.answerShape(&leaves)
 	// Each pass in turn, so a later pass can use the questions of an
@@ -292,7 +292,7 @@ func (p *proposer) build() fw.Routine {
 		as[s.step] = s.field
 	}
 	for c := 0; c < calls; c++ {
-		r.Steps = append(r.Steps, fw.RoutineStep{Tool: p.runs[0].calls[c].tool, Input: render(trees[c]), As: as[c]})
+		r.Steps = append(r.Steps, fw.RoutineStep{Tool: p.runs[0].calls[c].Tool, Input: render(trees[c]), As: as[c]})
 	}
 	if answerTree != nil {
 		r.Answer = escapeText(prefix) + render(answerTree)
@@ -556,7 +556,7 @@ func (p *proposer) sourcesOf(l *leafVal) []textSource {
 	for c := 0; c < last; c++ {
 		texts := make([]string, len(p.runs))
 		for i, r := range p.runs {
-			texts[i] = r.calls[c].result
+			texts[i] = r.calls[c].Result
 		}
 		out = append(out, textSource{step: c, texts: texts})
 	}
@@ -574,7 +574,7 @@ func (p *proposer) field(step int) string {
 			return s.field
 		}
 	}
-	tool := p.runs[0].calls[step].tool
+	tool := p.runs[0].calls[step].Tool
 	if i := strings.LastIndexByte(tool, '.'); i >= 0 {
 		tool = tool[i+1:]
 	}
@@ -714,7 +714,7 @@ func (p *proposer) question(l *leafVal) bool {
 	for i, r := range p.runs {
 		texts[i] = r.output
 		if l.step >= 0 {
-			texts[i] = string(r.calls[l.step].input)
+			texts[i] = string(r.calls[l.step].Input)
 		}
 	}
 	if l.step >= 0 {

@@ -262,6 +262,16 @@ again.
    question that has `observe`, before `fw.run.finished`. A finished run
    therefore stays finished, and `LeavesFinished` needs no change. A run
    that fails gets no comparison.
+6. A routine in the mode `shadow` or `canary` that applies also gets one
+   comparison of its calls: `fw.routine.compared` with `calls: true` and
+   no question. The runner renders the steps and the checks on the run,
+   with the answers of the routine and with the results of the calls of
+   the agent, and compares them with those calls as Replay does (section
+   3.6). It agrees when every step and every check with a call matched.
+   So a routine without questions gains agreement too. A run on which a
+   `find` finds no value is one that the routine hands to the agent, and
+   it gets no comparison of the calls. The calls of the runner and of the
+   checks of done are no calls of the agent.
 
 The tool calls of the runner go through the same policy, limits, and
 budget as those of a model. A policy `ask` parks the run in the same
@@ -317,10 +327,13 @@ type RoutineComparedData struct {
     Routine  string `json:"routine"`
     Version  int    `json:"version"`
     Mode     string `json:"mode"`                     // shadow | canary | live (a live routine that did not complete)
-    Question string `json:"question"`
-    Said     string `json:"said"`                     // the routine's chosen option, or yes/no
-    Observed string `json:"observed"`                 // what the agent did, "" when nothing matched
+    Question string `json:"question"`                 // "" for the comparison of the calls
+    Said     string `json:"said"`                     // the routine's chosen option, or yes/no; the input of the step that differs
+    Observed string `json:"observed"`                 // what the agent did, "" when nothing matched; the input of its call
     Agree    bool   `json:"agree"`
+    Calls    bool   `json:"calls,omitempty"`          // the comparison of the calls (section 3.3, item 6)
+    Step     int    `json:"step,omitempty"`           // the first step that differs, 1-based, among steps then after
+    Reason   string `json:"reason,omitempty"`         // how it differs: "step 2 files: the key file_text differs"
 }
 ```
 
@@ -533,7 +546,7 @@ projection keeps these figures per routine, in the bucket under
 - per day (UTC):
   - `decided`: shadow and canary runs
   - `acted`: the routine applies, so it is ready to act
-  - `agreed`: every compared question agreed
+  - `agreed`: every compared question agreed, and so did the calls
   - `disagreed`
   - `handed`: applies false
   - `applied`: live, ok

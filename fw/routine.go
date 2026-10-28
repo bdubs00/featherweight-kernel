@@ -592,7 +592,7 @@ func unwrapExec(err error) error {
 // ObserveAnswer reads the answer of the agent to a question from a run:
 // its output text and its events (docs/ROUTINES.md section 3.5). Only the
 // calls of the model count: a call of the runner (ToolRequestedData.
-// Routine) does not. It returns the first capture group, or for a noul yes
+// Routine) or of a check of done (KernelCall) does not. It returns the first capture group, or for a noul yes
 // when the expression matches and no otherwise. It returns "" when nothing
 // matched, and false when the question has no observe block.
 func ObserveAnswer(q RoutineQuestion, output string, events []Event) (string, bool) {
@@ -619,7 +619,7 @@ func ObserveAnswer(q RoutineQuestion, output string, events []Event) (string, bo
 				continue
 			}
 			var d ToolRequestedData
-			if e.Decode(&d) != nil || d.Routine != "" || d.Tool != o.Tool {
+			if e.Decode(&d) != nil || d.Routine != "" || KernelCall(d.CallID) || d.Tool != o.Tool {
 				continue
 			}
 			if got, found = match(string(d.Input)); found {

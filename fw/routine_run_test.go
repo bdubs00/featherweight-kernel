@@ -395,7 +395,10 @@ func TestRoutineCanaryPick(t *testing.T) {
 			if len(h.writes) != 0 || len(s.requests()) != 1 || strings.Contains(firstMessage(s.requests()[0]), "<context") {
 				t.Fatalf("canary: writes %v, model calls %d", h.writes, len(s.requests()))
 			}
-			if cmp := decodeAll[RoutineComparedData](t, evs, EvRoutineCompared); len(cmp) != 2 || cmp[0].Mode != RoutineCanary {
+			// Two questions, and the calls: the agent made none, so the
+			// calls differ at the first step.
+			cmp := decodeAll[RoutineComparedData](t, evs, EvRoutineCompared)
+			if len(cmp) != 3 || cmp[0].Mode != RoutineCanary || !cmp[2].Calls || cmp[2].Agree || cmp[2].Step != 1 || cmp[2].Mode != RoutineCanary {
 				t.Fatalf("canary compared = %+v", cmp)
 			}
 		} else if len(s.requests()) != 0 || r.Output == "" {
@@ -835,5 +838,147 @@ func TestRoutineFailedCommand(t *testing.T) {
 				t.Errorf("first message =\n%s", first)
 			}
 		})
+	}
+}
+
+// stock is a fake stock file and a fake report for the tests of the
+// comparison of the calls: read shows the file with line numbers, as the
+// files tool does, and write keeps the text of the report.
+type stock struct {
+	mu     sync.Mutex
+	text   string
+	report string
+}
+
+func (st *stock) tools() []Tool {
+	read := NewTool(ToolSpec{Name: "stock.read", ReadOnly: true, Idempotent: true}, func(_ context.Context, in json.RawMessage) (ToolResult, error) {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		var v struct {
+			Path string `json:"path"`
+		}
+		_ = json.Unmarshal(in, &v)
+		if v.Path == "report.txt" {
+			return TextResult("     1\t" + st.report + "\n"), nil
+		}
+		return TextResult("Here is the file with line numbers:\n     1\t" + st.text + "\n"), nil
+	})
+	write := NewTool(ToolSpec{Name: "stock.write"}, func(_ context.Context, in json.RawMessage) (ToolResult, error) {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		var v struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(in, &v)
+		st.report = v.Text
+		return TextResult("written"), nil
+	})
+	return []Tool{read, write}
+}
+
+// stockRoutine copies the first line of the stock file into the report,
+// with no question.
+func stockRoutine(standing string) Routine {
+	zero := 0.0
+	return Routine{
+		Name: "stock-ack", Version: 1, Standing: standing, Canary: &zero,
+		Steps: []RoutineStep{
+			{Tool: "stock.read", Input: `{"path": "levels.txt"}`, As: "read"},
+			{Tool: "stock.write", Input: `{"path": "report.txt", "text": {{ json (find .read "\t(.+?)\n") }}}`},
+		},
+		Answer: `ACK {{ find .read "\t(.+?)\n" }}`,
+	}
+}
+
+// A rehearsing routine without questions gains agreement: at the end of
+// the run, its steps, rendered on the run with the results of the calls of
+// the agent, are compared with those calls. The calls of the checks of
+// done are no calls of the agent.
+func TestRoutineRehearsalComparesTheCalls(t *testing.T) {
+	cases := []struct {
+		name   string
+		text   string // the text that the agent writes
+		file   string // the first line of the stock file
+		agree  bool
+		none   bool // no comparison of the calls: the routine hands the run over
+		step   int
+		reason string
+	}{
+		{name: "agrees", text: "STOCK pens=90", file: "STOCK pens=90", agree: true},
+		{name: "differs", text: "STOCK pens=120", file: "STOCK pens=90", step: 2,
+			reason: "step 2 stock.write: the key text differs"},
+		{name: "handed", text: "STOCK pens=90", file: "", none: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := testCtx(t)
+			st := &stock{text: c.file}
+			s := newScript(
+				callTools(use("t1", "stock.read", `{"path": "levels.txt"}`)),
+				callTools(use("t2", "stock.write", fmt.Sprintf(`{"path": "report.txt", "text": %q}`, c.text))),
+				endTurn("ACK "+c.text),
+			)
+			prof := AgentProfile{Name: "clerk", Routines: []Routine{stockRoutine(RoutineShadow)},
+				Done: &Done{Checks: []DoneCheck{{Name: "the report is saved", Tool: "stock.read", Input: `{"path": "report.txt"}`, Contains: []string{"STOCK"}}}}}
+			a := newTestAgent(t, s.Model(), WithTools(st.tools()...), WithProfile(prof))
+			r, err := a.Run(ctx, "Acknowledge the stock file.", AsAgent("clerk"))
+			mustState(t, r, err, StateCompleted)
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			var dec RoutineDecidedData
+			firstOf(t, evs, EvRoutineDecided, &dec)
+			if dec.Mode != RoutineShadow || !dec.Applies || len(dec.Answers) != 0 {
+				t.Fatalf("decided = %+v", dec)
+			}
+			cmp := decodeAll[RoutineComparedData](t, evs, EvRoutineCompared)
+			if c.none {
+				if len(cmp) != 0 {
+					t.Fatalf("compared = %+v", cmp)
+				}
+				return
+			}
+			if len(cmp) != 1 {
+				t.Fatalf("compared = %+v", cmp)
+			}
+			got := cmp[0]
+			if !got.Calls || got.Question != "" || got.Mode != RoutineShadow || got.Routine != "stock-ack" || got.Version != 1 ||
+				got.Agree != c.agree || got.Step != c.step || got.Reason != c.reason {
+				t.Fatalf("compared = %+v", got)
+			}
+			if !c.agree && (got.Said != `{"path":"report.txt","text":"STOCK pens=90"}` || got.Observed != `{"path":"report.txt","text":"STOCK pens=120"}`) {
+				t.Errorf("said %s, observed %s", got.Said, got.Observed)
+			}
+			// The comparison comes before the end, after the checks of done.
+			types := eventTypes(evs)
+			if types[len(types)-1] != EvRunFinished || types[len(types)-2] != EvRoutineCompared || countType(evs, EvDoneChecked) != 1 {
+				t.Fatalf("events = %v", types)
+			}
+			checkCursorPrefixes(t, evs)
+		})
+	}
+}
+
+// ModelCalls leaves out the calls that the kernel made itself: of the
+// routine runner, of a check of done, and of a check run.
+func TestModelCallsLeavesOutTheCallsOfTheKernel(t *testing.T) {
+	id := "run-calls"
+	req := func(callID, tool, routine string) Event {
+		return MustEvent(id, EvToolRequested, ToolRequestedData{CallID: callID, Tool: tool, Input: json.RawMessage(`{}`), Routine: routine})
+	}
+	res := func(callID, text string) Event {
+		return MustEvent(id, EvToolResponded, ToolRespondedData{CallID: callID, Content: []Block{Text(text)}})
+	}
+	evs := []Event{
+		MustEvent(id, EvRunQueued, RunQueuedData{Agent: "clerk", Input: "go"}),
+		req(routineCallPrefix+"1", "decide", "ack"), res(routineCallPrefix+"1", "{}"),
+		req("toolu_1", "stock.read", ""), res("toolu_1", "STOCK"),
+		req(doneCallPrefix+"1", "stock.read", ""), res(doneCallPrefix+"1", "STOCK"),
+		req(checkCallPrefix+"1", "stock.read", ""), res(checkCallPrefix+"1", "STOCK"),
+	}
+	for i := range evs {
+		evs[i].Seq = uint64(i + 1)
+	}
+	calls := ModelCalls(evs)
+	if len(calls) != 1 || calls[0].Tool != "stock.read" || calls[0].Result != "STOCK" {
+		t.Fatalf("calls = %+v", calls)
 	}
 }

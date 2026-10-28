@@ -667,7 +667,8 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 
 // compareLocked appends one fw.routine.compared per observed question of
 // each routine that the run decided in mode shadow or canary, or in mode
-// live without completing, at the end of a run that the model completed.
+// live without completing, and one comparison of the calls for each
+// rehearsal that applies, at the end of a run that the model completed.
 // It runs once per run. The caller holds rs.emitMu and appends
 // fw.run.finished next.
 func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, output string) error {
@@ -675,7 +676,7 @@ func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, outp
 	if len(routines) == 0 || !c.answered {
 		return nil
 	}
-	for _, d := range routineComparisons(routines, c.routine, rs.events, output) {
+	for _, d := range routineComparisons(routines, c.routine, c.queued, rs.events, output) {
 		if _, err := a.emitLocked(ctx, rs, EvRoutineCompared, d); err != nil {
 			return err
 		}
@@ -686,14 +687,22 @@ func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, outp
 // routineComparisons returns the comparisons of a run from its cursor: for
 // each routine that the run decided in mode shadow or canary, or in mode
 // live without completing, and each of its questions with observe, what
-// the routine said against what the agent did. A run compares once, and a
-// branch never compares the decisions that it kept from its source.
-// output is the output text of the run.
-func routineComparisons(routines []Routine, r routineCursor, events []Event, output string) []RoutineComparedData {
+// the routine said against what the agent did. For each routine that the
+// run decided in mode shadow or canary and that applies, it adds the
+// comparison of the calls: its steps and its checks, rendered on this run
+// with its own answers, against the calls of the agent and their results.
+// So a routine without questions gains agreement too. A run that the
+// routine would hand to the agent, because a find finds no value, gets no
+// comparison of the calls. A run compares once, and a branch never
+// compares the decisions that it kept from its source. q is the start of
+// the run, and output is its output text.
+func routineComparisons(routines []Routine, r routineCursor, q RunQueuedData, events []Event, output string) []RoutineComparedData {
 	if r.compared {
 		return nil
 	}
 	var out []RoutineComparedData
+	var calls []RoutineCall
+	read := false
 	for _, d := range r.decided[r.kept:] {
 		if d.Mode == RoutineLive && r.ok && d.Routine == r.live {
 			continue
@@ -703,23 +712,48 @@ func routineComparisons(routines []Routine, r routineCursor, events []Event, out
 			continue
 		}
 		rt := routines[i]
+		said := map[string]string{}
 		for _, name := range rt.QuestionNames() {
 			q := rt.Questions[name]
 			ans, ok := d.Answers[name]
 			if !ok {
 				continue
 			}
+			said[name] = SaidOf(q, ans)
 			observed, ok := ObserveAnswer(q, output, events)
 			if !ok {
 				continue
 			}
-			said := SaidOf(q, ans)
 			out = append(out, RoutineComparedData{
 				Routine: rt.Name, Version: rt.Version, Mode: d.Mode, Question: name,
-				Said: said, Observed: observed,
-				Agree: strings.EqualFold(strings.TrimSpace(said), strings.TrimSpace(observed)),
+				Said: said[name], Observed: observed,
+				Agree: strings.EqualFold(strings.TrimSpace(said[name]), strings.TrimSpace(observed)),
 			})
 		}
+		if !d.Applies || (d.Mode != RoutineShadow && d.Mode != RoutineCanary) || len(rt.Steps)+len(rt.After) == 0 {
+			continue
+		}
+		if !read {
+			calls, read = ModelCalls(events), true
+		}
+		data := RoutineData(q.Input, q.Metadata)
+		for k, v := range said {
+			data[k] = v
+		}
+		cmp := CompareRoutineCalls(rt, data, calls)
+		if cmp.Handed != "" {
+			continue
+		}
+		c := RoutineComparedData{Routine: rt.Name, Version: rt.Version, Mode: d.Mode, Calls: true, Agree: cmp.Agree()}
+		if !c.Agree {
+			place := fmt.Sprintf("step %d", cmp.Step)
+			if cmp.Step > len(rt.Steps) {
+				place = fmt.Sprintf("check %d", cmp.Step-len(rt.Steps))
+			}
+			c.Step, c.Said, c.Observed = cmp.Step, cmp.Rendered, cmp.Recorded
+			c.Reason = place + " " + cmp.Tool + ": " + cmp.Reason
+		}
+		out = append(out, c)
 	}
 	return out
 }

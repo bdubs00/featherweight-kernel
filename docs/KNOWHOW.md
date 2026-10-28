@@ -483,6 +483,11 @@ These rules change `docs/ROUTINES.md` section 4.
   run, stays out, and the journal says why. A good proposal is stored
   bound to its Duty (`duty`), as `proposed`, and moves to `rehearsing` at
   once, unless `askFirst` is on.
+- Agreement. A rehearsal compares what the routine would do with what the
+  agent did on the same run: its questions, and its calls with their
+  results (`docs/ROUTINES.md` section 3.3, item 6). So a routine without
+  questions, the only kind that Know-how proposes without a decider,
+  gains agreement and can become ready.
 - Step back. One disagreement in a canary run, or a run that the routine
   applied and that came back with a `rejected` receipt, moves a live
   routine to `rehearsing`. The journal says `stepped-back` with the run.
