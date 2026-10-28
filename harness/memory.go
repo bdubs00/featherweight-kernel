@@ -270,7 +270,7 @@ func (r *run) systemText(server bool) string {
 	parts := []string{strings.TrimSpace(q.Instructions)}
 	notes, _ := r.h.memoryTools(q)
 	if notes {
-		parts = append(parts, memory.SystemSection)
+		parts = append(parts, r.h.mem.Section(r.h.mem.Scope(r.info(r.dir))))
 		if server {
 			parts = append(parts, memToolsNote)
 		}
@@ -1007,6 +1007,8 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		ifHash := strings.TrimSpace(in.IfHash)
 		rec, err := store.Remember(ctx, scope, fw.MemoryRecord{Ref: memory.NoteRef(scope, name), Body: in.Text}, ifHash)
 		switch {
+		case errors.Is(err, memory.ErrFrontConflict):
+			return "Error: " + memory.ConflictText, true
 		case errors.Is(err, fw.ErrMemoryConflict) && ifHash == "absent":
 			return "Error: " + show + " exists already. Recall it, and pass its hash to replace it.", true
 		case errors.Is(err, fw.ErrMemoryConflict):
@@ -1028,6 +1030,8 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		}
 		show := memory.Prefix + "/" + name
 		switch err := store.Forget(ctx, scope, memory.NoteRef(scope, name)); {
+		case errors.Is(err, memory.ErrFrontConflict):
+			return "Error: " + memory.ConflictText, true
 		case errors.Is(err, fw.ErrMemoryNotFound):
 			return "Error: no note at " + show + ".", true
 		case err != nil:

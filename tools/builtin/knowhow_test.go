@@ -13,6 +13,7 @@ import (
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 	"github.com/bdubs00/featherweight-kernel/memory"
+	"github.com/bdubs00/featherweight-kernel/memory/fronttest"
 )
 
 // knowhowAgent builds an agent with the memory tool and the recall tool
@@ -159,4 +160,82 @@ func TestMemoryEditOnce(t *testing.T) {
 	if got := readFile(t, note); got != "top\nchanged\n" {
 		t.Fatalf("note = %q", got)
 	}
+}
+
+// frontConfig returns a configuration whose notes the fake front keeps,
+// with a home of its own, as one Task.
+func frontConfig(t *testing.T, f *fronttest.Front) *fw.Config {
+	t.Helper()
+	t.Setenv("FW_TEST_FRONT_TOKEN", f.Token)
+	cfg := fw.DefaultConfig()
+	cfg.Home = t.TempDir()
+	cfg.Model = "fake/test"
+	cfg.Tools.Memory.Front = &fw.MemoryFrontConfig{URL: f.URL, TokenEnv: "FW_TEST_FRONT_TOKEN"}
+	return cfg
+}
+
+// TestNoteSurvivesANewTask checks that a note that a run of one Task wrote
+// reaches the first message of a run of a new Task with an empty copy,
+// through the front, and that a conflict at the front reaches the model as
+// the sentence of the contract.
+func TestNoteSurvivesANewTask(t *testing.T) {
+	ctx := restartCtx(t)
+	f := fronttest.New("builtin-front-token")
+	t.Cleanup(f.Close)
+
+	first := newRestartScript(
+		&fw.Response{StopReason: fw.StopToolUse, Content: []fw.Block{
+			toolUseOf("w1", "memory", `{"command":"create","path":"/memories/labels.md","file_text":"Gitea refuses a label name with a space.\n"}`),
+		}},
+		endTurnOf("saved"),
+	)
+	a := knowhowAgent(t, frontConfig(t, f), first.Model())
+	if r, err := a.Run(ctx, "triage"); err != nil || r.State != fw.StateCompleted {
+		t.Fatalf("first run = %+v, %v", r, err)
+	}
+	if n, ok := f.Get("default", "agent", "", "labels.md"); !ok || n.By != "agent" || n.Run == "" {
+		t.Fatalf("front note = %+v", n)
+	}
+
+	// A new Task: another home, the same front.
+	f.Put(fronttest.Note{Agent: "default", Scope: "agent", Name: "labels.md", Text: "Gitea refuses a label name with a space.\n", By: "agent", State: "checked"})
+	second := newRestartScript(
+		&fw.Response{StopReason: fw.StopToolUse, Content: []fw.Block{
+			toolUseOf("e1", "memory", `{"command":"str_replace","path":"/memories/labels.md","old_str":"space","new_str":"blank"}`),
+		}},
+		endTurnOf("done"),
+	)
+	b := knowhowAgent(t, frontConfig(t, f), second.Model())
+	r, err := b.Run(ctx, "triage again")
+	if err != nil || r.State != fw.StateCompleted {
+		t.Fatalf("second run = %+v, %v", r, err)
+	}
+	firstMsg := fw.TextOf(second.requests()[0].Messages[0].Content)
+	if !strings.Contains(firstMsg, "Notes: 1 kept") || !strings.Contains(firstMsg, "/memories/labels.md: Gitea refuses a label name with a space. (checked") {
+		t.Fatalf("first message of the new Task = %q", firstMsg)
+	}
+	if n, _ := f.Get("default", "agent", "", "labels.md"); n.Text != "Gitea refuses a label name with a blank.\n" {
+		t.Fatalf("the edit of the new Task did not reach the front: %+v", n)
+	}
+}
+
+// TestMemoryToolConflict checks that an edit of the memory tool that the
+// front refuses with 412 returns the sentence of the contract to the
+// model, and the copy holds the text of the front.
+func TestMemoryToolConflict(t *testing.T) {
+	f := fronttest.New("builtin-front-token")
+	t.Cleanup(f.Close)
+	cfg := frontConfig(t, f)
+	m, err := fw.NewBuiltinTool("memory", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustOK(t, callAs(t, m, "c1", `{"command":"create","path":"/memories/n.md","file_text":"one\n"}`))
+	f.Put(fronttest.Note{Agent: "default", Scope: "agent", Name: "n.md", Text: "two\n", By: "agent", State: "unchecked"})
+	mustFail(t, callAs(t, m, "c2", `{"command":"str_replace","path":"/memories/n.md","old_str":"one","new_str":"three"}`), memory.ConflictText)
+	if got := readFile(t, filepath.Join(cfg.Home, "memory", "agents", "default", "n.md")); got != "two\n" {
+		t.Fatalf("copy = %q", got)
+	}
+	mustOK(t, callAs(t, m, "c3", `{"command":"create","path":"/memories/d/x.md","file_text":"x\n"}`))
+	mustFail(t, callAs(t, m, "c4", `{"command":"delete","path":"/memories/d"}`), "one note at a time")
 }

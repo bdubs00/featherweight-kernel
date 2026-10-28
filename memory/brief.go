@@ -23,6 +23,23 @@ const SystemSection = "# Memory\n\n" +
 	"Update a file instead of adding a second one, and delete a note that turns out to be wrong. " +
 	"Never store a secret, a key, or a password."
 
+// SystemSectionFront is SystemSection for notes that a front keeps: the
+// block lists them by group with labels, not newest first.
+var SystemSectionFront = strings.Replace(SystemSection,
+	"each line names a note and its first line, newest first. ",
+	"each line names a note and its first line: the notes that a person wrote first, then the checked notes, then the others. "+
+		"A label after a line says that a person wrote the note, or the date when its sources were last found to match. ", 1)
+
+// Section returns the memory section of the system prompt for the notes
+// of a scope: SystemSectionFront when a front keeps them, and
+// SystemSection otherwise.
+func (s *Store) Section(scope fw.MemoryScope) string {
+	if s.Front(scope) {
+		return SystemSectionFront
+	}
+	return SystemSection
+}
+
 // ContextList is the first line of the data of ContextText.
 const ContextList = "Notes under /memories, newest first:"
 
@@ -51,9 +68,14 @@ func (s *Store) ContextText(ctx context.Context, scope fw.MemoryScope) (string, 
 
 // Brief returns the data of the notes of a scope for the start of a run,
 // and the notes that it lists. hint follows the sentence that counts the
-// notes that the index leaves out. The text is the index of ContextText,
-// and Used holds no hash.
+// notes that the index leaves out. Without a front, the text is the index
+// of ContextText, and Used holds no hash. With a front (docs/KNOWHOW.md
+// section 4.4), the store first takes the notes of the front into its copy
+// (Pull), then lists them by group with their labels (frontBrief).
 func (s *Store) Brief(ctx context.Context, scope fw.MemoryScope, hint string) (Brief, error) {
+	if s.Front(scope) {
+		return s.frontBrief(ctx, scope, hint)
+	}
 	shown, more, cut, err := s.indexNotes(ctx, scope)
 	if err != nil || (len(shown) == 0 && !cut) {
 		return Brief{}, err

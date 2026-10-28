@@ -33,6 +33,47 @@ type scopeState struct {
 	// Edits are the last edits of the memory tool, oldest first
 	// (CallEdit).
 	Edits []CallEdit `json:"edits,omitempty"`
+	// Notes holds the sources and the fields of a note, by name, for the
+	// text of one hash (noteExtra).
+	Notes map[string]noteExtra `json:"notes,omitempty"`
+	// Front holds what the copy knows of the notes at the front, by name:
+	// the list of the last pull, with the changes that the copy pushed
+	// since. A note that the front no longer lists and that is here went
+	// away at the front, so the next pull removes its copy.
+	Front map[string]FrontNote `json:"front,omitempty"`
+	// Hashes keeps the hash of each note with the size, the time, and the
+	// inode of its file, so a pull hashes only the notes that changed.
+	Hashes map[string]hashStat `json:"hashes,omitempty"`
+}
+
+// noteExtra is what a note keeps beside its text: the sources
+// (MemoryRecord.Links) and the fields (MemoryRecord.Metadata) of the write
+// that gave the note the text of Hash. A later write with another text
+// drops them, because they describe the text that had them.
+type noteExtra struct {
+	Hash     string           `json:"hash"`
+	Links    []fw.MemoryLink  `json:"links,omitempty"`
+	Metadata []fw.MemoryField `json:"metadata,omitempty"`
+}
+
+// hashStat is the hash of a note file with what changes when the file
+// changes.
+type hashStat struct {
+	Hash string `json:"hash"`
+	Size int64  `json:"size"`
+	Mod  int64  `json:"mod"` // nanoseconds since the epoch
+	Ino  uint64 `json:"ino,omitempty"`
+}
+
+// readStateAt reads the state of the scope in dir without the lock, for a
+// reader such as Get. The store replaces the file atomically, so a reader
+// sees the old state or the new one.
+func readStateAt(dir string) scopeState {
+	files, err := fw.DirFiles(dir)
+	if err != nil {
+		return scopeState{}
+	}
+	return (&noteFiles{Files: files, dir: dir}).readState()
 }
 
 // CallEdit is the record of one edit of a note by a call of the memory

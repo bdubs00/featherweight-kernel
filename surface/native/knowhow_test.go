@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/memory"
+	"github.com/bdubs00/featherweight-kernel/memory/fronttest"
 )
 
 // TestCreateRunContext checks that POST /v1/runs takes the data blocks of
@@ -48,5 +50,56 @@ func TestCreateRunContext(t *testing.T) {
 		if p := decodeProblem(t, resp, b, http.StatusBadRequest); !strings.Contains(p.Detail, tc.want) {
 			t.Fatalf("detail = %q, want %q", p.Detail, tc.want)
 		}
+	}
+}
+
+// TestMemoryRoutesWithFront checks that a note written through the native
+// API goes to the front as the change of a person, that a 412 of the front
+// answers 412 with the sentence of the contract, and that a front that
+// does not answer gets 503 and leaves the copy as it was.
+func TestMemoryRoutesWithFront(t *testing.T) {
+	f := fronttest.New("front-test-token")
+	t.Cleanup(f.Close)
+	t.Setenv("FW_TEST_FRONT_TOKEN", "front-test-token")
+	cfg := fw.DefaultConfig()
+	cfg.Home = t.TempDir()
+	cfg.Access.Default = "closed"
+	cfg.Access.Creators = []string{"alice"}
+	cfg.Tools.Memory.Front = &fw.MemoryFrontConfig{URL: f.URL, TokenEnv: "FW_TEST_FRONT_TOKEN"}
+	a := newAgent(t, newScript(endTurn("ok")).model(), fw.WithConfig(cfg), fw.WithAuthn(people),
+		fw.WithProfile(fw.AgentProfile{Name: "reviewer", Access: &fw.Access{Owners: []string{"alice"}}}))
+	srv := serve(t, a)
+	put := func(body string, header ...string) (*http.Response, []byte) {
+		return do(t, "PUT", srv.URL+"/v1/memory/notes/build.md?agent=reviewer", body, append([]string{"Authorization", asAlice}, header...)...)
+	}
+	resp, b := put("How to build\n")
+	var rec fw.MemoryRecord
+	decodeJSON(t, resp, b, http.StatusOK, &rec)
+	ch := f.Changes()
+	if len(ch) != 1 || ch[0].By != "person:alice" || ch[0].Run != "" || ch[0].IfHash != "absent" {
+		t.Fatalf("changes = %+v", ch)
+	}
+
+	f.Put(fronttest.Note{Agent: "reviewer", Scope: "agent", Name: "build.md", Text: "Changed elsewhere\n", State: "unchecked", By: "agent"})
+	resp, b = put("Mine\n")
+	if p := decodeProblem(t, resp, b, http.StatusPreconditionFailed); p.Detail != memory.ConflictText {
+		t.Fatalf("detail = %q", p.Detail)
+	}
+	resp, b = do(t, "GET", srv.URL+"/v1/memory/notes/build.md?agent=reviewer", "", "Authorization", asAlice)
+	decodeJSON(t, resp, b, http.StatusOK, &rec)
+	if rec.Body != "Changed elsewhere\n" {
+		t.Fatalf("the copy after a conflict = %q", rec.Body)
+	}
+
+	f.SetDown(true)
+	resp, b = put("Lost\n")
+	if p := decodeProblem(t, resp, b, http.StatusServiceUnavailable); !strings.Contains(p.Detail, "not kept") || strings.Contains(p.Detail, "front-test-token") {
+		t.Fatalf("detail = %q", p.Detail)
+	}
+	f.SetDown(false)
+	resp, b = do(t, "GET", srv.URL+"/v1/memory/notes/build.md?agent=reviewer", "", "Authorization", asAlice)
+	decodeJSON(t, resp, b, http.StatusOK, &rec)
+	if rec.Body != "Changed elsewhere\n" {
+		t.Fatalf("the copy after no answer = %q", rec.Body)
 	}
 }

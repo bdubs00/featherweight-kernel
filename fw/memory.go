@@ -60,10 +60,14 @@ type MemoryField struct {
 	Value string `json:"value"`
 }
 
-// MemoryLink names another record and the relation.
+// MemoryLink names another record and the relation. For a note, a link is
+// a source of the note (docs/KNOWHOW.md section 5.2), such as run:<id>,
+// page:<path>, or item:<source>/<key>, and Version is the version of the
+// source that the note matches, such as the hash of a page.
 type MemoryLink struct {
-	Ref  string `json:"ref"`
-	Kind string `json:"kind"`
+	Ref     string `json:"ref"`
+	Kind    string `json:"kind"`
+	Version string `json:"version,omitempty"`
 }
 
 // MemoryQuery asks for records that match Text. Kinds and Tags narrow the

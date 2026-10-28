@@ -76,8 +76,10 @@ func (s *Store) Search(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQue
 // Recall searches the notes of the scope, the runs of its agent that its
 // principal started, the workspace of the run in ctx, and the skills that
 // the profile of the run allows. The runs, the files, and the skills need
-// the agent in ctx (fw.AgentFrom); without it, only notes match. The
-// result says in its notes when a bound stopped a search early.
+// the agent in ctx (fw.AgentFrom); without it, only notes match. With a
+// front, the search of runs also asks the archive of the front, and keeps
+// one hit per run id. The result says in its notes when a bound stopped a
+// search early or the front did not answer.
 func (s *Store) Recall(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQuery) (RecallResult, error) {
 	terms := strings.Fields(strings.ToLower(q.Text))
 	if len(terms) == 0 {
@@ -107,7 +109,8 @@ func (s *Store) Recall(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQue
 		case fw.MemoryKindNote:
 			add(s.searchNotes(ctx, scope, terms))
 		case fw.MemoryKindRun:
-			add(searchRuns(ctx, scope, terms), "")
+			front, note := s.frontRuns(ctx, scope, q.Text, terms, limit)
+			add(mergeRuns(searchRuns(ctx, scope, terms), front), note)
 		case fw.MemoryKindFile:
 			add(searchFiles(ctx, terms))
 		case fw.MemoryKindSkill:
@@ -130,13 +133,22 @@ func (s *Store) Recall(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQue
 }
 
 // Get implements fw.Memory. A ref starts with mem://, run://, file://, or
-// skill://. A note ref resolves in the scope of the caller.
+// skill://. A note ref resolves in the scope of the caller. A run ref that
+// this Task does not hold reads a run of the front that a search of the
+// same scope found.
 func (s *Store) Get(ctx context.Context, scope fw.MemoryScope, ref string) (fw.MemoryRecord, error) {
 	switch {
 	case strings.HasPrefix(ref, "mem://"):
 		return s.getNote(scope, ref)
 	case strings.HasPrefix(ref, "run://"):
-		return getRun(ctx, scope, strings.TrimPrefix(ref, "run://"))
+		id := strings.TrimPrefix(ref, "run://")
+		rec, err := getRun(ctx, scope, id)
+		if err != nil {
+			if front, ok := s.frontRunRecord(scope, id); ok {
+				return front, nil
+			}
+		}
+		return rec, err
 	case strings.HasPrefix(ref, "file://"):
 		return getFile(ctx, strings.TrimPrefix(ref, "file://"))
 	case strings.HasPrefix(ref, "skill://"):

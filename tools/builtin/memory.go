@@ -282,8 +282,8 @@ func (t *memoryTool) recordView(ctx context.Context, scope fw.MemoryScope, input
 // Brief implements fw.Briefer. It returns the memory section of the system
 // prompt: how the memory works and the rules for new notes. It holds no
 // note, so no text that a run wrote reaches the system prompt.
-func (t *memoryTool) Brief(context.Context, fw.RunInfo) (string, error) {
-	return memory.SystemSection, nil
+func (t *memoryTool) Brief(_ context.Context, run fw.RunInfo) (string, error) {
+	return t.store.Section(t.store.Scope(run)), nil
 }
 
 // BriefContext implements fw.ContextBriefer. It returns the index of the
