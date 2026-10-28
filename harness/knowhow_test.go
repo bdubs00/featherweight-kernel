@@ -57,3 +57,28 @@ func TestOpencodeHeldBack(t *testing.T) {
 		t.Fatalf("first prompt = %q, system = %q", first.Text, first.System)
 	}
 }
+
+// TestOpencodeMemoryUsedBrief checks that a hosted run records
+// fw.memory.used for the notes that the index of its first prompt lists.
+func TestOpencodeMemoryUsedBrief(t *testing.T) {
+	d := newDirs(t)
+	f := newFakeOC(t, answerOnly)
+	cfg := testConfig(t, d, ocBlock(d, f))
+	cfg.Tools.Builtin = []string{"memory", "recall"}
+	manyNotes(t, cfg)
+	l := fw.NewMemLedger()
+	a := newAgent(t, cfg, l)
+	r, err := a.Start(testCtx(t), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, a, r.ID, terminal)
+	used := ofType(events(t, l, r.ID), fw.EvMemoryUsed)
+	if len(used) != 1 {
+		t.Fatalf("fw.memory.used x%d", len(used))
+	}
+	var u fw.MemoryUsedData
+	if err := used[0].Decode(&u); err != nil || u.How != fw.MemoryUsedBrief || len(u.Refs) == 0 || !strings.HasPrefix(u.Refs[0].Ref, "mem://agent/default/n") {
+		t.Fatalf("used = %+v, %v", u, err)
+	}
+}

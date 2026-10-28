@@ -141,6 +141,10 @@ type runState struct {
 	depth  int           // 0 for a top-level run
 	queued RunQueuedData // the request, as fw.run.queued recorded it
 	text   *runText      // the text of the run, in memory only (textOf)
+	// briefUse holds the notes that the tools listed in the data of the
+	// start of the run, which fw.memory.used records after fw.run.started
+	// (recordBriefUse). Only the driver of the run touches it.
+	briefUse []MemoryUsedData
 	// maxDesc is the most runs that the run can have under it, from
 	// MetaMaxDescendants, or -1 when the metadata sets no limit.
 	maxDesc int

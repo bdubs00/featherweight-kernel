@@ -108,6 +108,9 @@ func (t *recallTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 		case err != nil:
 			return fw.ErrorResult("Error: " + err.Error()), nil
 		}
+		if rec.Kind == fw.MemoryKindNote {
+			fw.RecordMemoryUse(ctx, fw.MemoryUsedData{How: fw.MemoryUsedRecall, Refs: []fw.MemoryUsedRef{{Ref: rec.Ref, Hash: rec.Hash}}})
+		}
 		return fw.TextResult(formatRecord(rec)), nil
 	}
 	query := strings.TrimSpace(in.Query)

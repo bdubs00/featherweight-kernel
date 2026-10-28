@@ -156,7 +156,11 @@ func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 		if err != nil {
 			return fw.ErrorResult("Error: " + err.Error()), nil
 		}
-		return t.ed.call(ctx, files, input)
+		res, err := t.ed.call(ctx, files, input)
+		if err == nil && !res.IsError && cmd == "view" {
+			t.recordView(ctx, scope, input)
+		}
+		return res, err
 	}
 	var res fw.ToolResult
 	err := t.store.Locked(ctx, scope, func(files fw.Files) error {
@@ -173,6 +177,26 @@ func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 	return res, nil
 }
 
+// recordView records fw.memory.used for a view of one note, with the hash
+// of the note. A view of a directory reads no note and records nothing.
+func (t *memoryTool) recordView(ctx context.Context, scope fw.MemoryScope, input json.RawMessage) {
+	var in struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal(input, &in) != nil {
+		return
+	}
+	name, err := memoryName(in.Path)
+	if err != nil || name == "." {
+		return
+	}
+	rec, err := t.store.Get(ctx, scope, memory.NoteRef(scope, name))
+	if err != nil {
+		return
+	}
+	fw.RecordMemoryUse(ctx, fw.MemoryUsedData{How: fw.MemoryUsedView, Refs: []fw.MemoryUsedRef{{Ref: rec.Ref, Hash: rec.Hash}}})
+}
+
 // Brief implements fw.Briefer. It returns the memory section of the system
 // prompt: how the memory works and the rules for new notes. It holds no
 // note, so no text that a run wrote reaches the system prompt.
@@ -182,13 +206,15 @@ func (t *memoryTool) Brief(context.Context, fw.RunInfo) (string, error) {
 
 // BriefContext implements fw.ContextBriefer. It returns the index of the
 // notes of the scope of the run, which the kernel puts in the first user
-// message as data. No note gives no text. It creates no directory.
+// message as data, and records the notes that it lists as fw.memory.used.
+// No note gives no text.
 func (t *memoryTool) BriefContext(ctx context.Context, run fw.RunInfo) (string, error) {
-	text, err := t.store.ContextText(ctx, t.store.Scope(run))
+	b, err := t.store.Brief(ctx, t.store.Scope(run), memory.BriefHint)
 	if err != nil {
 		return "", fmt.Errorf("builtin: %w", err)
 	}
-	return text, nil
+	fw.RecordMemoryUse(ctx, fw.MemoryUsedData{How: fw.MemoryUsedBrief, Refs: b.Used})
+	return b.Text, nil
 }
 
 // memoryName maps /memories/<rest> to <rest>, relative to the memory

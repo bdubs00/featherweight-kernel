@@ -511,6 +511,7 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	}
 	_, err := a.emit(ctx, rs, EvRunStarted, d)
 	if err == nil {
+		a.recordBriefUse(ctx, rs)
 	}
 	return err
 }
@@ -1509,6 +1510,7 @@ func (a *Agent) callTool(ctx context.Context, rs *runState, p plannedCall, input
 		d.CallID, d.Tool = callID, p.use.Name
 		_, _ = a.emit(ctx, rs, EvMemoryChanged, d)
 	})
+	tctx = WithMemoryUseRecorder(tctx, func(d MemoryUsedData) { _, _ = a.emit(ctx, rs, EvMemoryUsed, d) })
 	if a.files != nil {
 		tool := p.use.Name
 		ws, err := a.runWorkspace(a.dirOf(rs), func(d FileChangedData) {

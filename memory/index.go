@@ -83,6 +83,17 @@ func walkNotes(ctx context.Context, dir string, titles int) (notes []note, cut b
 // directory with a newline in its name cannot forge a line. It creates
 // nothing.
 func (s *Store) Index(ctx context.Context, scope fw.MemoryScope) (lines []string, more int, cut bool, err error) {
+	shown, more, cut, err := s.indexNotes(ctx, scope)
+	for _, n := range shown {
+		lines = append(lines, indexLine(n, ""))
+	}
+	return lines, more, cut, err
+}
+
+// indexNotes returns the notes that the index of a scope shows, newest
+// first, within IndexMaxNotes and IndexMaxBytes, with the count of the
+// notes left out and whether the walk stopped at its bound.
+func (s *Store) indexNotes(ctx context.Context, scope fw.MemoryScope) (shown []note, more int, cut bool, err error) {
 	dir, err := s.Dir(scope)
 	if err != nil {
 		return nil, 0, false, err
@@ -93,17 +104,28 @@ func (s *Store) Index(ctx context.Context, scope fw.MemoryScope) (lines []string
 	}
 	size := 0
 	for _, n := range notes {
-		line := "- " + Prefix + "/" + EscapeName(n.name)
-		if n.title != "" {
-			line += ": " + n.title
-		}
-		if len(lines) == IndexMaxNotes || (len(lines) > 0 && size+len(line)+1 > IndexMaxBytes) {
+		line := indexLine(n, "")
+		if len(shown) == IndexMaxNotes || (len(shown) > 0 && size+len(line)+1 > IndexMaxBytes) {
 			break
 		}
-		lines = append(lines, line)
+		shown = append(shown, n)
 		size += len(line) + 1
 	}
-	return lines, len(notes) - len(lines), cut, nil
+	return shown, len(notes) - len(shown), cut, nil
+}
+
+// indexLine returns the line of a note in the index: "- /memories/<path>:
+// <first line>", with the label after it, such as "(from a person)", when
+// label is not empty. The path is escaped (EscapeName).
+func indexLine(n note, label string) string {
+	line := "- " + Prefix + "/" + EscapeName(n.name)
+	if n.title != "" {
+		line += ": " + n.title
+	}
+	if label != "" {
+		line += " " + label
+	}
+	return line
 }
 
 // CutNote is the sentence that ends a listing of the notes whose walk

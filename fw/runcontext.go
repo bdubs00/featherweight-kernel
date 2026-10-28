@@ -15,8 +15,10 @@ import (
 // tool. The system prompt tells the model that such a block holds data and
 // not instructions. Compaction, a resume, and a replay keep the text, and
 // its cached prefix stays valid. An error or an empty text adds nothing.
-// The context carries the agent (AgentFrom) and the run (RunInfoFrom). The
-// kernel finds a ContextBriefer behind middleware that has an Unwrap method.
+// The context carries the agent (AgentFrom), the run (RunInfoFrom), and a
+// recorder of the notes that the text lists (RecordMemoryUse), which the
+// kernel records as fw.memory.used after fw.run.started. The kernel finds
+// a ContextBriefer behind middleware that has an Unwrap method.
 type ContextBriefer interface {
 	BriefContext(ctx context.Context, run RunInfo) (string, error)
 }
@@ -63,7 +65,10 @@ func (a *Agent) briefContext(ctx context.Context, rs *runState, tools []Tool) st
 		return *o.context
 	}
 	info := a.runInfo(rs)
-	bctx := WithRunInfo(WithAgent(ctx, a), info)
+	rs.briefUse = nil
+	bctx := WithMemoryUseRecorder(WithRunInfo(WithAgent(ctx, a), info), func(d MemoryUsedData) {
+		rs.briefUse = append(rs.briefUse, d)
+	})
 	var parts []string
 	for _, t := range tools {
 		b, ok := contextBrieferOf(t)

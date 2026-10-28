@@ -90,3 +90,17 @@ func RecordMemoryUse(ctx context.Context, d MemoryUsedData) {
 		fn(d)
 	}
 }
+
+// recordBriefUse records fw.memory.used for each list of notes that a tool
+// put in the data of the start of the run (briefContext), after
+// fw.run.started. A failed append leaves the run as it is: the event
+// counts uses, and the run does not depend on it.
+func (a *Agent) recordBriefUse(ctx context.Context, rs *runState) {
+	for _, d := range rs.briefUse {
+		if _, err := a.emit(ctx, rs, EvMemoryUsed, d); err != nil {
+			a.log.Warn("record the notes of the start of the run", "run", rs.id, "error", err)
+			break
+		}
+	}
+	rs.briefUse = nil
+}
