@@ -3114,7 +3114,7 @@ A check run comes over the bus intake as any run request (section 9.3). The retr
 
 ## 24. Definition of done
 
-A run that completes today is a run whose model stopped. Nothing in the kernel says that the work is done. A definition of done closes that gap. It names checks that the work must pass, and the kernel runs them before the run can complete. This is the rule of lean work: a defect stops the line at the step that made it, so the person at the end of the line does not need to inspect every result. The code is `fw/done.go`, and one call at the start of `endTurn` (`fw/turn.go`) starts it.
+A run that completes today is a run whose model stopped. Nothing in the kernel says that the work is done. A definition of done closes that gap. It names checks that the work must pass, and the kernel runs them before the run can complete. This is the rule of lean work. A defect stops the line at the step that made it. So the person at the end of the line does not need to inspect every result. The code is `fw/done.go`, and one call at the start of `endTurn` (`fw/turn.go`) starts it.
 
 ### 24.1 Configuration
 
@@ -3122,7 +3122,7 @@ An agent profile can carry a `done` block:
 
 | Key | Default | What it does |
 |---|---|---|
-| `checks` | none | 1 to 8 checks. Each check has a `tool`, an `input` (a JSON object as text, empty is `{}`), an optional `name` for a person, and optional `contains` and `lacks` lists of substrings. A block without a check is off. |
+| `checks` | none | 1 to 8 checks. Each check has a `tool` and an `input`, a JSON object as text (empty is `{}`). It can have a `name` for a person, and `contains` and `lacks` lists of substrings. A block without a check is off. |
 | `attempts` | 3 | The number of failed passes that end the run. Each failed pass before it gives the model one more turn. 1 gives no other turn. The most is 10. |
 | `timeout` | 5m | The time limit of each check. The most is 10m, the time limit of a tool call. |
 
@@ -3141,13 +3141,13 @@ agents:
       attempts: 3
 ```
 
-A check passes when four things are true. Its call runs. Its result is not an error. Its exit code is zero, when the tool reports one, as `bash` does. Its text holds every string of `contains` and no string of `lacks`.
+A check passes on four conditions. Its call runs. Its result is not an error. Its exit code is zero, for a tool that reports one, such as `bash`. Its text holds every string of `contains` and no string of `lacks`.
 
-The kernel resolves the block once, when it queues the run, and records it in the field `done` of `fw.run.queued` with its defaults. A run keeps its definition of done for its life, as it keeps its outcome (section 20). A child run never takes the block of its named profile, as for an outcome. An inline profile adds its checks to the checks of the named profile and removes none, so a request cannot weaken the definition of done that the owner of an agent wrote. A process whose runs a hosted harness drives refuses the block, because the checks need the turn loop.
+The kernel resolves the block once, at the queue of the run. It records the block with its defaults in the field `done` of `fw.run.queued`. A run keeps its definition of done for its life, as it keeps its outcome (section 20). A child run never takes the block of its named profile, as for an outcome. An inline profile adds its checks to the checks of the named profile and removes none. So a request cannot weaken the definition of done of the owner of an agent. A process that hosts another agent program (section 19) refuses the block, because the checks need the turn loop.
 
 ### 24.2 A pass
 
-When the model ends a turn with its answer, the kernel closes the turn. Then it runs every check once, in order, with no model. The calls go through the tool path of the routine runner, so the budget, the policy, the limits, and the ledger treat them as calls of the model. Their call ids start with `done_`, and they never enter the history of the model. A check never asks a person: a call that the policy asks for fails the check, as in a check run (section 23).
+When the model ends a turn with its answer, the kernel closes the turn. Then it runs every check once, in order, with no model. The calls go through the tool path of the routine runner. So the budget, the policy, the limits, and the ledger treat them as calls of the model. Their call ids start with `done_`, and they never enter the history of the model. A check never asks a person: a call that the policy asks for fails the check, as in a check run (section 23).
 
 The kernel records the pass as `fw.done.checked`:
 
@@ -3164,8 +3164,8 @@ The checks run before the grader, because a check is cheap and certain, and a gr
 
 ### 24.3 What a consumer sees
 
-The run object has `done`: the state `checked`, `fixing`, or `failed`, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, and `fw_done_passes_total` counts the passes by agent and result. The front of a fleet reads the lifecycle events of the egress stream, so it tells a checked result from a run whose model stopped without a change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
+The run object has `done`: the state `checked`, `fixing`, or `failed`, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, and `fw_done_passes_total` counts the passes by agent and result. The front of a fleet reads the lifecycle events of the egress stream. So it tells a checked result from a run whose model stopped, with no change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
 
 ### 24.4 Restarts
 
-Every step reads the ledger. A restart that cut a pass off runs the whole pass again, so a check must be safe to run twice, as a test or a read is. The author of the profile writes the checks, not the model, so the kernel does not ask before it runs one again. A restart between a failed pass and its message gives the message once. A restart between the last failed pass and the end of the run ends the run at the next step.
+Every step reads the ledger. A restart that cut a pass off runs the whole pass again. So a check must be safe to run twice, as a test or a read is. The author of the profile writes the checks, not the model, so the kernel does not ask before it runs one again. A restart between a failed pass and its message gives the message once. A restart between the last failed pass and the end of the run ends the run at the next step.
