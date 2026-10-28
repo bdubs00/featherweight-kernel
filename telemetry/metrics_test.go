@@ -141,6 +141,7 @@ func TestRegistryNames(t *testing.T) {
 	m.runsTotal.WithLabelValues("a", "completed", "")
 	m.runsQueued.WithLabelValues("a", fw.OriginHTTP, "")
 	m.budgetExceeded.WithLabelValues("a", "maxTurns")
+	m.donePasses.WithLabelValues("a", "passed")
 	m.modelUnpriced.WithLabelValues("p", "m")
 	m.loopsTotal.WithLabelValues("a", "warned")
 	m.runsActive.WithLabelValues("a")
@@ -187,6 +188,7 @@ func TestRegistryNames(t *testing.T) {
 		"fw_runs_total":                          {dto.MetricType_COUNTER, []string{"agent", "batch", "outcome"}},
 		"fw_runs_queued_total":                   {dto.MetricType_COUNTER, []string{"agent", "batch", "origin"}},
 		"fw_budget_exceeded_total":               {dto.MetricType_COUNTER, []string{"agent", "limit"}},
+		"fw_done_passes_total":                   {dto.MetricType_COUNTER, []string{"agent", "result"}},
 		"fw_model_unpriced_tokens_total":         {dto.MetricType_COUNTER, []string{"model", "provider"}},
 		"fw_approvals_oldest_timestamp_seconds":  {dto.MetricType_GAUGE, []string{"agent"}},
 		"fw_loops_total":                         {dto.MetricType_COUNTER, []string{"action", "agent"}},
@@ -670,6 +672,12 @@ func TestMetricsBudgetAndOrigin(t *testing.T) {
 	g.emit(fw.EvBudgetExceeded, fw.BudgetExceededData{Limit: "maxCostUSD", Value: 2.5})
 	g.emit(fw.EvBudgetExceeded, fw.BudgetExceededData{Limit: "a limit of a later version", Value: 1})
 	g.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeFailed})
+	h := newFeed(m, "r3", "reviewer")
+	h.emit(fw.EvRunQueued, fw.RunQueuedData{Agent: "reviewer", Input: "x", Origin: fw.OriginCLI})
+	h.emit(fw.EvRunStarted, fw.RunStartedData{})
+	h.emit(fw.EvDoneChecked, fw.DoneCheckedData{Attempt: 1, Attempts: 2, Continue: true})
+	h.emit(fw.EvDoneChecked, fw.DoneCheckedData{Attempt: 2, Attempts: 2})
+	h.emit(fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeFailed, Done: fw.DoneFailed})
 	for _, c := range []struct {
 		name   string
 		labels map[string]string
@@ -681,7 +689,9 @@ func TestMetricsBudgetAndOrigin(t *testing.T) {
 		{"fw_budget_exceeded_total", map[string]string{"agent": "reviewer", "limit": "maxCostUSD"}, 1},
 		{"fw_budget_exceeded_total", map[string]string{"agent": "reviewer", "limit": "other"}, 1},
 		{"fw_loops_total", map[string]string{"agent": "reviewer", "action": "failed"}, 1},
-		{"fw_runs_total", map[string]string{"agent": "reviewer", "outcome": "failed"}, 2},
+		{"fw_runs_total", map[string]string{"agent": "reviewer", "outcome": "failed"}, 3},
+		{"fw_done_passes_total", map[string]string{"agent": "reviewer", "result": "retried"}, 1},
+		{"fw_done_passes_total", map[string]string{"agent": "reviewer", "result": "failed"}, 1},
 	} {
 		if got := value(t, reg, c.name, c.labels); got != c.want {
 			t.Errorf("%s%v = %v, want %v", c.name, c.labels, got, c.want)

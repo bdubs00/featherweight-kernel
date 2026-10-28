@@ -172,6 +172,10 @@ type RunQueuedData struct {
 	// Outcome is the outcome of the run that the kernel resolved when it
 	// queued the run, or nil for a run without a rubric (see Outcome).
 	Outcome *Outcome `json:"outcome,omitempty"`
+	// Done is the definition of done of the run that the kernel resolved
+	// when it queued the run, with its defaults, or nil for a run without
+	// one (see Done).
+	Done *Done `json:"done,omitempty"`
 	// Check is the check of a check run, with its defaults (Check.Resolved),
 	// or nil for a run that calls a model.
 	Check *Check `json:"check,omitempty"`
@@ -626,6 +630,12 @@ type RunFinishedData struct {
 	// It is empty for a cancel of the process itself, for a run that a
 	// cancel of a run above it takes along, and for every other outcome.
 	By string `json:"by,omitempty"`
+	// Done is DoneChecked on the end of a completed run whose definition
+	// of done passed, DoneFailed on the end of a run that its checks
+	// ended, and empty for a run without a definition of done (see Done).
+	// So a consumer of the lifecycle events tells a checked result from a
+	// run whose model stopped.
+	Done string `json:"done,omitempty"`
 }
 
 // IDTime returns the time that an id from NewID holds, to the

@@ -622,6 +622,26 @@ func describe(e fw.Event) string {
 			}
 			return s
 		}
+	case fw.EvDoneChecked:
+		var d fw.DoneCheckedData
+		if e.Decode(&d) == nil {
+			failed := 0
+			for _, r := range d.Checks {
+				if !r.Passed {
+					failed++
+				}
+			}
+			if d.Passed {
+				return fmt.Sprintf("done: %d checks passed", len(d.Checks))
+			}
+			s := fmt.Sprintf("not done: %d of %d checks failed in attempt %d of %d", failed, len(d.Checks), d.Attempt, d.Attempts)
+			if d.Continue {
+				s += "; the run fixes its work"
+			} else if d.Reason != "" {
+				s += " (" + oneLine(d.Reason, 120) + ")"
+			}
+			return s
+		}
 	case fw.EvLoopDetected:
 		var d fw.LoopDetectedData
 		if e.Decode(&d) == nil {

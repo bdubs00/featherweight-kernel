@@ -371,6 +371,28 @@ maxQueuedRuns: 0                # extra admitted root drivers; 0 selects the fin
 #       grader: ""                # a provider/model selector or a name from models; empty is the model of the run
 #       iterations: 1             # the most grader passes: 1 grades once, 2 or more give the run a turn to revise; 0 is 1, the most is 10
 
+# done (section 24)
+# A profile can carry a definition of done: checks that the kernel runs,
+# with no model and under the policy of the run, when the model ends its
+# turn. The run completes only when every check passes. A failed check gives
+# the model the failure and one more turn. At the last failed attempt the
+# run fails as not done. A check never asks a person. A child run never
+# takes the block of its profile, and an inline profile only adds checks.
+#
+# agents:
+#   fixer:
+#     done:
+#       checks:                   # 1 to 8; a check passes when its call runs, its result is no error, its exit code is 0, and its text matches
+#         - name: the tests pass  # a few words for a person and for the model
+#           tool: bash
+#           input: '{"command": "go test ./..."}'   # a JSON object; empty is {}
+#         - name: no stray files
+#           tool: bash
+#           input: '{"command": "git status --porcelain"}'
+#           lacks: ["??"]         # substrings that the result must not hold; contains lists the ones it must hold
+#       attempts: 3               # failed passes that end the run; 1 gives no other turn; 0 is 3, the most is 10
+#       timeout: 5m               # the time limit of each check; 0 is 5m, the most is 10m
+
 # harness (section 19)
 # The block harness makes every run of the process a session of a hosted
 # harness. The harness uses the model of the run with providers.<p>.baseUrl

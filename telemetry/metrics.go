@@ -95,6 +95,7 @@ type Metrics struct {
 	runDuration      *prometheus.HistogramVec
 	runTurns         *prometheus.HistogramVec
 	budgetExceeded   *prometheus.CounterVec
+	donePasses       *prometheus.CounterVec
 	modelRequests    *prometheus.CounterVec
 	modelDuration    *prometheus.HistogramVec
 	modelTokens      *prometheus.CounterVec
@@ -169,6 +170,10 @@ func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 			Name: "fw_budget_exceeded_total",
 			Help: "Runs that a budget limit stopped, by agent and limit (maxTurns, maxTokens, maxCostUSD, maxToolCalls, deadline, maxRepeats).",
 		}, []string{"agent", "limit"}),
+		donePasses: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "fw_done_passes_total",
+			Help: "Passes of the checks of a definition of done, by agent and result (passed, retried, failed): retried gave the model another turn, and failed ended the run as not done.",
+		}, []string{"agent", "result"}),
 		runsActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "fw_runs_active",
 			Help: "Runs that started and did not finish or suspend.",
@@ -268,7 +273,7 @@ func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 func (m *Metrics) collectors() []prometheus.Collector {
 	return append([]prometheus.Collector{
 		m.runsTotal, m.runsQueued, m.runsActive, m.runDuration, m.runTurns,
-		m.budgetExceeded,
+		m.budgetExceeded, m.donePasses,
 		m.modelRequests, m.modelDuration, m.modelTokens, m.modelCost, m.modelUnpriced,
 		m.toolCalls, m.toolDuration, mcpCollector{m},
 		m.approvalsPending, approvalAge{m}, m.approvalsTotal, m.loopsTotal, m.busMessages,
@@ -626,6 +631,20 @@ func (m *Metrics) Observe(e fw.Event) {
 			limit = otherLabel
 		}
 		m.budgetExceeded.WithLabelValues(st.agent, limit).Inc()
+	case fw.EvDoneChecked:
+		var d fw.DoneCheckedData
+		if e.Decode(&d) != nil {
+			return
+		}
+		result := "passed"
+		switch {
+		case d.Passed:
+		case d.Continue:
+			result = "retried"
+		default:
+			result = "failed"
+		}
+		m.donePasses.WithLabelValues(st.agent, result).Inc()
 	case fw.EvToolRequested:
 		var d fw.ToolRequestedData
 		if e.Decode(&d) == nil {

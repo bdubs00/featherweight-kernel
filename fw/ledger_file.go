@@ -156,7 +156,7 @@ func needsIntentSync(typ string, data json.RawMessage) bool {
 			return true
 		}
 		switch m.Note {
-		case NoteTime, NoteLoop, NoteBudget, NoteReport, NoteOutcome:
+		case NoteTime, NoteLoop, NoteBudget, NoteReport, NoteOutcome, NoteDone:
 			return false
 		default:
 			return true

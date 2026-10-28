@@ -611,6 +611,7 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 	// The kind of a check run comes after the annotators, which cannot
 	// set a key of the kernel.
 	outcome := a.resolveOutcome(req, named, parent)
+	done := a.resolveDone(req, named, parent)
 	if req.Check != nil {
 		meta = maps.Clone(meta)
 		if meta == nil {
@@ -618,6 +619,7 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 		}
 		meta[MetaKind] = RunKindCheck
 		outcome = nil // nothing grades a check, which has no answer of a model
+		done = nil
 	}
 	queued := RunQueuedData{
 		Agent:         req.Agent,
@@ -636,6 +638,7 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 		Resolved:      resolved,
 		FilesRoot:     req.FilesRoot,
 		Outcome:       outcome,
+		Done:          done,
 		Check:         req.Check,
 	}
 	text := a.pinText(named, &queued)
@@ -957,6 +960,9 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 	if err := a.checkHosted(*p); err != nil {
 		return err
 	}
+	if err := CheckDone(p.Done); err != nil {
+		return err
+	}
 	return CheckOutcome(a.cfg, p.Outcome)
 }
 
@@ -964,6 +970,9 @@ func (a *Agent) checkProfile(p *AgentProfile) error {
 // such as a hosted harness (docs/ARCHITECTURE.md section 19): the runner
 // of routines is part of the turn loop, so the routines would never run.
 func (a *Agent) checkHosted(p AgentProfile) error {
+	if a.runner != nil && p.Done.on() {
+		return fmt.Errorf("%w: a definition of done needs the turn loop of the kernel, and a hosted harness drives the runs of this process; remove done or the harness", ErrInvalidRequest)
+	}
 	if a.runner == nil || len(p.Routines) == 0 {
 		return nil
 	}
@@ -1872,6 +1881,11 @@ func cloneRun(r *Run) *Run {
 	if r.Outcome != nil {
 		o := *r.Outcome
 		cp.Outcome = &o
+	}
+	if r.Done != nil {
+		d := *r.Done
+		d.Checks = slices.Clone(r.Done.Checks)
+		cp.Done = &d
 	}
 	cp.Reactions = maps.Clone(r.Reactions)
 	if r.Activity != nil {

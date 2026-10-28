@@ -206,6 +206,10 @@ type AgentProfile struct {
 	Budget       *Budget  `yaml:"budget,omitempty" json:"budget,omitempty"`
 	Access       *Access  `yaml:"access,omitempty" json:"access,omitempty"` // who owns and uses the agent
 	Outcome      *Outcome `yaml:"outcome,omitempty" json:"outcome,omitempty"`
+	// Done is the definition of done of the runs of the profile: checks
+	// that the work must pass before a run finishes as completed (see
+	// Done).
+	Done *Done `yaml:"done,omitempty" json:"done,omitempty"`
 	// Compaction sets when the runs of the profile compact their history:
 	// at, model, and off, over the block compaction of the configuration
 	// (see CompactionConfig). Nil takes the block of the configuration.
@@ -297,6 +301,10 @@ func (p AgentProfile) Overlay(o AgentProfile) AgentProfile {
 	if o.Outcome != nil {
 		out := *o.Outcome
 		p.Outcome = &out
+	}
+	// An overlay adds checks to the definition of done and removes none.
+	if o.Done.on() {
+		p.Done = mergeDone(p.Done, o.Done)
 	}
 	if o.Routines != nil {
 		p.Routines = append(make([]Routine, 0, len(o.Routines)), o.Routines...)
@@ -425,6 +433,10 @@ type Run struct {
 	// from fw.outcome.evaluated (see Outcome). It is nil for a run without
 	// a rubric.
 	Outcome *RunOutcome `json:"outcome,omitempty"`
+	// Done is the state of the definition of done of the run, from
+	// fw.done.checked and fw.run.finished (see RunDone). It is nil for a
+	// run without one.
+	Done *RunDone `json:"done,omitempty"`
 	// Reactions counts the reactions of people on the run and its events,
 	// from fw.run.reacted, by reaction: ReactionUp, ReactionDown, and
 	// ReactionHeart. It holds nothing more; the front of a fleet keeps

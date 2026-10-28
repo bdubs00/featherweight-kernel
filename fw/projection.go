@@ -366,7 +366,7 @@ func (r *Run) Apply(e Event, prices Prices) {
 			return
 		}
 		if r.State.Terminal() {
-			r.Output, r.Error, r.Outcome = "", "", nil
+			r.Output, r.Error, r.Outcome, r.Done = "", "", nil, nil
 		}
 		r.State = StateRunning
 	case EvModelResponded:
@@ -390,6 +390,8 @@ func (r *Run) Apply(e Event, prices Prices) {
 		r.keptTurn = false
 	case EvOutcomeEvaluated:
 		r.applyOutcome(e)
+	case EvDoneChecked:
+		r.applyDone(e)
 	case EvRunAnnotated:
 		var d RunAnnotatedData
 		if e.Decode(&d) != nil {
@@ -496,6 +498,14 @@ func (r *Run) Apply(e Event, prices Prices) {
 			r.State = StateFailed
 		}
 		r.Output, r.Error = d.Output, d.Error
+		if d.Done != "" {
+			done := RunDone{State: d.Done}
+			if r.Done != nil {
+				done = *r.Done
+				done.State = d.Done
+			}
+			r.Done = &done
+		}
 	}
 }
 

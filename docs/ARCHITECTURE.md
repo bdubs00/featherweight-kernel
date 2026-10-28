@@ -1334,6 +1334,7 @@ The `metrics` projection maintains this registry. The route `/metrics` carries n
 | `fw_successful_task_cost_usd` | histogram | `basis` |
 | `fw_successful_task_cost_excluded_total` | counter | `reason` |
 | `fw_budget_exceeded_total` | counter | `agent`, `limit` (`maxTurns`, `maxTokens`, `maxCostUSD`, `maxToolCalls`, `deadline`, `maxRepeats`, `other`) |
+| `fw_done_passes_total` | counter | `agent`, `result` (`passed`, `retried`, `failed`): the passes of a definition of done (section 24) |
 | `fw_model_requests_total` | counter | `provider`, `model`, `outcome` (`ok`, `error`, `canceled`) |
 | `fw_model_request_duration_seconds` | histogram | `provider`, `model` |
 | `fw_model_tokens_total` | counter | `provider`, `model`, `kind` (`input`, `output`, `cache_read`, `cache_write`) |
@@ -3110,3 +3111,61 @@ The usage of a check run has no tokens and no cost. It counts the tool calls.
 `GET /v1/runs` leaves out the check runs. The query `kind=check` lists the check runs alone. The A2A method `tasks/list` and the search of recall over runs (section 7.8.3) also leave out the check runs. `GET /v1/runs/{id}` reads a check run as any run. A linked package, such as the front of a fleet, filters its own lists with `view.FilterKind`. The status of the process and the metrics count the check runs, so a Task with a check in progress is not idle.
 
 A check run comes over the bus intake as any run request (section 9.3). The retry of a failed check run keeps the check, so the retry is a check run too. The dead-letter record also holds the check.
+
+## 24. Definition of done
+
+A run that completes today is a run whose model stopped. Nothing in the kernel says that the work is done. A definition of done closes that gap. It names checks that the work must pass, and the kernel runs them before the run can complete. This is the rule of lean work: a defect stops the line at the step that made it, so the person at the end of the line does not need to inspect every result. The code is `fw/done.go`, and one call at the start of `endTurn` (`fw/turn.go`) starts it.
+
+### 24.1 Configuration
+
+An agent profile can carry a `done` block:
+
+| Key | Default | What it does |
+|---|---|---|
+| `checks` | none | 1 to 8 checks. Each check has a `tool`, an `input` (a JSON object as text, empty is `{}`), an optional `name` for a person, and optional `contains` and `lacks` lists of substrings. A block without a check is off. |
+| `attempts` | 3 | The number of failed passes that end the run. Each failed pass before it gives the model one more turn. 1 gives no other turn. The most is 10. |
+| `timeout` | 5m | The time limit of each check. The most is 10m, the time limit of a tool call. |
+
+```yaml
+agents:
+  fixer:
+    done:
+      checks:
+        - name: the tests pass
+          tool: bash
+          input: '{"command": "go test ./..."}'
+        - name: no stray files
+          tool: bash
+          input: '{"command": "git status --porcelain"}'
+          lacks: ["??"]
+      attempts: 3
+```
+
+A check passes when four things are true. Its call runs. Its result is not an error. Its exit code is zero, when the tool reports one, as `bash` does. Its text holds every string of `contains` and no string of `lacks`.
+
+The kernel resolves the block once, when it queues the run, and records it in the field `done` of `fw.run.queued` with its defaults. A run keeps its definition of done for its life, as it keeps its outcome (section 20). A child run never takes the block of its named profile, as for an outcome. An inline profile adds its checks to the checks of the named profile and removes none, so a request cannot weaken the definition of done that the owner of an agent wrote. A process whose runs a hosted harness drives refuses the block, because the checks need the turn loop.
+
+### 24.2 A pass
+
+When the model ends a turn with its answer, the kernel closes the turn. Then it runs every check once, in order, with no model. The calls go through the tool path of the routine runner, so the budget, the policy, the limits, and the ledger treat them as calls of the model. Their call ids start with `done_`, and they never enter the history of the model. A check never asks a person: a call that the policy asks for fails the check, as in a check run (section 23).
+
+The kernel records the pass as `fw.done.checked`:
+
+```json
+{"passed": false, "checks": [{"name": "the tests pass", "tool": "bash", "passed": false, "why": "the exit code is 1: ..."}],
+ "attempt": 1, "attempts": 3, "answer": 42, "continue": true}
+```
+
+- If every check passed, the run goes on to the grader of its outcome, when it has one, and then completes. Its `fw.run.finished` carries `"done": "checked"`.
+- If a check failed and attempts are left, the model gets a message from the kernel with the note kind `done`. The message names each failed check with the head and the tail of its result. The model gets one more turn to fix the work.
+- If a check failed at the last attempt, or the budget leaves no room for another turn, the run fails. Its output is the last answer of the model, its error starts with `not done:` and names the failed checks, and its `fw.run.finished` carries `"done": "failed"`.
+
+The checks run before the grader, because a check is cheap and certain, and a grader is neither. A follow-up of a person starts the attempts again.
+
+### 24.3 What a consumer sees
+
+The run object has `done`: the state `checked`, `fixing`, or `failed`, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, and `fw_done_passes_total` counts the passes by agent and result. The front of a fleet reads the lifecycle events of the egress stream, so it tells a checked result from a run whose model stopped without a change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
+
+### 24.4 Restarts
+
+Every step reads the ledger. A restart that cut a pass off runs the whole pass again, so a check must be safe to run twice, as a test or a read is. The author of the profile writes the checks, not the model, so the kernel does not ask before it runs one again. A restart between a failed pass and its message gives the message once. A restart between the last failed pass and the end of the run ends the run at the next step.
