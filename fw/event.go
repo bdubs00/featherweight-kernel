@@ -41,6 +41,7 @@ const (
 	EvToolProgress      = "fw.tool.progress"
 	EvFileChanged       = "fw.file.changed"
 	EvMemoryChanged     = "fw.memory.changed" // a tool changed a memory note; see MemoryChangedData
+	EvMemoryUsed        = "fw.memory.used"    // a run read memory notes; see MemoryUsedData
 	EvApprovalRequested = "fw.approval.requested"
 	EvApprovalDecided   = "fw.approval.decided"
 	EvContextCompacted  = "fw.context.compacted"
@@ -550,7 +551,16 @@ type RoutineDecidedData struct {
 	Decider   string            `json:"decider,omitempty"`
 	Model     string            `json:"model,omitempty"`
 	LatencyMS int64             `json:"latencyMs,omitempty"`
+	// Risk is RiskRead when the annotations of every tool of the steps
+	// say read-only, and RiskWrite otherwise.
+	Risk string `json:"risk,omitempty"`
 }
+
+// The risks of a routine (RoutineDecidedData.Risk).
+const (
+	RiskRead  = "read"
+	RiskWrite = "write"
+)
 
 // RoutineAppliedData is the payload of fw.routine.applied: a live routine
 // that applies ran. OK is true when every step and every check passed.

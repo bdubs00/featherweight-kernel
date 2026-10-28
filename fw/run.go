@@ -500,12 +500,32 @@ type RunRequest struct {
 	Files          []Block           `json:"files,omitempty"` // attachments of the first message; see Attachment
 	Outcome        *Outcome          `json:"outcome,omitempty"`
 	Check          *Check            `json:"check,omitempty"`
+	// Context holds data blocks of the caller: text that earlier runs or
+	// other people wrote, such as a page or the output of an earlier run.
+	// The kernel puts each block at the start of the first user message,
+	// never in the system prompt (docs/KNOWHOW.md section 4.1).
+	Context []RunContext `json:"context,omitempty"`
 	// FilesRoot keeps the tools of the run in the root of the files tool
 	// when tools.files.perRun gives every other run a directory of its
 	// own, as the bootstrap of an ax workspace needs. Only a Go caller sets
 	// it (InFilesRoot); no surface does.
 	FilesRoot bool `json:"-"`
 }
+
+// RunContext is one block of data that the caller of a run passes. The
+// kernel puts it at the start of the first user message as a <context>
+// block, after the blocks of the tools. It is never an instruction.
+// Source names the block: [a-z][a-z0-9-]{0,31}.
+type RunContext struct {
+	Source string `json:"source"`
+	Text   string `json:"text"`
+}
+
+// Bounds of RunRequest.Context.
+const (
+	MaxRunContexts     = 8        // blocks per run
+	MaxRunContextBytes = 16 << 10 // bytes of text per block
+)
 
 // RunOption changes a RunRequest.
 type RunOption func(*RunRequest)
@@ -518,6 +538,11 @@ func WithRunBudget(b Budget) RunOption { return func(r *RunRequest) { r.Budget =
 
 // WithInstructions adds text that follows the system prompt for this run.
 func WithInstructions(s string) RunOption { return func(r *RunRequest) { r.Instructions = s } }
+
+// WithRunContext adds one data block to the run (RunRequest.Context).
+func WithRunContext(source, text string) RunOption {
+	return func(r *RunRequest) { r.Context = append(r.Context, RunContext{Source: source, Text: text}) }
+}
 
 // WithRunProfile overlays an inline profile on the named profile of the run.
 func WithRunProfile(p AgentProfile) RunOption { return func(r *RunRequest) { r.Profile = &p } }
@@ -547,6 +572,19 @@ const MetaTitle = "fw.title"
 // the job on the queue, and a child run inherits the value of its parent,
 // in this process or in another one, so one name covers the whole job.
 const MetaBatch = "fw.batch"
+
+// MetaKnowhow is the metadata key that holds a run back from Know-how.
+// With the value KnowhowOff, the run gets no memory block, no memory or
+// recall tool, and no routine (docs/KNOWHOW.md section 4.6).
+const (
+	MetaKnowhow = "fw.knowhow"
+	KnowhowOff  = "off"
+)
+
+// MetaDuty is the metadata key that names the Duty of a run. The duties
+// engine of the workbench sets it. A routine with Duty set considers only
+// the runs of that Duty.
+const MetaDuty = "workbench.duty"
 
 // MaxTitleRunes is the length of a title that TitleFrom makes.
 const MaxTitleRunes = 64

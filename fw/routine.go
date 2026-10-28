@@ -59,10 +59,13 @@ const (
 // the answer, and each string of contains and lacks is a template
 // (RenderRoutine).
 type Routine struct {
-	Name      string                     `yaml:"name" json:"name"`
-	Version   int                        `yaml:"version" json:"version"`
-	Standing  string                     `yaml:"standing" json:"standing"`
-	Canary    *float64                   `yaml:"canary,omitempty" json:"canary,omitempty"`
+	Name     string   `yaml:"name" json:"name"`
+	Version  int      `yaml:"version" json:"version"`
+	Standing string   `yaml:"standing" json:"standing"`
+	Canary   *float64 `yaml:"canary,omitempty" json:"canary,omitempty"`
+	// Duty binds the routine to one Duty: the runner considers it only for
+	// a run whose metadata MetaDuty names that Duty.
+	Duty      string                     `yaml:"duty,omitempty" json:"duty,omitempty"`
 	Decider   string                     `yaml:"decider,omitempty" json:"decider,omitempty"`
 	Questions map[string]RoutineQuestion `yaml:"questions,omitempty" json:"questions,omitempty"`
 	Steps     []RoutineStep              `yaml:"steps,omitempty" json:"steps,omitempty"`

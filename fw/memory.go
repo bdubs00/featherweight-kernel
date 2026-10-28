@@ -118,6 +118,30 @@ type MemoryChangedData struct {
 	SHA256 string          `json:"sha256,omitempty"`
 }
 
+// MemoryUsedData is the payload of fw.memory.used: the notes that a run
+// read. How is MemoryUsedBrief for the block at the start of the run,
+// MemoryUsedView for the memory tool, and MemoryUsedRecall for a hit of
+// recall that the run read. It never holds the text of a note or the
+// principal. The front counts the uses of each note from it.
+type MemoryUsedData struct {
+	How  string          `json:"how"`
+	Refs []MemoryUsedRef `json:"refs"`
+}
+
+// MemoryUsedRef names one note that a run read, with the hash of the text
+// that it read.
+type MemoryUsedRef struct {
+	Ref  string `json:"ref"`
+	Hash string `json:"hash,omitempty"`
+}
+
+// The ways a run reads a note (MemoryUsedData.How).
+const (
+	MemoryUsedBrief  = "brief"
+	MemoryUsedView   = "view"
+	MemoryUsedRecall = "recall"
+)
+
 type memoryRecorderKey struct{}
 
 // WithMemoryRecorder stores the recorder of memory changes in ctx. The
