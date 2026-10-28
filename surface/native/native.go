@@ -8,6 +8,7 @@ package native
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,6 +116,7 @@ func (s *server) mount(mux *http.ServeMux, exts []Extension) error {
 		{"GET /v1/runs/{id}/live", s.remote(s.live)},
 		{"POST /v1/runs/{id}/messages", s.remote(s.sendMessage)},
 		{"POST /v1/runs/{id}/reactions", s.remote(s.react)},
+		{"POST /v1/runs/{id}/quality", s.remote(s.observeQuality)},
 		{"PATCH /v1/runs/{id}/budget", s.remote(s.changeBudget)},
 		{"POST /v1/runs/{id}/approvals/{approval}", s.remote(s.decide)},
 		{"POST /v1/runs/{id}/cancel", s.remote(s.cancel)},
@@ -855,6 +857,74 @@ func (s *server) react(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeRun(w, r, http.StatusOK, id)
+}
+
+// qualityBody is the body of POST /v1/runs/{id}/quality: the receipt of a
+// system of record, such as a ticket that a person closed or a deploy that
+// passed its checks (fw.QualityObservation). id is a stable id of the
+// receipt, so a retry writes nothing twice. verification is accepted,
+// satisfied, rejected, or unknown. completion is the sequence number of
+// the fw.run.finished that the receipt verifies; zero with a verification
+// means the latest completed end of the run. duplicateEffects counts the
+// effects that the system saw more than once.
+type qualityBody struct {
+	ID               string `json:"id"`
+	Completion       uint64 `json:"completion"`
+	Verification     string `json:"verification"`
+	DuplicateEffects uint64 `json:"duplicateEffects"`
+}
+
+// observeQuality answers POST /v1/runs/{id}/quality with the run object
+// after the receipt (fw.Agent.ObserveQuality), which the kernel records as
+// fw.run.annotated. The caller needs the operator role on the run.
+func (s *server) observeQuality(w http.ResponseWriter, r *http.Request) {
+	var body qualityBody
+	if !s.decode(w, r, &body) {
+		return
+	}
+	id := r.PathValue("id")
+	d := fw.QualityObservation{ID: strings.TrimSpace(body.ID), Completion: body.Completion, Verification: strings.TrimSpace(body.Verification),
+		DuplicateEffects: body.DuplicateEffects}
+	if d.Verification != "" && d.Completion == 0 {
+		// A system of record knows the run, not the sequence number of
+		// its end.
+		seq, err := s.latestCompletion(r.Context(), id)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		d.Completion = seq
+	}
+	if err := s.a.ObserveQuality(r.Context(), id, d); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.writeRun(w, r, http.StatusOK, id)
+}
+
+// latestCompletion returns the sequence number of the latest
+// fw.run.finished of the run with the outcome completed. A run that never
+// completed is an invalid request. The caller authorizes through
+// ObserveQuality next, which needs more than the view of the run, and
+// answers with nothing that this read found before it.
+func (s *server) latestCompletion(ctx context.Context, id string) (uint64, error) {
+	if _, err := s.a.Get(ctx, id); err != nil {
+		return 0, err
+	}
+	var seq uint64
+	for e, err := range s.a.Ledger().Read(ctx, id, 0) {
+		if err != nil {
+			return 0, err
+		}
+		var d fw.RunFinishedData
+		if e.Type == fw.EvRunFinished && e.Decode(&d) == nil && d.Outcome == fw.OutcomeCompleted {
+			seq = e.Seq
+		}
+	}
+	if seq == 0 {
+		return 0, fmt.Errorf("%w: the run %s never completed, so no receipt can verify it", fw.ErrInvalidRequest, id)
+	}
+	return seq, nil
 }
 
 // budgetAnswer is the answer of PATCH /v1/runs/{id}/budget: the effective
