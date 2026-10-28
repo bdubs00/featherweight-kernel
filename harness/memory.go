@@ -180,7 +180,8 @@ func builtin(cfg *fw.Config, name string) bool {
 
 // memoryTools reports which tools of memory the run can use: notes, the
 // memory tool of the kernel, and recall, the recall tool, which also reads
-// runs, files, and skills.
+// runs, files, and skills. A run that is held back from Know-how
+// (fw.HeldBack) gets neither.
 //
 // The host cannot see the resolved tools of a run: the turn loop builds
 // them for each turn, and Agent.Tools also asks each tool source,
@@ -190,7 +191,7 @@ func builtin(cfg *fw.Config, name string) bool {
 // matches them. The profiles of the ancestors do not count, because a
 // harness starts no child run.
 func (h *host) memoryTools(q fw.RunQueuedData) (notes, recall bool) {
-	if h.mem == nil {
+	if h.mem == nil || fw.HeldBack(q.Metadata) {
 		return false, false
 	}
 	cfg := h.a.Config()

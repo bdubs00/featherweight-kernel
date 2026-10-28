@@ -2,6 +2,7 @@ package fw
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -174,5 +175,116 @@ func TestRunContextFromTheBus(t *testing.T) {
 	})
 	if got := TextOf(s.requests()[0].Messages[0].Content[:1]); got != ContextBlock("event", "EVENT 7") {
 		t.Fatalf("first block = %q", got)
+	}
+}
+
+// knowhowTools are a memory tool and a recall tool that add text to the
+// start of a run, as the built-in tools do.
+func knowhowTools() []Tool {
+	return []Tool{&contextTool{name: "memory", text: "- /memories/a.md: A note"}, &contextTool{name: "recall"}}
+}
+
+// TestHeldBackRun checks that a run with fw.knowhow off gets no memory
+// block, no memory or recall tool, and no routine, and that
+// fw.run.started says so, while a normal run of the same agent gets all
+// three.
+func TestHeldBackRun(t *testing.T) {
+	ctx := testCtx(t)
+	s := newScript(endTurn("held"), endTurn("normal"))
+	d := &fakeDecider{answers: confident()}
+	h := &helpdesk{}
+	a := routineAgent(t, s.Model(), d, h, []Routine{ackRoutine(RoutineShadow)}, WithTools(knowhowTools()...))
+
+	r, err := a.Run(ctx, "Ticket #42: the printer is broken", AsAgent("triage"), WithMetadata(map[string]string{MetaKnowhow: KnowhowOff}))
+	mustState(t, r, err, StateCompleted)
+	evs := ledgerEvents(t, a.Ledger(), r.ID)
+	var st RunStartedData
+	firstOf(t, evs, EvRunStarted, &st)
+	if st.Knowhow != KnowhowOff || st.Context != "" {
+		t.Fatalf("started = %+v", st)
+	}
+	for _, name := range st.Tools {
+		if KnowhowTool(name) {
+			t.Fatalf("a held-back run has the tool %s: %v", name, st.Tools)
+		}
+	}
+	req := s.requests()[0]
+	for _, spec := range req.Tools {
+		if KnowhowTool(spec.Name) {
+			t.Fatalf("the model saw the tool %s", spec.Name)
+		}
+	}
+	if d.calls != 0 || countType(evs, EvRoutineDecided) != 0 {
+		t.Fatalf("the routine runner acted on a held-back run: %d decider calls, %v", d.calls, eventTypes(evs))
+	}
+
+	n, err := a.Run(ctx, "Ticket #43: the printer is broken", AsAgent("triage"))
+	mustState(t, n, err, StateCompleted)
+	var ns RunStartedData
+	firstOf(t, ledgerEvents(t, a.Ledger(), n.ID), EvRunStarted, &ns)
+	if ns.Knowhow != "" || !strings.Contains(ns.Context, "A note") || !slices.Contains(ns.Tools, "memory") || !slices.Contains(ns.Tools, "recall") {
+		t.Fatalf("normal run started = %+v", ns)
+	}
+	if d.calls != 1 {
+		t.Fatalf("decider calls on a normal run = %d", d.calls)
+	}
+}
+
+// TestRoutineBoundToADuty checks that the runner considers a routine with
+// a Duty only for a run whose metadata names that Duty, and that it
+// records the risk of each routine from the annotations of its tools.
+func TestRoutineBoundToADuty(t *testing.T) {
+	ctx := testCtx(t)
+	bound := ackRoutine(RoutineShadow)
+	bound.Name, bound.Duty = "nightly", "nightly-sweep"
+	reader := ackRoutine(RoutineShadow)
+	reader.Name = "look"
+	reader.Steps = reader.Steps[:1] // gitea.label_read only
+	s := newScript(endTurn("one"), endTurn("two"))
+	d := &fakeDecider{answers: confident()}
+	a := routineAgent(t, s.Model(), d, &helpdesk{}, []Routine{bound, reader})
+
+	decided := func(r *Run) map[string]RoutineDecidedData {
+		out := map[string]RoutineDecidedData{}
+		for _, x := range decodeAll[RoutineDecidedData](t, ledgerEvents(t, a.Ledger(), r.ID), EvRoutineDecided) {
+			out[x.Routine] = x
+		}
+		return out
+	}
+	r, err := a.Run(ctx, "Ticket #42: broken", AsAgent("triage"))
+	mustState(t, r, err, StateCompleted)
+	if got := decided(r); len(got) != 1 || got["look"].Risk != RiskRead {
+		t.Fatalf("a run without a Duty decided %+v", got)
+	}
+	r, err = a.Run(ctx, "Ticket #43: broken", AsAgent("triage"), WithMetadata(map[string]string{MetaDuty: "nightly-sweep"}))
+	mustState(t, r, err, StateCompleted)
+	got := decided(r)
+	if len(got) != 2 || got["nightly"].Risk != RiskWrite || got["look"].Risk != RiskRead {
+		t.Fatalf("a run of the Duty decided %+v", got)
+	}
+	if r, err = a.Run(ctx, "Ticket #44: broken", AsAgent("triage"), WithMetadata(map[string]string{MetaDuty: "other"})); err != nil {
+		t.Fatal(err)
+	} else if got := decided(r); len(got) != 1 || got["nightly"].Routine != "" {
+		t.Fatalf("a run of another Duty decided %+v", got)
+	}
+}
+
+// TestRoutineRisk checks the risk of a routine whose tool the run lacks,
+// and of a routine whose check writes.
+func TestRoutineRisk(t *testing.T) {
+	tools := map[string]Tool{}
+	for _, tl := range (&helpdesk{}).tools() {
+		tools[tl.Spec().Name] = tl
+	}
+	r := Routine{Steps: []RoutineStep{{Tool: "gitea.label_read"}}, After: []RoutineCheck{{Tool: "gitea.issue_read"}}}
+	if got := routineRisk(r, tools); got != RiskRead {
+		t.Fatalf("reads only = %s", got)
+	}
+	r.After = append(r.After, RoutineCheck{Tool: "gitea.issue_write"})
+	if got := routineRisk(r, tools); got != RiskWrite {
+		t.Fatalf("a check that writes = %s", got)
+	}
+	if got := routineRisk(Routine{Steps: []RoutineStep{{Tool: "missing"}}}, tools); got != RiskWrite {
+		t.Fatalf("a tool that the run lacks = %s", got)
 	}
 }
