@@ -299,6 +299,7 @@ type checkTool struct {
 	Tool
 	deadline time.Time
 	max      int
+	fresh    bool // the call gets fresh tool state (RunInfo.Fresh), as a check of a definition of done does
 	cut      bool // the result was longer than max, or held more than text
 	late     bool // the call ended at the deadline of the check
 }
@@ -312,6 +313,11 @@ func (t *checkTool) Call(ctx context.Context, input json.RawMessage) (ToolResult
 	ctx, cancel := context.WithDeadlineCause(ctx, t.deadline, errCheckTimeout)
 	defer cancel()
 	ctx = WithConnecter(WithAsker(withWholeOutput(ctx), nil), nil)
+	if t.fresh {
+		info := RunInfoFrom(ctx)
+		info.Fresh = true
+		ctx = WithRunInfo(ctx, info)
+	}
 	res, err := t.Tool.Call(ctx, input)
 	if context.Cause(ctx) == errCheckTimeout {
 		t.late = true

@@ -462,3 +462,28 @@ func TestCheckDone(t *testing.T) {
 		t.Fatalf("start = %v", err)
 	}
 }
+
+// A call of a check asks for fresh tool state, and a call of the model
+// does not, so a stateful tool such as bash gives a check a shell of its
+// own.
+func TestDoneCheckAsksForFreshState(t *testing.T) {
+	ctx := testCtx(t)
+	var mu sync.Mutex
+	var seen []bool
+	probe := NewTool(ToolSpec{Name: "probe"}, func(ctx context.Context, _ json.RawMessage) (ToolResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, RunInfoFrom(ctx).Fresh)
+		return TextResult("ok"), nil
+	})
+	s := newScript(callTools(use("c1", "probe", `{}`)), endTurn("done"))
+	prof := AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{{Tool: "probe"}}}}
+	a := newTestAgent(t, s.Model(), WithTools(probe), WithProfile(prof))
+	r, err := a.Run(ctx, "Probe it.", AsAgent("fixer"))
+	mustState(t, r, err, StateCompleted)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 || seen[0] || !seen[1] {
+		t.Fatalf("fresh per call = %v, want [false true]", seen)
+	}
+}

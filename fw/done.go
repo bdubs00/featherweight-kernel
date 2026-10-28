@@ -16,6 +16,10 @@ package fw
 // fails the check. The checks run before the grader of an outcome, because
 // a check is cheap and certain, and a grader is neither.
 //
+// Each call of a check gets fresh tool state (RunInfo.Fresh): bash runs it
+// in a new shell in the directory of the run, never in the shell of the
+// run, so the model cannot change a check with a cd or a variable.
+//
 // Every step reads the ledger. A restart that cuts a pass off runs the
 // pass again, so a check must be safe to run twice, as a test or a read
 // is. The author of the profile writes the checks, not the model.
@@ -513,7 +517,7 @@ func (a *Agent) oneDone(ctx context.Context, rr *routineRun, tools map[string]To
 	if err != nil {
 		return "the input of the check is not a JSON object", nil
 	}
-	ct := &checkTool{Tool: t, deadline: time.Now().Add(timeout), max: doneResultBytes}
+	ct := &checkTool{Tool: t, deadline: time.Now().Add(timeout), max: doneResultBytes, fresh: true}
 	res, why, err := rr.call(ctx, "", ct, in)
 	switch {
 	case err != nil:

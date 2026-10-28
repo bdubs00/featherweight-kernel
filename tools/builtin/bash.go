@@ -237,6 +237,9 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 	if err := decode(input, &in); err != nil {
 		return badInput("bash", err), nil
 	}
+	if fw.RunInfoFrom(ctx).Fresh {
+		return t.fresh(ctx, in.Command)
+	}
 	s := t.session(ctx)
 	if s == nil {
 		return fw.ErrorResult("bash: the tool is closed."), nil
@@ -266,6 +269,29 @@ func (t *bashTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResu
 		}
 	}
 	return t.run(ctx, s, in.Command)
+}
+
+// fresh runs one command in a new shell in the directory of the run and
+// kills the shell after it, for a call that must not share the shell of
+// the run (fw.RunInfo.Fresh), such as a check of a definition of done. The
+// shell of the run stays as it was. restart means nothing here, because
+// the shell is new.
+func (t *bashTool) fresh(ctx context.Context, command string) (fw.ToolResult, error) {
+	t.mu.Lock()
+	closed := t.closed
+	t.mu.Unlock()
+	if closed {
+		return fw.ErrorResult("bash: the tool is closed."), nil
+	}
+	if strings.TrimSpace(command) == "" {
+		return fw.ErrorResult("bash: the command is empty. Send a command."), nil
+	}
+	s := &bashSession{sem: make(chan struct{}, 1), used: time.Now()}
+	defer s.stop()
+	if err := t.start(ctx, s); err != nil {
+		return fw.ErrorResult(err.Error()), nil
+	}
+	return t.run(ctx, s, command)
 }
 
 // start starts a new shell for a session in the directory of the run,

@@ -64,6 +64,12 @@ type RunInfo struct {
 	// root of the files tool, or the directory of the run with
 	// tools.files.perRun (section 7.9). bash starts there.
 	Dir string
+	// Fresh asks a tool that keeps state between the calls of a run, such
+	// as the shell of bash, for state of its own that ends with the call.
+	// The kernel sets it on each call of a check of a definition of done
+	// (section 24), so the working directory and the variables that the
+	// model left in the shell of the run cannot change a check.
+	Fresh bool
 }
 
 // Keys of the _meta object that the MCP client of the kernel puts on each
