@@ -387,3 +387,27 @@ func TestFrontRecallRuns(t *testing.T) {
 		t.Fatalf("recall without the front = %+v, %v", res, err)
 	}
 }
+
+// TestRemovalDropsEditRecords checks that the removal of a note drops the
+// records of its edits, which hold lines of its text.
+func TestRemovalDropsEditRecords(t *testing.T) {
+	s, _ := newStore(t, "agent")
+	ctx := context.Background()
+	scope := s.Scope(fw.RunInfo{Agent: "triage"})
+	err := s.Locked(ctx, scope, func(files fw.Files) error {
+		if err := files.WriteFile("a.md", []byte("SECRET LINE\n")); err != nil {
+			return err
+		}
+		return RecordEdit(files, CallEdit{CallID: "c1", Name: "a.md", Result: "SECRET LINE"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Forget(ctx, scope, NoteRef(scope, "a.md")); err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := s.Dir(scope)
+	if b, err := os.ReadFile(filepath.Join(dir, stateName)); err == nil && strings.Contains(string(b), "SECRET LINE") {
+		t.Fatalf("the state keeps the text of a removed note: %s", b)
+	}
+}

@@ -226,16 +226,27 @@ func (f *noteFiles) keepExtra(name, hash string) {
 }
 
 // dropExtra drops what the note name, or every note under the directory
-// name, keeps beside its text.
+// name, keeps beside its text, and the records of its edits, which hold
+// lines of its text, so no text of a removed note stays in the state.
 func (f *noteFiles) dropExtra(name string) {
+	under := func(k string) bool { return k == name || strings.HasPrefix(k, name+"/") }
 	f.updateState(func(st *scopeState) bool {
 		changed := false
 		for k := range st.Notes {
-			if k == name || strings.HasPrefix(k, name+"/") {
+			if under(k) {
 				delete(st.Notes, k)
 				changed = true
 			}
 		}
+		kept := st.Edits[:0]
+		for _, e := range st.Edits {
+			if under(e.Name) {
+				changed = true
+				continue
+			}
+			kept = append(kept, e)
+		}
+		st.Edits = kept
 		return changed
 	})
 }
