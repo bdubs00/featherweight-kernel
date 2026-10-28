@@ -1,6 +1,7 @@
 package builtin
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
+	"github.com/bdubs00/featherweight-kernel/memory"
 )
 
 // knowhowAgent builds an agent with the memory tool and the recall tool
@@ -105,5 +107,56 @@ func TestMemoryUsed(t *testing.T) {
 	}
 	if used[2].How != fw.MemoryUsedRecall || used[2].Refs[0] != (fw.MemoryUsedRef{Ref: "mem://agent/default/other.md", Hash: sha("Another note\n")}) {
 		t.Fatalf("recall = %+v", used[2])
+	}
+}
+
+// callAs calls a tool as the call callID of a run, without the counter of
+// call, so two calls can share an id as a repeat after a restart does.
+func callAs(t *testing.T, tool fw.Tool, callID, input string) fw.ToolResult {
+	t.Helper()
+	ctx := fw.WithRunInfo(context.Background(), fw.RunInfo{RunID: "r1", Agent: "default", CallID: callID})
+	res, err := tool.Call(ctx, json.RawMessage(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// TestMemoryEditOnce checks that a repeated insert or str_replace with the
+// same call id returns the first result and leaves the note as the first
+// call did, that a repeat after another write fails, and that another call
+// id edits again.
+func TestMemoryEditOnce(t *testing.T) {
+	home := t.TempDir()
+	m := newMemoryTool(t, home, "agent")
+	note := filepath.Join(home, "memory", "agents", "default", "n.md")
+	mustOK(t, callAs(t, m, "c0", `{"command":"create","path":"/memories/n.md","file_text":"one\n"}`))
+
+	ins := `{"command":"insert","path":"/memories/n.md","insert_line":1,"insert_text":"two"}`
+	first := mustOK(t, callAs(t, m, "c1", ins))
+	if again := mustOK(t, callAs(t, m, "c1", ins)); again != first {
+		t.Fatalf("repeat = %q, first = %q", again, first)
+	}
+	if got := readFile(t, note); got != "one\ntwo\n" {
+		t.Fatalf("note after the repeat = %q", got)
+	}
+
+	rep := `{"command":"str_replace","path":"/memories/n.md","old_str":"two","new_str":"two two"}`
+	first = mustOK(t, callAs(t, m, "c2", rep))
+	if again := mustOK(t, callAs(t, m, "c2", rep)); again != first || readFile(t, note) != "one\ntwo two\n" {
+		t.Fatalf("repeat = %q, note = %q", again, readFile(t, note))
+	}
+
+	// Another write came after the first call: the repeat fails.
+	mustOK(t, callAs(t, m, "c3", `{"command":"create","path":"/memories/n.md","file_text":"changed\n"}`))
+	mustFail(t, callAs(t, m, "c2", rep), memory.ConflictText)
+	if got := readFile(t, note); got != "changed\n" {
+		t.Fatalf("a failed repeat changed the note: %q", got)
+	}
+
+	// Another call edits again.
+	mustOK(t, callAs(t, m, "c4", `{"command":"insert","path":"/memories/n.md","insert_line":0,"insert_text":"top"}`))
+	if got := readFile(t, note); got != "top\nchanged\n" {
+		t.Fatalf("note = %q", got)
 	}
 }

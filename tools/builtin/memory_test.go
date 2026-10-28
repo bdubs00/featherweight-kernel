@@ -395,8 +395,8 @@ func TestMemoryEditsLoseNoWrite(t *testing.T) {
 	}
 }
 
-// TestMemoryIdempotentCall checks which commands of the memory tool are
-// safe to run again after a restart.
+// TestMemoryIdempotentCall checks that every call of the memory tool is
+// safe to run again after a restart (docs/KNOWHOW.md section 4.3).
 func TestMemoryIdempotentCall(t *testing.T) {
 	cfg := fw.DefaultConfig()
 	cfg.Home = t.TempDir()
@@ -408,21 +408,18 @@ func TestMemoryIdempotentCall(t *testing.T) {
 	if !ok {
 		t.Fatal("the memory tool does not implement fw.CallIdempotency")
 	}
-	for input, want := range map[string]bool{
-		`{"command":"view","path":"/memories"}`:                                          true,
-		`{"command":"create","path":"/memories/a.md","file_text":"x"}`:                   true,
-		`{"command":"delete","path":"/memories/a.md"}`:                                   true,
-		`{"command":"rename","old_path":"/memories/a.md","new_path":"/memories/b.md"}`:   true,
-		`{"command":"insert","path":"/memories/a.md","insert_line":0,"insert_text":"x"}`: false,
-		`{"command":"str_replace","path":"/memories/a.md","old_str":"x","new_str":"y"}`:  false,
-		`{"command":"unknown"}`: false,
-		`not json`:              false,
+	for _, input := range []string{
+		`{"command":"view","path":"/memories"}`,
+		`{"command":"create","path":"/memories/a.md","file_text":"x"}`,
+		`{"command":"delete","path":"/memories/a.md"}`,
+		`{"command":"rename","old_path":"/memories/a.md","new_path":"/memories/b.md"}`,
+		`{"command":"insert","path":"/memories/a.md","insert_line":0,"insert_text":"x"}`,
+		`{"command":"str_replace","path":"/memories/a.md","old_str":"x","new_str":"y"}`,
+		`{"command":"unknown"}`,
+		`not json`,
 	} {
-		if got := c.IdempotentCall(json.RawMessage(input)); got != want {
-			t.Errorf("IdempotentCall(%s) = %v, want %v", input, got, want)
+		if !c.IdempotentCall(json.RawMessage(input)) {
+			t.Errorf("IdempotentCall(%s) = false", input)
 		}
-	}
-	if m.Spec().Idempotent {
-		t.Error("the spec marks every call of the memory tool safe")
 	}
 }

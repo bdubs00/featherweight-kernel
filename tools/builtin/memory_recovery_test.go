@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,127 +62,94 @@ func closeMemoryRecoveryAgent(a *fw.Agent) {
 	a.Close(ctx)
 }
 
+// TestMemoryFileLedgerRecovery checks that an insert or a str_replace that
+// a restart cut after its write and before its result runs again at once,
+// without an approval, and returns the result of the first run without a
+// second edit: the tool recorded the call before it wrote
+// (docs/KNOWHOW.md section 4.3).
 func TestMemoryFileLedgerRecovery(t *testing.T) {
 	for _, command := range []struct {
-		name, input, once, twice string
+		name, input, once string
 	}{
 		{
 			name:  "insert",
 			input: `{"command":"insert","path":"/memories/note.txt","insert_line":0,"insert_text":"inserted"}`,
 			once:  "inserted\noriginal\n",
-			twice: "inserted\ninserted\noriginal\n",
 		},
 		{
-			// The old text still appears exactly once after the first edit.
-			// A second successful replacement therefore changes the file again.
+			// The old text still appears exactly once after the first edit,
+			// so a second replacement would change the file again.
 			name:  "str_replace retaining original",
 			input: `{"command":"str_replace","path":"/memories/note.txt","old_str":"original","new_str":"original expanded"}`,
 			once:  "original expanded\n",
-			twice: "original expanded expanded\n",
 		},
 	} {
-		for _, decision := range []string{"deny", "allow"} {
-			t.Run(command.name+"/"+decision, func(t *testing.T) {
-				ctx := restartCtx(t)
-				root := t.TempDir()
-				cfg := fw.DefaultConfig()
-				cfg.Home = filepath.Join(root, "home")
-				cfg.Tools.Files.Root = root
-				cfg.Model = "fake/test"
-				dir := filepath.Join(cfg.Home, "memory", "agents", "default")
-				note := filepath.Join(dir, "note.txt")
-				writeNote(t, dir, "note.txt", "original\n", 0)
-				ledgerRoot := filepath.Join(root, "runs")
-				original := openRunsAt(t, ledgerRoot)
-				cut := &memoryResultCutLedger{Ledger: original, hit: make(chan struct{})}
-				first := newRestartScript(&fw.Response{
-					StopReason: fw.StopToolUse,
-					Content:    []fw.Block{toolUseOf("memory-1", "memory", command.input)},
-				})
-				a := memoryRecoveryAgent(t, cfg, cut, first.Model())
-				r, err := a.Start(ctx, "edit my note")
-				if err != nil {
-					t.Fatal(err)
-				}
-				select {
-				case <-cut.hit:
-				case <-ctx.Done():
-					t.Fatal("memory call never reached its unrecorded result")
-				}
-				closeMemoryRecoveryAgent(a)
-				if got := readFile(t, note); got != command.once {
-					t.Fatalf("file after interrupted call = %q, want %q", got, command.once)
-				}
-				events := ledgerOf(t, a, r.ID)
-				if countOfType(events, fw.EvToolRequested) != 1 || countOfType(events, fw.EvToolResponded) != 0 {
-					t.Fatalf("interrupted call did not leave one request without a result: %+v", events)
-				}
-				for _, e := range events {
-					if e.Type == fw.EvToolRequested {
-						var data fw.ToolRequestedData
-						if err := e.Decode(&data); err != nil {
-							t.Fatal(err)
-						}
-						if data.Idempotent {
-							t.Fatal("memory request was recorded as safe to repeat")
-						}
-					}
-				}
-
-				// Reopen the file ledger with a fresh agent and a fresh memory tool.
-				// The wrapper exposes only Ledger, so close its file owner here.
-				if err := original.Close(); err != nil {
-					t.Fatal(err)
-				}
-				second := newRestartScript(endTurnOf("done"))
-				b := memoryRecoveryAgent(t, cfg, openRunsAt(t, ledgerRoot), second.Model())
-				r, err = b.Wait(ctx, r.ID)
-				if err != nil || r.State != fw.StateInputRequired || r.Pending == nil {
-					t.Fatalf("recovery = %+v, err = %v; want recovery approval", r, err)
-				}
-				if r.Pending.Tool != "memory" || r.Pending.CallID != "memory-1" || r.Pending.Reason != "rerun after resume" || string(r.Pending.Input) != command.input {
-					t.Fatalf("recovery approval = %+v", r.Pending)
-				}
-				if got := readFile(t, note); got != command.once {
-					t.Fatalf("resume silently repeated the edit: %q", got)
-				}
-				if len(second.requests()) != 0 {
-					t.Fatal("model called before the recovery decision")
-				}
-				if err := b.Decide(ctx, r.ID, fw.ApprovalDecision{ApprovalID: r.Pending.ID, Decision: decision}); err != nil {
-					t.Fatal(err)
-				}
-				r, err = b.WaitFor(ctx, r.ID, func(r *fw.Run) bool { return r.State.Terminal() })
-				if err != nil || r.State != fw.StateCompleted {
-					t.Fatalf("decided recovery = %+v, err = %v", r, err)
-				}
-				want := command.once
-				if decision == "allow" {
-					// Approval authorizes a real rerun, not exactly-once recovery.
-					want = command.twice
-				}
-				if got := readFile(t, note); got != want {
-					t.Fatalf("file after %s = %q, want %q", decision, got, want)
-				}
-				events = ledgerOf(t, b, r.ID)
-				for _, typ := range []string{fw.EvApprovalRequested, fw.EvApprovalDecided, fw.EvToolResponded} {
-					if n := countOfType(events, typ); n != 1 {
-						t.Fatalf("%s count = %d, want 1", typ, n)
-					}
-				}
-				for _, e := range events {
-					if e.Type == fw.EvToolResponded {
-						var data fw.ToolRespondedData
-						if err := e.Decode(&data); err != nil {
-							t.Fatal(err)
-						}
-						if data.IsError != (decision == "deny") {
-							t.Fatalf("recovery result after %s = %+v", decision, data)
-						}
-					}
-				}
+		t.Run(command.name, func(t *testing.T) {
+			ctx := restartCtx(t)
+			root := t.TempDir()
+			cfg := fw.DefaultConfig()
+			cfg.Home = filepath.Join(root, "home")
+			cfg.Tools.Files.Root = root
+			cfg.Model = "fake/test"
+			dir := filepath.Join(cfg.Home, "memory", "agents", "default")
+			note := filepath.Join(dir, "note.txt")
+			writeNote(t, dir, "note.txt", "original\n", 0)
+			ledgerRoot := filepath.Join(root, "runs")
+			original := openRunsAt(t, ledgerRoot)
+			cut := &memoryResultCutLedger{Ledger: original, hit: make(chan struct{})}
+			first := newRestartScript(&fw.Response{
+				StopReason: fw.StopToolUse,
+				Content:    []fw.Block{toolUseOf("memory-1", "memory", command.input)},
 			})
-		}
+			a := memoryRecoveryAgent(t, cfg, cut, first.Model())
+			r, err := a.Start(ctx, "edit my note")
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-cut.hit:
+			case <-ctx.Done():
+				t.Fatal("memory call never reached its unrecorded result")
+			}
+			closeMemoryRecoveryAgent(a)
+			if got := readFile(t, note); got != command.once {
+				t.Fatalf("file after interrupted call = %q, want %q", got, command.once)
+			}
+			events := ledgerOf(t, a, r.ID)
+			if countOfType(events, fw.EvToolRequested) != 1 || countOfType(events, fw.EvToolResponded) != 0 {
+				t.Fatalf("interrupted call did not leave one request without a result: %+v", events)
+			}
+
+			// Reopen the file ledger with a fresh agent and a fresh memory tool.
+			// The wrapper exposes only Ledger, so close its file owner here.
+			if err := original.Close(); err != nil {
+				t.Fatal(err)
+			}
+			second := newRestartScript(endTurnOf("done"))
+			b := memoryRecoveryAgent(t, cfg, openRunsAt(t, ledgerRoot), second.Model())
+			r, err = b.WaitFor(ctx, r.ID, func(r *fw.Run) bool { return r.State.Terminal() })
+			if err != nil || r.State != fw.StateCompleted {
+				t.Fatalf("recovery = %+v, err = %v; want a run that goes on by itself", r, err)
+			}
+			if got := readFile(t, note); got != command.once {
+				t.Fatalf("the repeat edited the note again: %q", got)
+			}
+			events = ledgerOf(t, b, r.ID)
+			if n := countOfType(events, fw.EvApprovalRequested); n != 0 {
+				t.Fatalf("the repeat asked for %d approvals", n)
+			}
+			var res fw.ToolRespondedData
+			for _, e := range events {
+				if e.Type == fw.EvToolResponded {
+					if err := e.Decode(&res); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if res.IsError || !strings.Contains(fw.TextOf(res.Content), "has been edited") {
+				t.Fatalf("the result of the repeat = %+v", res)
+			}
+		})
 	}
 }
 
