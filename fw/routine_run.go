@@ -749,9 +749,9 @@ func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, outp
 // So a routine without questions gains agreement too. A run that the
 // routine would hand to the agent, because a find finds no value, gets no
 // comparison of the calls. A run compares once, and a branch never
-// compares the decisions that it kept from its source. q is the start of
-// the run, and output is its output text.
-func routineComparisons(routines []Routine, r routineCursor, q RunQueuedData, events []Event, output string) []RoutineComparedData {
+// compares the decisions that it kept from its source. start is the start
+// of the run, and output is its output text.
+func routineComparisons(routines []Routine, r routineCursor, start RunQueuedData, events []Event, output string) []RoutineComparedData {
 	if r.compared {
 		return nil
 	}
@@ -791,7 +791,7 @@ func routineComparisons(routines []Routine, r routineCursor, q RunQueuedData, ev
 		if !read {
 			calls, read = ModelCalls(events), true
 		}
-		data := RoutineData(q.Input, q.Metadata)
+		data := RoutineData(start.Input, start.Metadata)
 		for k, v := range said {
 			data[k] = v
 		}
