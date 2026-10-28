@@ -15,11 +15,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
@@ -225,10 +227,19 @@ func (f *front) do(ctx context.Context, method, path string, q url.Values, body,
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
+		// The error of the transport names the address of the front, so the
+		// kernel gives a fixed sentence instead: the model and the callers
+		// of the API read it.
+		var dns *net.DNSError
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
 			return 0, errors.New("the front did not answer in time")
+		case errors.Is(err, syscall.ECONNREFUSED):
+			return 0, errors.New("the front did not answer: it refused the connection")
+		case errors.As(err, &dns):
+			return 0, errors.New("the front did not answer: its name does not resolve")
 		}
-		return 0, fmt.Errorf("the front did not answer: %w", err)
+		return 0, errors.New("the front did not answer")
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFrontBody))
@@ -384,7 +395,10 @@ func linksOf(sources []frontSource) []fw.MemoryLink {
 }
 
 // byOf returns who makes a change: "agent" for a call of a run, and
-// "person:<subject>" for a person through the native API. The kernel
+// "person:<subject>" for a person through the native API. A process that
+// acts for itself, such as a caller with the static token or a workload,
+// is no person, so its change counts as "agent": the front then lets the
+// change go out of date and rest like any note of the agent. The kernel
 // builds it from ctx, never from the input of a call, so a model cannot
 // set it.
 func byOf(ctx context.Context) (by, run string) {
@@ -394,6 +408,9 @@ func byOf(ctx context.Context) (by, run string) {
 	subject := fw.ActingFor(ctx)
 	if subject == "" {
 		if p := fw.PrincipalFrom(ctx); p != nil {
+			if p.Kind == fw.KindToken || p.Kind == fw.KindWorkload {
+				return "agent", ""
+			}
 			subject = p.Subject
 		}
 	}

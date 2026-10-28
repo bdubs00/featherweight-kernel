@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 
@@ -328,7 +329,7 @@ func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint strin
 		size += len(line) + 1
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Notes: %d kept, %.1f of %d KB shown.", len(notes), float64(size)/1024, IndexMaxBytes>>10)
+	fmt.Fprintf(&sb, "Notes: %d kept, %.1f of %d KB shown.", len(notes), shownKB(size), IndexMaxBytes>>10)
 	if !pulled.Answered {
 		sb.WriteString("\n" + NoAnswerNote)
 	}
@@ -366,4 +367,15 @@ func leftOutLine(outOfDate, resting int) string {
 		return ""
 	}
 	return strings.Join(parts, ", and ") + ". View " + Prefix + " to read them."
+}
+
+// shownKB is the size of the shown lines in KB, with one decimal. Any shown
+// line counts as at least 0.1 KB, so the block never says 0.0 while it
+// lists a note.
+func shownKB(size int) float64 {
+	kb := math.Ceil(float64(size)/102.4) / 10
+	if size == 0 {
+		return 0
+	}
+	return kb
 }
