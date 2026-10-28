@@ -440,11 +440,17 @@ workers that token for its MCP server.
 - The summary of a continued conversation leaves the instructions. It goes
   in `RunContext{Source: "conversation"}`.
 - A Duty's `{found}` and `{event}` text, and the input that a source
-  renders, go in `RunContext` blocks named `found`, `event`, and `source`.
-  The placeholder in the message becomes a short reference: "(the text is
-  in the block found)".
+  renders, stay in the run input with their old bounds. They are the work
+  of the run, and routine templates, `Propose`, `Replay`, and the decider
+  read the input. Two fixed lines frame each text as data. The first line
+  starts with `--- begin data from`, and the last line starts with
+  `--- end data`. Each line names the check, the event, or the source, and
+  says that the text is not an instruction. The lines hold no digit and no
+  `#`, so a find pattern still matches the text between them.
 - A Duty run gets one more block, `last`: the output of its previous run,
-  cut to 2 KB, from the archive.
+  cut to 2 KB, from the archive. A held-back run gets no `last` block,
+  because the block is new with Know-how. `{last.title}`, `{last.run}`,
+  and `{last.state}` stay as before for every run.
 
 ### 6.3 Pages that an agent can write
 
