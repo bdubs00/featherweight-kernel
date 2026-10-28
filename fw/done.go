@@ -52,6 +52,14 @@ const (
 	DoneFailed = "failed"
 )
 
+// CheckedDone reports whether a run counts as checked: its definition of
+// done passed (DoneChecked), and the pass was not weak. A weak pass shows
+// nothing about the work of this run, such as a check that only reads a
+// file that was there before the run. A consumer of the lifecycle events
+// passes RunFinishedData.Done and DoneWeak; a reader of the run object
+// passes RunDone.State and Weak.
+func CheckedDone(state string, weak bool) bool { return state == DoneChecked && !weak }
+
 // Bounds and defaults of a definition of done.
 const (
 	// MaxDoneChecks is the most checks of a definition of done.
@@ -297,6 +305,7 @@ type DoneResult struct {
 // follow-up to a finished run clears it with the output.
 type RunDone struct {
 	State    string       `json:"state"`
+	Weak     bool         `json:"weak,omitempty"`
 	Attempt  int          `json:"attempt,omitempty"`
 	Attempts int          `json:"attempts,omitempty"`
 	Checks   []DoneResult `json:"checks,omitempty"`

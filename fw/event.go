@@ -660,6 +660,10 @@ type RunFinishedData struct {
 	// So a consumer of the lifecycle events tells a checked result from a
 	// run whose model stopped.
 	Done string `json:"done,omitempty"`
+	// DoneWeak is true with Done DoneChecked when the pass shows nothing
+	// about the work of the run (see CheckedDone). Such a run stops as
+	// RunStopAnswered, not RunStopChecked.
+	DoneWeak bool `json:"doneWeak,omitempty"`
 	// Stop says why the run stopped, in one word that a flow view counts:
 	// RunStopAnswered, RunStopChecked, RunStopNotDone, RunStopBudget of a
 	// limit, RunStopLoop, RunStopRefusal, RunStopMaxTokens,
