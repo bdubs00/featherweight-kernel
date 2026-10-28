@@ -150,6 +150,7 @@ func (t *memoryTool) IdempotentCall(json.RawMessage) bool { return true }
 // write are one step, and a concurrent write through the native API or of
 // another run is never lost.
 func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResult, error) {
+	t.store.GuardToken(fw.AgentFrom(ctx))
 	scope := t.store.Scope(fw.RunInfoFrom(ctx))
 	if cmd := memoryCommand(input); cmd == "view" || !slices.Contains(memoryCommands, cmd) {
 		files, err := t.store.Notes(ctx, scope)
@@ -291,6 +292,7 @@ func (t *memoryTool) Brief(_ context.Context, run fw.RunInfo) (string, error) {
 // message as data, and records the notes that it lists as fw.memory.used.
 // No note gives no text.
 func (t *memoryTool) BriefContext(ctx context.Context, run fw.RunInfo) (string, error) {
+	t.store.GuardToken(fw.AgentFrom(ctx))
 	b, err := t.store.Brief(ctx, t.store.Scope(run), memory.BriefHint)
 	if err != nil {
 		return "", fmt.Errorf("builtin: %w", err)

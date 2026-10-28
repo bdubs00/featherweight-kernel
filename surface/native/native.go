@@ -75,6 +75,7 @@ func newSurface(keepAlive time.Duration, exts []Extension, opts ...func(*server)
 	return fw.SurfaceFunc(func(mux *http.ServeMux, a *fw.Agent) error {
 		s := &server{a: a, keepAlive: keepAlive}
 		s.mem, s.memErr = memory.New(a.Config())
+		s.mem.GuardToken(a)
 		for _, o := range opts {
 			o(s)
 		}

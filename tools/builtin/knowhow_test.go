@@ -239,3 +239,23 @@ func TestMemoryToolConflict(t *testing.T) {
 	mustOK(t, callAs(t, m, "c3", `{"command":"create","path":"/memories/d/x.md","file_text":"x\n"}`))
 	mustFail(t, callAs(t, m, "c4", `{"command":"delete","path":"/memories/d"}`), "one note at a time")
 }
+
+// TestFrontTokenRedacted checks that the token of the front is a secret of
+// the agent even when the name of its variable does not say so.
+func TestFrontTokenRedacted(t *testing.T) {
+	ctx := restartCtx(t)
+	f := fronttest.New("plain-named-front-value-1234")
+	t.Cleanup(f.Close)
+	cfg := frontConfig(t, f)
+	t.Setenv("FW_TEST_FRONT_TOKEN", "")
+	t.Setenv("FW_FRONT_ACCESS_VALUE", f.Token)
+	cfg.Tools.Memory.Front.TokenEnv = "FW_FRONT_ACCESS_VALUE"
+	s := newRestartScript(endTurnOf("done"))
+	a := knowhowAgent(t, cfg, s.Model())
+	if r, err := a.Run(ctx, "work"); err != nil || r.State != fw.StateCompleted {
+		t.Fatalf("run = %+v, %v", r, err)
+	}
+	if got := a.Redact("token " + f.Token); strings.Contains(got, f.Token) {
+		t.Fatalf("Redact = %q", got)
+	}
+}

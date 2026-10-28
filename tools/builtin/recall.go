@@ -95,6 +95,7 @@ func (t *recallTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 	if err := ctx.Err(); err != nil {
 		return canceled(ctx, "recall")
 	}
+	t.store.GuardToken(fw.AgentFrom(ctx))
 	info := fw.RunInfoFrom(ctx)
 	scope := t.store.Scope(info)
 	ctx = fw.WithRunPrincipal(ctx, info)

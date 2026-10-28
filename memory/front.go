@@ -86,6 +86,19 @@ func newFront(cfg *fw.MemoryFrontConfig) (*front, error) {
 	return &front{base: u, tokenEnv: strings.TrimSpace(cfg.TokenEnv), client: &http.Client{}}, nil
 }
 
+// GuardToken makes the agent replace the static token of the front in
+// every later ledger event and in Redact, whatever the name of the
+// variable that holds it. Each holder of a Store calls it once it has the
+// agent. Without a front it does nothing.
+func (s *Store) GuardToken(a *fw.Agent) {
+	if s == nil || s.front == nil || a == nil {
+		return
+	}
+	if tok := os.Getenv(s.front.tokenEnv); tok != "" {
+		a.AddSecret(tok)
+	}
+}
+
 // frontScope reports whether the front keeps the notes of a scope: the
 // scopes agent and principal. The shared scope of a process stays in the
 // files of the process.

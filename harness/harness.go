@@ -173,6 +173,7 @@ func newHost(a *fw.Agent, c Config) (*host, error) {
 			h.log.Warn("harness: the harness gets no memory", "error", err)
 		} else {
 			h.mem, h.memHTTP = store, newMemHandler()
+			store.GuardToken(a)
 		}
 	}
 	a.Observe(fw.ObserverFunc(h.observe))
