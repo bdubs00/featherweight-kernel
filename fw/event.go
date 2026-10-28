@@ -176,6 +176,9 @@ type RunQueuedData struct {
 	// Check is the check of a check run, with its defaults (Check.Resolved),
 	// or nil for a run that calls a model.
 	Check *Check `json:"check,omitempty"`
+	// Context is RunRequest.Context: the data blocks of the caller, which
+	// fw.run.started puts after the blocks of the tools.
+	Context []RunContext `json:"context,omitempty"`
 }
 
 // ResolvedProfile is the configuration of a run that the kernel resolves
@@ -239,11 +242,15 @@ type RunStartedData struct {
 	Tools []string `json:"tools"`
 	Brief string   `json:"brief,omitempty"` // the sections that tools add to the system prompt (see Briefer)
 	// Context is the data that tools add to the first user message (see
-	// ContextBriefer). It is never part of the system prompt.
+	// ContextBriefer), followed by the data blocks of the caller
+	// (RunRequest.Context). It is never part of the system prompt.
 	Context string `json:"context,omitempty"`
 	// TimeZone is the zone of the run for its life: the clock tool and the
 	// time notes read and write times in it (see LoadZone).
 	TimeZone string `json:"timeZone,omitempty"`
+	// Knowhow is KnowhowOff for a run that is held back from Know-how
+	// (HeldBack), and empty for every other run.
+	Knowhow string `json:"knowhow,omitempty"`
 }
 
 // MessageReceivedData is the payload of fw.message.received.

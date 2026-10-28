@@ -258,18 +258,23 @@ func memRights(tool string, notes, recall bool) string {
 
 // systemText returns the added system text of the harness: the
 // instructions of the run, then, for a run with the memory tool, the
-// memory section of the system prompt, the names of the tools of the
-// memory server when the harness has the server, and the sentence that
-// says that a context block holds data, and last, from the first message
-// from another agent on, the sentence that says what the block of such a
+// memory section of the system prompt and the names of the tools of the
+// memory server when the harness has the server, then, for a run with the
+// memory tool or with data blocks of its caller, the sentence that says
+// that a context block holds data, and last, from the first message from
+// another agent on, the sentence that says what the block of such a
 // message is. It never holds a note.
 func (r *run) systemText(server bool) string {
-	parts := []string{strings.TrimSpace(r.hr.Queued().Instructions)}
-	if notes, _ := r.h.memoryTools(r.hr.Queued()); notes {
+	q := r.hr.Queued()
+	parts := []string{strings.TrimSpace(q.Instructions)}
+	notes, _ := r.h.memoryTools(q)
+	if notes {
 		parts = append(parts, memory.SystemSection)
 		if server {
 			parts = append(parts, memToolsNote)
 		}
+	}
+	if notes || fw.RunContextText(q.Context) != "" {
 		parts = append(parts, fw.ContextNote)
 	}
 	if r.st != nil && r.st.fromAgent {
@@ -312,21 +317,30 @@ func (r *run) memoryBlock(ctx context.Context, server bool) string {
 	return fw.ContextBlock("memory", text)
 }
 
-// brief puts the index of the notes before the text of the first prompt
-// with text of the session, as data, and records fw.brief before the
-// prompt goes out, so a stop, a resume, or a cold boot never sends the
-// index again, while the text of a prompt that did not go out goes out
-// again. It returns the text and whether it starts with the index. A later
-// prompt, and a run without the memory tool, gets the text as it is.
-// server tells that the harness has the memory server.
+// brief puts the index of the notes, and after it the data blocks of the
+// caller of the run (fw.RunRequest.Context), before the text of the first
+// prompt with text of the session, as data, and records fw.brief before
+// the prompt goes out, so a stop, a resume, or a cold boot never sends the
+// blocks again, while the text of a prompt that did not go out goes out
+// again. It returns the text and whether it starts with a block. A later
+// prompt, and a run without the memory tool and without blocks of its
+// caller, gets the text as it is. server tells that the harness has the
+// memory server.
 func (r *run) brief(ctx context.Context, st *state, text string, server bool) (string, bool, error) {
 	if st.briefed {
 		return text, false, nil
 	}
-	if notes, _ := r.h.memoryTools(r.hr.Queued()); !notes {
+	q := r.hr.Queued()
+	caller := fw.RunContextText(q.Context)
+	notes, _ := r.h.memoryTools(q)
+	if !notes && caller == "" {
 		return text, false, nil
 	}
-	block := r.memoryBlock(ctx, server)
+	block := ""
+	if notes {
+		block = r.memoryBlock(ctx, server)
+	}
+	block = joinText(block, caller)
 	if err := r.mark(ctx, EventData{Kind: KindBrief, Context: block != ""}); err != nil {
 		return "", false, err
 	}

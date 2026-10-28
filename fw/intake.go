@@ -644,6 +644,7 @@ func requestOf(q RunQueuedData) RunRequest {
 		IdempotencyKey: key,
 		Files:          q.Files,
 		Check:          q.Check,
+		Context:        q.Context,
 	}
 }
 

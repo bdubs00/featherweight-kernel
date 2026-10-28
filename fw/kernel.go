@@ -538,6 +538,12 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 	if len(req.Instructions) > maxInstructionBytes {
 		return nil, fmt.Errorf("%w: the instructions are longer than %d bytes", ErrInvalidRequest, maxInstructionBytes)
 	}
+	if err := CheckRunContext(req.Context); err != nil {
+		return nil, err
+	}
+	if req.Check != nil && len(req.Context) > 0 {
+		return nil, fmt.Errorf("%w: a check run calls no model, so it takes no field context", ErrInvalidRequest)
+	}
 	var parent *runState
 	var parentRun *Run
 	depth := 0
@@ -637,6 +643,7 @@ func (a *Agent) startJob(ctx context.Context, req RunRequest, t *admission) (*Ru
 		FilesRoot:     req.FilesRoot,
 		Outcome:       outcome,
 		Check:         req.Check,
+		Context:       slices.Clone(req.Context),
 	}
 	text := a.pinText(named, &queued)
 	ev, err := NewEvent(req.ID, EvRunQueued, queued)
@@ -1934,6 +1941,9 @@ func WithRequest(req RunRequest) RunOption {
 			c := *req.Check
 			c.Steps = slices.Clone(c.Steps)
 			r.Check = &c
+		}
+		if len(req.Context) > 0 {
+			r.Context = append(r.Context, req.Context...)
 		}
 	}
 }
