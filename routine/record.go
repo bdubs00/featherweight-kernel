@@ -72,7 +72,9 @@ func readRun(events []fw.Event) record {
 			}
 			if i, ok := byID[d.CallID]; ok {
 				c := &rec.calls[i]
-				c.result, c.isError, c.responded = fw.TextOf(d.Content), d.IsError, true
+				// A command that failed counts as a failed call, as in the runner.
+				failed := d.ExitCode != nil && *d.ExitCode != 0
+				c.result, c.isError, c.responded = fw.TextOf(d.Content), d.IsError || failed, true
 			}
 		case fw.EvRunFinished:
 			var d fw.RunFinishedData

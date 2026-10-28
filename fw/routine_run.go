@@ -54,7 +54,12 @@ type routineCursor struct {
 	calls   []routineCall
 }
 
+// failedExit reports whether a tool reported the exit code of a command
+// that failed: set and not zero.
+func failedExit(code *int) bool { return code != nil && *code != 0 }
+
 // routineCall is one call of the routine that ran, for the context block.
+// isError is true for an error result and for a command that failed.
 type routineCall struct {
 	id, tool  string
 	result    string
@@ -124,7 +129,7 @@ func (c *cursor) applyRoutine(e Event) {
 			return
 		}
 		r.calls = slices.Clone(r.calls)
-		r.calls[i].result, r.calls[i].isError, r.calls[i].responded = TextOf(res.Content), res.IsError, true
+		r.calls[i].result, r.calls[i].isError, r.calls[i].responded = TextOf(res.Content), res.IsError || failedExit(res.ExitCode), true
 	case EvRoutineApplied:
 		var d RoutineAppliedData
 		if e.Decode(&d) != nil || d.Routine != r.live {
@@ -501,6 +506,10 @@ func (rr *routineRun) apply(ctx context.Context, r Routine, q RunQueuedData, sai
 			return "", label + ": " + why, nil
 		case res.IsError:
 			return "", label + ": error: " + ClipText(TextOf(res.Content), 200, "the result"), nil
+		case failedExit(res.ExitCode):
+			// A command that failed is a failed step or check, although
+			// the tool reports it as a normal result for the model.
+			return "", fmt.Sprintf("%s: exit code %d: %s", label, *res.ExitCode, ClipText(TextOf(res.Content), 200, "the result")), nil
 		}
 		return TextOf(res.Content), "", nil
 	}

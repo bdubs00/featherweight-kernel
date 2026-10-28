@@ -792,3 +792,48 @@ func TestRoutineReachesMaxToolCalls(t *testing.T) {
 		t.Fatalf("applied = %+v, writes %v", app, h.writes)
 	}
 }
+
+// A step or a check whose command fails with a non-zero exit code fails
+// the routine, although the tool reports the code as a normal result, and
+// the model takes the run over.
+func TestRoutineFailedCommand(t *testing.T) {
+	cmd := func(name string, code int) Tool {
+		return NewTool(ToolSpec{Name: name, ReadOnly: true, Idempotent: true}, func(context.Context, json.RawMessage) (ToolResult, error) {
+			return ToolResult{Content: []Block{Text(fmt.Sprintf("exit code %d", code))}, ExitCode: &code}, nil
+		})
+	}
+	zero := 0.0
+	for _, c := range []struct {
+		name   string
+		r      Routine
+		failed int
+		reason string
+	}{
+		{name: "step", failed: 1, reason: "step 1 build: exit code 2: exit code 2",
+			r: Routine{Name: "ship", Version: 1, Standing: RoutineLive, Canary: &zero,
+				Steps: []RoutineStep{{Tool: "build", Input: "{}"}}, After: []RoutineCheck{{Tool: "ok", Input: "{}"}}, Answer: "shipped"}},
+		{name: "check", failed: 2, reason: "check 1 verify: exit code 1: exit code 1",
+			r: Routine{Name: "ship", Version: 1, Standing: RoutineLive, Canary: &zero,
+				Steps: []RoutineStep{{Tool: "ok", Input: "{}"}}, After: []RoutineCheck{{Tool: "verify", Input: "{}"}}, Answer: "shipped"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := testCtx(t)
+			s := newScript(endTurn("the model shipped it"))
+			a := newTestAgent(t, s.Model(), WithTools(cmd("build", 2), cmd("verify", 1), cmd("ok", 0)),
+				WithProfile(AgentProfile{Name: "release", Routines: []Routine{c.r}}))
+			r, err := a.Run(ctx, "Ship it.", AsAgent("release"))
+			mustState(t, r, err, StateCompleted)
+			if r.Output != "the model shipped it" || len(s.requests()) != 1 {
+				t.Fatalf("output %q, model calls %d", r.Output, len(s.requests()))
+			}
+			apps := decodeAll[RoutineAppliedData](t, ledgerEvents(t, a.Ledger(), r.ID), EvRoutineApplied)
+			if len(apps) != 1 || apps[0].OK || apps[0].FailedStep != c.failed || apps[0].Reason != c.reason {
+				t.Fatalf("applied = %+v", apps)
+			}
+			// The model reads the failed call as an error.
+			if first := firstMessage(s.requests()[0]); !strings.Contains(first, "error: exit code") {
+				t.Errorf("first message =\n%s", first)
+			}
+		})
+	}
+}

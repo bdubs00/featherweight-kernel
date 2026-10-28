@@ -116,3 +116,25 @@ func TestReplayHandedExtraAndCompare(t *testing.T) {
 		t.Fatalf("empty find = %+v", res.Handed)
 	}
 }
+
+// A recorded command that failed with a non-zero exit code is a failed
+// call of the agent, as the runner counts it.
+func TestReplayFailedCommand(t *testing.T) {
+	id := "run-1"
+	code := 1
+	evs := []fw.Event{
+		fw.MustEvent(id, fw.EvRunQueued, fw.RunQueuedData{Agent: "release", Input: "Ship it."}),
+		fw.MustEvent(id, fw.EvToolRequested, fw.ToolRequestedData{Tool: "bash", CallID: "c1", Input: []byte(`{"command":"test -f notes.txt"}`)}),
+		fw.MustEvent(id, fw.EvToolResponded, fw.ToolRespondedData{CallID: "c1", Tool: "bash", Content: []fw.Block{fw.Text("exit code 1")}, ExitCode: &code}),
+		fw.MustEvent(id, fw.EvRunFinished, fw.RunFinishedData{Outcome: fw.OutcomeCompleted, Output: "shipped"}),
+	}
+	for i := range evs {
+		evs[i].Seq = uint64(i + 1)
+	}
+	r := fw.Routine{Name: "ship", Version: 1, Standing: fw.RoutineShadow,
+		Steps: []fw.RoutineStep{{Tool: "bash", Input: `{"command": "test -f notes.txt"}`}}, Answer: "shipped"}
+	res := Replay(context.Background(), r, [][]fw.Event{evs}, ReplayOptions{})
+	if len(res.Diverged) != 1 || res.Diverged[0].Reason != "the call of the agent failed" {
+		t.Fatalf("result = %+v", res)
+	}
+}

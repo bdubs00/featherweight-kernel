@@ -531,7 +531,7 @@ func (a *Agent) oneDone(ctx context.Context, rr *routineRun, tools map[string]To
 	switch {
 	case res.IsError:
 		return "the result is an error:\n" + text, nil
-	case res.ExitCode != nil && *res.ExitCode != 0:
+	case failedExit(res.ExitCode):
 		return fmt.Sprintf("the exit code is %d:\n%s", *res.ExitCode, text), nil
 	}
 	for _, s := range chk.Contains {

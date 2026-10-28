@@ -118,6 +118,10 @@ Semantics:
 - `after` runs after the steps. Each entry calls its tool. Then it checks
   the result text for every rendered `contains` and against every rendered
   `lacks`, as substrings. The check is honest, not clever.
+- A step or a check fails on an error result and on a command that exits
+  with a code other than 0, such as `test -f` on a missing file. `bash`
+  reports such a command as a normal result for the model, so the runner
+  reads the exit code itself.
 - After a routine that completes, `answer` is the output of the run.
 
 ## 3. The kernel
