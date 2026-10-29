@@ -182,7 +182,14 @@ in the files of the process, because the front has no such scope.
   of a name that starts with `.` is never a note (`memory.CheckName`):
   the store, the native API, and the pull refuse such a name, and the
   walks skip it. So no note of the principal can take this path, and the
-  notes of the agent never hide a note of the principal.
+  notes of the agent never hide a note of the principal. The memory tool
+  reads a note there with `view`, and a view of `/memories` lists them
+  after the notes of the run. A `create`, a `str_replace`, an `insert`, a
+  `delete`, or a `rename` that names a path under `/memories/.agent`
+  changes nothing, and the tool answers with an error: "Error: the notes
+  under /memories/.agent belong to this agent, so this run can read them
+  but cannot change them. Keep your own note instead, such as
+  /memories/labels.md."
 - Push: every change through `memory.Store` sends the new text to the
   front. This includes the memory tool, the native API, and the hosted
   `fw-memory` server. The push carries the hash that the copy had as

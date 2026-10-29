@@ -89,10 +89,13 @@ const memoryPrefix = memory.Prefix
 
 // memoryTool is the text editor on the notes of the scope of the run,
 // addressed as /memories. The store of package memory selects the
-// directory, keeps the limits, and records each change.
+// directory, keeps the limits, and records each change. A run of the
+// principal scope also reads the notes of its agent under /memories/.agent
+// (memory.AgentScope), and never changes them.
 type memoryTool struct {
-	store *memory.Store
-	ed    editor // the editor of every call, without its root
+	store   *memory.Store
+	ed      editor // the editor of every call, without its root
+	agentEd editor // the editor of a view of the notes of the agent
 }
 
 var (
@@ -111,6 +114,11 @@ func newMemory(cfg *fw.Config) (fw.Tool, error) {
 		commands: memoryCommands,
 		name:     memoryName,
 		show:     memoryShow,
+	}, agentEd: editor{
+		tool:     "memory",
+		commands: []string{"view"},
+		name:     agentNoteName,
+		show:     agentShow,
 	}}, nil
 }
 
@@ -157,6 +165,9 @@ func (t *memoryTool) IdempotentCall(json.RawMessage) bool { return true }
 func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResult, error) {
 	t.store.GuardToken(fw.AgentFrom(ctx))
 	scope := t.store.Scope(fw.RunInfoFrom(ctx))
+	if res, ok := t.agentCall(ctx, scope, input); ok {
+		return res, nil
+	}
 	var (
 		mu      sync.Mutex
 		changes []fw.MemoryChangedData
@@ -176,6 +187,7 @@ func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 		res, err := t.ed.call(ctx, files, input)
 		if err == nil && !res.IsError && cmd == "view" {
 			t.recordView(ctx, scope, input)
+			res = t.withAgentList(scope, input, res)
 		}
 		return res, err
 	}
@@ -305,6 +317,85 @@ func (t *memoryTool) recordView(ctx context.Context, scope fw.MemoryScope, input
 	fw.RecordMemoryUse(ctx, fw.MemoryUsedData{How: fw.MemoryUsedView, Refs: []fw.MemoryUsedRef{{Ref: rec.Ref, Hash: rec.Hash}}})
 }
 
+// agentListHead is the line of a view of /memories before the notes of
+// the agent, in a run of the principal scope.
+const agentListHead = "The notes of this agent, read-only, up to 2 levels deep in " + memory.AgentPrefix + ":"
+
+// agentCall answers a call that names the notes of the agent under
+// /memories/.agent, in a run of the principal scope (memory.AgentScope):
+// a view reads them, and every command that writes answers that they
+// belong to the agent and that the run can keep its own note instead.
+// The tool answers; it never writes to the scope of the agent. ok is
+// false for a call that names no such path, and for a run of any other
+// scope, which keeps the rules of its scope.
+func (t *memoryTool) agentCall(ctx context.Context, scope fw.MemoryScope, input json.RawMessage) (fw.ToolResult, bool) {
+	if _, ok := memory.AgentScope(scope); !ok {
+		return fw.ToolResult{}, false
+	}
+	var in editInput
+	if decode(input, &in) != nil || !slices.Contains(memoryCommands, in.Command) {
+		return fw.ToolResult{}, false
+	}
+	if in.Command == "rename" {
+		for _, p := range []string{in.OldPath, in.NewPath} {
+			if name, ok := agentPath(p); ok {
+				return fw.ErrorResult(memory.AgentReadOnly(name)), true
+			}
+		}
+		return fw.ToolResult{}, false
+	}
+	name, ok := agentPath(in.Path)
+	switch {
+	case !ok:
+		return fw.ToolResult{}, false
+	case in.Command != "view":
+		return fw.ErrorResult(memory.AgentReadOnly(name)), true
+	}
+	files, agent, _, err := t.store.AgentNotes(scope)
+	if err != nil {
+		return fw.ErrorResult("Error: " + err.Error()), true
+	}
+	res, err := t.agentEd.call(ctx, files, input)
+	if err != nil {
+		return fw.ErrorResult("Error: " + err.Error()), true
+	}
+	if !res.IsError && name != "." {
+		if rec, err := t.store.Get(ctx, scope, memory.NoteRef(agent, name)); err == nil {
+			fw.RecordMemoryUse(ctx, fw.MemoryUsedData{How: fw.MemoryUsedView, Refs: []fw.MemoryUsedRef{{Ref: rec.Ref, Hash: rec.Hash}}})
+		}
+	}
+	return res, true
+}
+
+// withAgentList adds the notes of the agent to a view of /memories in a
+// run of the principal scope, after the notes of the run, when the agent
+// has notes. A view of any other path, and a run of any other scope, keep
+// their result.
+func (t *memoryTool) withAgentList(scope fw.MemoryScope, input json.RawMessage, res fw.ToolResult) fw.ToolResult {
+	var in editInput
+	if decode(input, &in) != nil {
+		return res
+	}
+	if name, err := memoryName(in.Path); err != nil || name != "." {
+		return res
+	}
+	files, _, ok, err := t.store.AgentNotes(scope)
+	if !ok || err != nil {
+		return res
+	}
+	if info, err := files.Stat("."); err != nil || !info.IsDir() {
+		return res
+	}
+	out, err := t.agentEd.list(files, ".")
+	_, entries, _ := strings.Cut(out, "\n")
+	// The first entry is the directory itself; a directory without notes
+	// adds nothing.
+	if err != nil || !strings.Contains(entries, "\n") {
+		return res
+	}
+	return fw.TextResult(fw.TextOf(res.Content) + "\n\n" + agentListHead + "\n" + entries)
+}
+
 // Brief implements fw.Briefer. It returns the memory section of the system
 // prompt: how the memory works and the rules for new notes. It holds no
 // note, so no text that a run wrote reaches the system prompt.
@@ -329,6 +420,19 @@ func (t *memoryTool) BriefContext(ctx context.Context, run fw.RunInfo) (string, 
 // memoryName maps /memories/<rest> to <rest>, relative to the memory
 // directory, with slashes. A name with a hidden part is refused.
 func memoryName(p string) (string, error) {
+	name, err := memoryRel(p)
+	if err != nil || name == "." {
+		return name, err
+	}
+	if err := memory.CheckName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// memoryRel maps /memories/<rest> to <rest>, clean and with slashes, or
+// to "." for /memories itself. It does not check the name of a note.
+func memoryRel(p string) (string, error) {
 	rest, ok := strings.CutPrefix(p, memoryPrefix)
 	if !ok || (rest != "" && rest[0] != '/') {
 		return "", fmt.Errorf("the path %q is outside %s. Every memory path starts with %s", p, memoryPrefix, memoryPrefix)
@@ -340,11 +444,43 @@ func memoryName(p string) (string, error) {
 	if !filepath.IsLocal(rest) {
 		return "", fmt.Errorf("the path %q leaves %s", p, memoryPrefix)
 	}
-	name := filepath.ToSlash(filepath.Clean(rest))
+	return filepath.ToSlash(filepath.Clean(rest)), nil
+}
+
+// agentPath reports whether a path of the model names the notes of the
+// agent under /memories/.agent (memory.AgentName), and returns the name
+// of the note in the scope of the agent, or "." for the directory.
+func agentPath(p string) (string, bool) {
+	rel, err := memoryRel(p)
+	if err != nil {
+		return "", false
+	}
+	return memory.AgentName(rel)
+}
+
+// agentNoteName maps /memories/.agent/<rest> to <rest> in the scope of the
+// agent, or to "." for /memories/.agent. A name with a hidden part is
+// refused.
+func agentNoteName(p string) (string, error) {
+	name, ok := agentPath(p)
+	if !ok {
+		return "", fmt.Errorf("the path %q is outside %s", p, memory.AgentPrefix)
+	}
+	if name == "." {
+		return name, nil
+	}
 	if err := memory.CheckName(name); err != nil {
 		return "", err
 	}
 	return name, nil
+}
+
+// agentShow maps a name of the scope of the agent to /memories/.agent/...
+func agentShow(name string) string {
+	if name == "." || name == "" {
+		return memory.AgentPrefix
+	}
+	return memory.AgentPrefix + "/" + name
 }
 
 // memoryShow maps a name of the memory directory to /memories/...
