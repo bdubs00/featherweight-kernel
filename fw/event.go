@@ -255,6 +255,11 @@ type RunStartedData struct {
 	// Knowhow is KnowhowOff for a run that is held back from Know-how
 	// (HeldBack), and empty for every other run.
 	Knowhow string `json:"knowhow,omitempty"`
+	// Routines holds the routines that the front of the fleet gave the run
+	// at its start (routines.front), in place of the routines of its
+	// profile, with their version, or why it gave none. It is nil for a
+	// run that takes the routines of its profile (see startRoutines).
+	Routines *StartRoutines `json:"routines,omitempty"`
 }
 
 // MessageReceivedData is the payload of fw.message.received.

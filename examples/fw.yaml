@@ -118,6 +118,11 @@ providers:                      # one connection per provider; FW_PROVIDERS_<NAM
 #     model: clef                      # required: the model name to send; the response names the model served
 #     timeout: 30s                     # one call; 0 is 30s
 
+# routines:                     # where the routines of the agents come from; without it each profile carries its own (docs/ROUTINES.md section 3.1)
+#   front:                      # each run reads the routines of its agent from the front of a fleet at its start; FW_ROUTINES_FRONT_URL
+#     url: http://fw-front:8080   # GET {url}/v1/routines/now?agent=<name>, with the version of the list that the run holds
+#     tokenEnv: FW_API_TOKEN      # the variable that holds the static token of the front
+
 secrets:
   driver: env                   # env | vault | gsm
   options: {}                   # driver options; FW_SECRETS_OPTIONS_<NAME>

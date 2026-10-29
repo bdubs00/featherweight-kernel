@@ -375,12 +375,19 @@ func validate(c *fw.Config, servers bool) error {
 	default:
 		p = append(p, fmt.Sprintf("tools.memory.scope %q is not one of %s, %s, %s", c.Tools.Memory.Scope, fw.MemoryScopeAgent, fw.MemoryScopePrincipal, fw.MemoryScopeShared))
 	}
-	if f := c.Tools.Memory.Front; f != nil && strings.TrimSpace(f.URL) != "" {
+	for _, front := range []struct {
+		key string
+		f   *fw.MemoryFrontConfig
+	}{{"tools.memory.front", c.Tools.Memory.Front}, {"routines.front", c.Routines.Front}} {
+		key, f := front.key, front.f
+		if f == nil || strings.TrimSpace(f.URL) == "" {
+			continue
+		}
 		if u, err := url.Parse(strings.TrimSpace(f.URL)); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			p = append(p, fmt.Sprintf("tools.memory.front.url %q is not an http or https address", f.URL))
+			p = append(p, fmt.Sprintf("%s.url %q is not an http or https address", key, f.URL))
 		}
 		if strings.TrimSpace(f.TokenEnv) == "" {
-			p = append(p, "tools.memory.front.tokenEnv must name the variable that holds the static token of the front")
+			p = append(p, key+".tokenEnv must name the variable that holds the static token of the front")
 		}
 	}
 	p = append(p, checkBudget("budget", c.Budget)...)

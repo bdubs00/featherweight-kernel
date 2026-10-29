@@ -70,7 +70,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | Type | Data |
 |---|---|
 | `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5), kept events of a branch (section 4.7), the check of a check run (section 23), the data blocks of the caller (section 7.8.4) |
-| `fw.run.started` | model (none for a check run, section 23), tool names, brief (the sections that tools add to the system prompt), context (the data that tools and the caller add to the first user message, sections 7.8.2 and 7.8.4), time zone, and `knowhow: "off"` for a run that is held back (section 7.8.4) |
+| `fw.run.started` | model (none for a check run, section 23), tool names, brief (the sections that tools add to the system prompt), context (the data that tools and the caller add to the first user message, sections 7.8.2 and 7.8.4), time zone, `knowhow: "off"` for a run that is held back (section 7.8.4), and `routines`, the routines that the front gave the run at its start with their version, or why it gave none (section 22.1) |
 | `fw.memory.changed` | one change of a memory note by a tool call: call id, tool, operation, ref, old ref, scope, agent, size, SHA-256, the sources of a write, and `waiting` when the front holds the change for a person; never the text (section 7.8.1) |
 | `fw.memory.used` | the notes that a run read: `how` (`brief`, `view`, or `recall`) and `refs`, each a ref and the hash of the text that the run read. It never holds the text or the principal (section 7.8.4) |
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2), or a trusted quality receipt with its own cost snapshot (section 10.1) |
@@ -2998,6 +2998,8 @@ The inputs, the answer, and the strings of `contains` and `lacks` are Go `text/t
 
 An inline profile with a `routines` list replaces the routines of the named profile, as a tool list does. An empty list leaves the run without routines, and the JSON of a profile keeps an empty list, as it keeps the skills. The resolved profile holds the routines, so a run keeps the routines that it was queued with (section 12.5).
 
+With `routines.front`, each run reads the routines of its agent from the front of a fleet at its start instead (docs/ROUTINES.md section 3.1, `fw.RoutineSource`). The client keeps the list of each agent with its version and asks the front each time with that version, so a stale copy is never applied. When the front holds the agent, its list replaces the routines of the profile. When it does not, the run takes the routines of its profile. When it does not answer, or its list does not pass the checks below, the run applies no routine. `fw.run.started` records the list as `routines` with its version, and the runner, a restart, and the comparison at the end read that record. A move of a routine at the front then reaches the next run, and no configuration of a worker changes for it.
+
 When the kernel loads a profile, it checks the routines. It also checks the routines of each inline profile. It refuses these:
 
 - more than 64 routines in a profile
@@ -3080,7 +3082,7 @@ A proposal reads many runs. That is the work of the workbench or of a librarian 
 A process without deciders and without routines spends nothing on them. No run asks a decider, the tool `decide` is off, and the runner returns at once. The rendered Task of a profile without routines does not change. These steps turn routines on for one profile:
 
 1. Name a decider in `deciders`, or with the variables `FW_DECIDERS_<NAME>_*`, and add `decide` to `tools.builtin`. A routine with questions needs both. A routine without questions needs neither.
-2. Give the profile its routines under `agents.<name>.routines`, in `fw.yaml` or in a profile file, with the standing `shadow` first. The workbench gives the profiles of a pool the routines of its store instead (the workbench architecture, section 21.3).
+2. Give the profile its routines under `agents.<name>.routines`, in `fw.yaml` or in a profile file, with the standing `shadow` first. The workbench gives the runs of a pool the routines of its store instead, through `routines.front` (section 22.1, and the workbench architecture, section 21.3).
 3. Read the decisions and the comparisons in the ledger, or run `fw routine replay --decide` over the past runs.
 4. Set the standing to `live` once the routine agrees with the agent. `canary` keeps a share of the runs with the agent.
 

@@ -43,6 +43,10 @@ type routineCursor struct {
 	weak    bool   // the checks of done passed weakly on its work
 	done    bool   // a fw.run.finished after fw.routine.applied
 	base    string // the context of fw.run.started
+	// start holds the routines that the front gave the run at its start
+	// (RunStartedData.Routines), nil for a run with the routines of its
+	// profile.
+	start *StartRoutines
 	// compared is true when the run holds a comparison of its own.
 	compared bool
 	// decided holds every decision of the run, for the context block and
@@ -82,7 +86,7 @@ func (c *cursor) applyRoutine(e Event) {
 	case EvRunStarted:
 		var d RunStartedData
 		if e.Decode(&d) == nil {
-			r.base = d.Context
+			r.base, r.start = d.Context, d.Routines
 		}
 		return
 	case EvRoutineDecided:
@@ -252,7 +256,7 @@ func (a *Agent) routineDue(rs *runState, c *cursor) bool {
 	if c.queued.Metadata["replayOf"] != "" || a.k.override(rs.id) != nil {
 		return false
 	}
-	return len(routinesFor(a.profileOf(c.queued).Routines, c.queued.Metadata)) > 0
+	return len(routinesFor(a.routinesOf(c), c.queued.Metadata)) > 0
 }
 
 // routinesFor returns the routines that the runner considers for a run, in
@@ -326,7 +330,7 @@ type routineVerdict struct {
 // that a restart between the two events takes.
 func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
-	routines := routinesFor(prof.Routines, c.queued.Metadata)
+	routines := routinesFor(a.routinesOf(c), c.queued.Metadata)
 	_, tools := a.runTools(ctx, rs, prof)
 	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), calls: c.toolCalls - c.keptCalls, prefix: routineCallPrefix}
 	verdicts, err := rr.decide(ctx, routines, c.queued.Input)
@@ -741,7 +745,7 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 // It runs once per run. The caller holds rs.emitMu and appends
 // fw.run.finished next.
 func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, output string) error {
-	routines := a.profileOf(c.queued).Routines
+	routines := a.routinesOf(c)
 	if len(routines) == 0 || !c.answered {
 		return nil
 	}

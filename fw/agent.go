@@ -86,6 +86,7 @@ type Agent struct {
 	services   []io.Closer        // what stops the services, see service.go
 	runner     Runner             // drives the runs in place of the turn loop, see runner.go
 	deciders   map[string]Decider // the deciders that WithDecider gave, see decider.go
+	routineSrc RoutineSource      // the routines of each run from the front, see routine_front.go
 	accessMode string             // AccessModeRules, AccessModeExternal, or AccessModeCustom
 
 	k *kernel // runtime state, see kernel.go
@@ -164,6 +165,7 @@ func New(opts ...Option) (*Agent, error) {
 		slots:      modelSlots(cfg),
 		noResume:   o.noResume,
 		deciders:   o.deciders,
+		routineSrc: o.routines,
 	}
 	// Before the kernel starts, only resources opened by this constructor
 	// belong to it. In particular, a failed setup must release the file
@@ -221,6 +223,19 @@ func New(opts ...Option) (*Agent, error) {
 	// Every value that a driver resolves becomes a secret that no event
 	// holds.
 	a.redact = newRedactor(os.Environ())
+	if a.routineSrc == nil {
+		front, err := newFrontRoutines(cfg.Routines.Front)
+		if err != nil {
+			return nil, err
+		}
+		if front != nil {
+			// The token of the front never reaches a ledger event.
+			if tok := os.Getenv(front.tokenEnv); tok != "" {
+				a.redact.addOwn(tok)
+			}
+			a.routineSrc = front
+		}
+	}
 	a.secrets = recordSecrets{Secrets: a.secrets, r: a.redact}
 	if names := toolSecretNames(cfg.Tools.Bash.Env); len(names) > 0 {
 		a.log.Warn("tools.bash.env gives the shell variables with a secret name; every command of the shell can read them", "names", names)
