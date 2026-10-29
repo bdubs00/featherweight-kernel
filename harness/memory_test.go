@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -689,10 +690,21 @@ func TestMemoryRoute(t *testing.T) {
 	mu.Lock()
 	got := append([]fw.MemoryChangedData(nil), changes...)
 	mu.Unlock()
-	if len(got) != 2 || got[0] != (fw.MemoryChangedData{CallID: "call_remember", Tool: memRemember, Op: fw.FileCreated, Ref: "mem://agent/default/prefs.md",
+	if len(got) != 2 || !reflect.DeepEqual(got[0], fw.MemoryChangedData{CallID: "call_remember", Tool: memRemember, Op: fw.FileCreated, Ref: "mem://agent/default/prefs.md",
 		Scope: fw.MemoryAgentScope, Agent: "default", Size: int64(len(body)), SHA256: sha(body)}) ||
-		got[1] != (fw.MemoryChangedData{CallID: "call_forget", Tool: memForget, Op: fw.FileRemoved, Ref: "mem://agent/default/prefs.md", Scope: fw.MemoryAgentScope, Agent: "default"}) {
+		!reflect.DeepEqual(got[1], fw.MemoryChangedData{CallID: "call_forget", Tool: memForget, Op: fw.FileRemoved, Ref: "mem://agent/default/prefs.md", Scope: fw.MemoryAgentScope, Agent: "default"}) {
 		t.Fatalf("changes = %+v", got)
+	}
+	// A note names the page that it came from in sources.
+	if text, isErr := callTool(runA, true, memRemember, map[string]any{"path": "launch.md", "text": "Launch day.\n", "sources": []string{"page:/launch/plan.md"}}); isErr ||
+		!strings.HasPrefix(text, "Saved /memories/launch.md") {
+		t.Fatalf("remember with sources: %q", text)
+	}
+	mu.Lock()
+	last := changes[len(changes)-1]
+	mu.Unlock()
+	if !reflect.DeepEqual(last.Sources, []fw.MemoryLink{{Ref: "page:launch/plan.md", Kind: "source"}}) {
+		t.Fatalf("the sources of the change = %+v", last.Sources)
 	}
 
 	// The server checks the rights of the run for each call, whatever the
@@ -951,6 +963,9 @@ func TestMemoryCanon(t *testing.T) {
 		{memRemember, `"x"`, `error: not a JSON object`},
 		{memRemember, `[]`, `error: not a JSON object`},
 		{memRemember, `{"path":"a.md","text":"T"} {}`, `error: more than one JSON value`},
+		{memRemember, `{"path":"a.md","text":"T","sources":["Page:/launch/a.md"," file:x.txt"]}`, `{"path":"/memories/a.md","sources":["page:launch/a.md","file:x.txt"],"text":"T"}`},
+		{memRemember, `{"path":"a.md","text":"T","sources":["run:01K1"]}`, `error: a source is page:<path> or file:<path>`},
+		{memRemember, `{"path":"a.md","text":"T","sources":"page:a.md"}`, `error: the field "sources" of remember must be a list of strings`},
 		{memForget, `{"path":"notes.md"}`, `{"path":"/memories/notes.md"}`},
 		{memList, `{}`, `{}`},
 		{memList, `{"path":"/memories"}`, `error: list takes no field`},

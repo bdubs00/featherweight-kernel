@@ -63,6 +63,8 @@ func TestDescribeMemoryChanged(t *testing.T) {
 		{fw.MemoryChangedData{Tool: "memory", Op: fw.FileCreated, Ref: "mem://agent/default/a.md", Size: 12}, "the tool memory created the note mem://agent/default/a.md (12 bytes)"},
 		{fw.MemoryChangedData{Tool: "memory", Op: fw.FileRenamed, OldRef: "mem://agent/default/a.md", Ref: "mem://agent/default/b.md"}, "the tool memory renamed the note mem://agent/default/a.md to mem://agent/default/b.md"},
 		{fw.MemoryChangedData{Tool: "memory", Op: fw.FileRemoved, Ref: "mem://agent/default/b.md"}, "the tool memory removed the note mem://agent/default/b.md"},
+		{fw.MemoryChangedData{Tool: "memory", Op: fw.FileCreated, Ref: "mem://agent/default/c.md", Size: 3, Waiting: true},
+			"the tool memory created the note mem://agent/default/c.md (3 bytes); the change waits for a person"},
 	} {
 		if got := describe(fw.MustEvent("r1", fw.EvMemoryChanged, c.data)); got != c.want {
 			t.Errorf("describe = %q, want %q", got, c.want)

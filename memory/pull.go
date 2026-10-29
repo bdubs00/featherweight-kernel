@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"maps"
 	"math"
+	"path"
 	"slices"
 	"strings"
 
@@ -38,9 +39,14 @@ type PullResult struct {
 // front for its list, fetches each note whose hash differs from the copy,
 // and removes each copy that the front put away, holds back for a person,
 // or no longer lists. A note of the copy that the front never had, such as
-// a note from before the front was set, goes to the front as a new note.
-// The pull takes at most PullWait. A front that does not answer leaves the
-// copy as it is. Without a front, or for the shared scope, it does nothing.
+// a note from before the front was set, goes to the front as a new note of
+// the agent, with the sources that its lines name (SourcesOf). When the
+// front keeps another text under the same name, such as the note of
+// another Task of the pool from before the front, the text of the copy
+// goes to the front under a free name first (adopt), so no note from
+// before the front is lost. The pull takes at most PullWait. A front that
+// does not answer leaves the copy as it is. Without a front, or for the
+// shared scope, it does nothing. A second pull sends nothing again.
 func (s *Store) Pull(ctx context.Context, scope fw.MemoryScope) PullResult {
 	if !s.Front(scope) {
 		return PullResult{}
@@ -96,6 +102,8 @@ func (s *Store) Pull(ctx context.Context, scope fw.MemoryScope) PullResult {
 	defer func() { files.locked = false }()
 	st := files.readState()
 	known := st.Front
+	// added holds the notes that adopt sent under a free name.
+	added := map[string]FrontNote{}
 	// unchanged reports whether the note of the copy is as the pull saw it
 	// before it took the lock: no write came between.
 	unchanged := func(name string) bool {
@@ -105,9 +113,24 @@ func (s *Store) Pull(ctx context.Context, scope fw.MemoryScope) PullResult {
 		}
 		return errors.Is(err, fs.ErrNotExist)
 	}
+	// A note of the copy that the front never had, and that the front
+	// lists under its name with another text, goes to the front under a
+	// free name before the copy takes the text of the front or loses the
+	// note. A note that the front did not take stays as it is, for the
+	// next pull.
+	hold := map[string]bool{}
+	for _, name := range slices.Sorted(maps.Keys(before)) {
+		n, isListed := listed[name]
+		if _, wasKnown := known[name]; wasKnown || !isListed || n.Hash == before[name] || !unchanged(name) {
+			continue
+		}
+		if s.adopt(ctx, scope, files, &st, name, listed, before, added, &res) != nil {
+			hold[name] = true
+		}
+	}
 	for _, name := range slices.Sorted(maps.Keys(fetched)) {
 		rec := fetched[name]
-		if !unchanged(name) {
+		if hold[name] || !unchanged(name) {
 			res.Missed++
 			continue
 		}
@@ -133,6 +156,8 @@ func (s *Store) Pull(ctx context.Context, scope fw.MemoryScope) PullResult {
 		n, isListed := listed[name]
 		_, wasKnown := known[name]
 		switch {
+		case hold[name]:
+			continue
 		case isListed && n.kept():
 			continue
 		case !isListed && !wasKnown:
@@ -160,18 +185,24 @@ func (s *Store) Pull(ctx context.Context, scope fw.MemoryScope) PullResult {
 			continue
 		}
 		hash := hashOf(data)
-		links := st.Notes[name]
-		if links.Hash != hash {
-			links = noteExtra{}
-		}
-		err = s.front.put(ctx, scope, name, frontPut{Text: string(data), IfHash: "absent", Sources: sourcesOf(links.Links), By: "agent"})
+		links := s.linksOfCopy(ctx, &st, name, data)
+		waiting, err := s.front.put(ctx, scope, name, frontPut{Text: string(data), IfHash: "absent", Sources: sourcesOf(links), By: "agent"})
 		switch {
 		case err == nil:
-			st.Front[name] = FrontNote{Name: name, Hash: hash, By: "agent", Sources: len(links.Links)}
+			n := FrontNote{Name: name, Hash: hash, By: "agent", Sources: len(links)}
+			if waiting {
+				n.State = StateWaiting
+			}
+			st.Front[name] = n
+			setExtra(&st, name, noteExtra{Hash: hash, Links: links})
 			res.Sent++
 		case errors.Is(err, ErrFrontConflict):
 			// The front has a note of that name that it does not list, such
-			// as a note that it put away: the copy follows the front.
+			// as a note that it put away. The text of the copy goes to the
+			// front under a free name, and the copy follows the front.
+			if s.adopt(ctx, scope, files, &st, name, listed, before, added, &res) != nil {
+				continue
+			}
 			rec, found, err := s.front.get(ctx, scope, name)
 			switch {
 			case err != nil:
@@ -193,8 +224,81 @@ func (s *Store) Pull(ctx context.Context, scope fw.MemoryScope) PullResult {
 			}
 		}
 	}
+	maps.Copy(st.Front, added)
 	_ = files.writeState(st)
 	return res
+}
+
+// maxAdoptNames bounds the free names that adopt tries for one note.
+const maxAdoptNames = 9
+
+// adopt sends the text of the note name of the copy, which the front never
+// had, to the front under a free name: name-2.md, name-3.md, and so on,
+// a name that neither the list of the front, the copy, nor added holds.
+// The copy keeps the text under the new name too, and added gets the
+// note. A text that the front lists already, under any name, needs no new
+// name. It returns an error when the front took the text under no name,
+// and the caller then leaves the note of the copy as it is. The caller
+// holds the lock of the scope.
+func (s *Store) adopt(ctx context.Context, scope fw.MemoryScope, files *noteFiles, st *scopeState, name string,
+	listed map[string]FrontNote, before map[string]string, added map[string]FrontNote, res *PullResult) error {
+	hash := before[name]
+	for _, n := range listed {
+		if n.Hash == hash {
+			return nil
+		}
+	}
+	for _, n := range added {
+		if n.Hash == hash {
+			return nil
+		}
+	}
+	data, err := fs.ReadFile(files.Files, name)
+	if err != nil {
+		return err
+	}
+	if hashOf(data) != hash {
+		return errors.New("the note changed during the pull")
+	}
+	links := s.linksOfCopy(ctx, st, name, data)
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for i := 2; i <= maxAdoptNames+1; i++ {
+		alt := fmt.Sprintf("%s-%d%s", stem, i, ext)
+		_, onList := listed[alt]
+		_, inCopy := before[alt]
+		_, sent := added[alt]
+		if onList || inCopy || sent || CheckName(alt) != nil {
+			continue
+		}
+		waiting, err := s.front.put(ctx, scope, alt, frontPut{Text: string(data), IfHash: "absent", Sources: sourcesOf(links), By: "agent"})
+		switch {
+		case errors.Is(err, ErrFrontConflict):
+			continue
+		case err != nil:
+			return err
+		}
+		n := FrontNote{Name: alt, Hash: hash, By: "agent", Sources: len(links)}
+		if waiting {
+			n.State = StateWaiting
+		} else if writeAtomic(files.dir, alt, data) == nil {
+			setExtra(st, alt, noteExtra{Hash: hash, Links: links})
+		}
+		added[alt] = n
+		res.Sent++
+		return nil
+	}
+	return fmt.Errorf("no free name for the note %s at the front", name)
+}
+
+// linksOfCopy returns the sources of the note name of the copy with the
+// text data: those that the state keeps for that text, or else those
+// that its lines name, with the version of each page.
+func (s *Store) linksOfCopy(ctx context.Context, st *scopeState, name string, data []byte) []fw.MemoryLink {
+	if e, ok := st.Notes[name]; ok && e.Hash == hashOf(data) && len(e.Links) > 0 {
+		return e.Links
+	}
+	return s.versioned(ctx, SourcesOf(string(data)))
 }
 
 // localHashes returns the hash of each note of the copy. A note whose

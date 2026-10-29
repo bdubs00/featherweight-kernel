@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 	"github.com/bdubs00/featherweight-kernel/memory"
@@ -75,6 +76,9 @@ const memoryDescription = "Keep notes that last between runs, in files under /me
 	"The first message of a run lists each file with its first line. " +
 	"view shows a file with line numbers, or lists a directory. " +
 	"create, str_replace, and insert write files. delete and rename change files and directories. " +
+	"When a note comes from a page of the wiki or a file of the workspace, you can end it with a line that names it, " +
+	"such as \"Source: page:launch/plan.md\" or \"Source: file:docs/setup.md\". " +
+	"A note with a page source goes out of date when that page changes. " +
 	"Never store secrets, keys, or passwords in memory."
 
 // memoryCommands are the commands of the memory tool.
@@ -148,10 +152,22 @@ func (t *memoryTool) IdempotentCall(json.RawMessage) bool { return true }
 // command that writes runs while it holds the lock of the scope
 // (memory.Store.Locked), so the read of str_replace and insert and their
 // write are one step, and a concurrent write through the native API or of
-// another run is never lost.
+// another run is never lost. A change that the front holds for a person
+// answers so, not with the result of the editor (memory.Answer).
 func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolResult, error) {
 	t.store.GuardToken(fw.AgentFrom(ctx))
 	scope := t.store.Scope(fw.RunInfoFrom(ctx))
+	var (
+		mu      sync.Mutex
+		changes []fw.MemoryChangedData
+	)
+	outer := ctx
+	ctx = fw.WithMemoryRecorder(ctx, func(d fw.MemoryChangedData) {
+		mu.Lock()
+		changes = append(changes, d)
+		mu.Unlock()
+		fw.RecordMemoryChange(outer, d)
+	})
 	if cmd := memoryCommand(input); cmd == "view" || !slices.Contains(memoryCommands, cmd) {
 		files, err := t.store.Notes(ctx, scope)
 		if err != nil {
@@ -178,6 +194,15 @@ func (t *memoryTool) Call(ctx context.Context, input json.RawMessage) (fw.ToolRe
 			return canceled(ctx, "memory")
 		}
 		return fw.ErrorResult("Error: " + err.Error()), nil
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	switch text, replace := memory.Answer(changes, t.store.Front(scope)); {
+	case res.IsError || text == "":
+	case replace:
+		res = fw.TextResult(text)
+	default:
+		res.Content = append(res.Content, fw.Text(text))
 	}
 	return res, nil
 }

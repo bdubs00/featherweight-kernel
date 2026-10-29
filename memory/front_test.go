@@ -340,6 +340,9 @@ func TestFrontBrief(t *testing.T) {
 	if !strings.Contains(s.Section(scope), "the notes that a person wrote first") {
 		t.Fatal("the system section names the order of newest first")
 	}
+	if sec := s.Section(scope); !strings.Contains(sec, `"Source: page:launch/plan.md"`) || !strings.Contains(sec, "goes out of date when that page changes") {
+		t.Fatalf("the system section does not say how a note names its page:\n%s", sec)
+	}
 
 	// The front does not answer: the copy and the labels of the last
 	// answer, with one line that says so.

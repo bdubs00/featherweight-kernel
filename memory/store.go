@@ -515,19 +515,30 @@ func (f *noteFiles) writeLocked(name string, data []byte) error {
 	}
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
+	// A write without sources of its own takes those that the text names
+	// (SourcesOf), and each page gets its version from the front.
+	links := f.links
+	if links == nil {
+		links = SourcesOf(string(data))
+	}
+	links = f.store.versioned(f.ctx, links)
+	waiting := false
 	if f.pushes() {
-		if err := f.push(name, data, hash, old, existed); err != nil {
+		var err error
+		if waiting, err = f.push(name, data, hash, old, existed, links); err != nil {
 			return err
 		}
 	}
-	f.keepExtra(name, hash)
+	f.keepExtra(name, hash, links)
 	fw.RecordMemoryChange(f.ctx, fw.MemoryChangedData{
-		Op:     op,
-		Ref:    NoteRef(f.scope, name),
-		Scope:  f.scope.Kind,
-		Agent:  f.scope.Agent,
-		Size:   int64(len(data)),
-		SHA256: hash,
+		Op:      op,
+		Ref:     NoteRef(f.scope, name),
+		Scope:   f.scope.Kind,
+		Agent:   f.scope.Agent,
+		Size:    int64(len(data)),
+		SHA256:  hash,
+		Sources: links,
+		Waiting: waiting,
 	})
 	return nil
 }
@@ -567,18 +578,21 @@ func (f *noteFiles) removeLocked(name string) error {
 	if err := syncParent(f.dir, name); err != nil {
 		return err
 	}
+	waiting := false
 	if f.pushes() {
-		if err := f.pushRemove(name, old); err != nil {
+		var err error
+		if waiting, err = f.pushRemove(name, old); err != nil {
 			return err
 		}
 	}
 	f.dropExtra(name)
 	f.store.dropFromIndex(f.ctx, f.scope, name)
 	fw.RecordMemoryChange(f.ctx, fw.MemoryChangedData{
-		Op:    fw.FileRemoved,
-		Ref:   NoteRef(f.scope, name),
-		Scope: f.scope.Kind,
-		Agent: f.scope.Agent,
+		Op:      fw.FileRemoved,
+		Ref:     NoteRef(f.scope, name),
+		Scope:   f.scope.Kind,
+		Agent:   f.scope.Agent,
+		Waiting: waiting,
 	})
 	return nil
 }
@@ -620,8 +634,10 @@ func (f *noteFiles) Rename(oldname, newname string) error {
 	if err := syncParent(f.dir, newname); err != nil {
 		return err
 	}
+	waiting := false
 	if f.pushes() {
-		if err := f.pushRename(oldname, newname, data); err != nil {
+		var err error
+		if waiting, err = f.pushRename(oldname, newname, data); err != nil {
 			return err
 		}
 	}
@@ -629,11 +645,12 @@ func (f *noteFiles) Rename(oldname, newname string) error {
 	// The next search indexes the text under the new name.
 	f.store.dropFromIndex(f.ctx, f.scope, oldname)
 	fw.RecordMemoryChange(f.ctx, fw.MemoryChangedData{
-		Op:     fw.FileRenamed,
-		Ref:    NoteRef(f.scope, newname),
-		OldRef: NoteRef(f.scope, oldname),
-		Scope:  f.scope.Kind,
-		Agent:  f.scope.Agent,
+		Op:      fw.FileRenamed,
+		Ref:     NoteRef(f.scope, newname),
+		OldRef:  NoteRef(f.scope, oldname),
+		Scope:   f.scope.Kind,
+		Agent:   f.scope.Agent,
+		Waiting: waiting,
 	})
 	return nil
 }
