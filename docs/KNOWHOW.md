@@ -210,7 +210,9 @@ in the files of the process, because the front has no such scope.
   tool then answers "Not kept yet. The new note /memories/x.md waits for a
   person ...", not "File created successfully", so the model does not tell
   the user that the note is saved. A removal that waits answers so too.
-  The next pull takes what the front keeps.
+  The next pull takes what the front keeps. The workbench adds
+  `fw.memory.changed` to `fleet.EgressTypes`, so the front sees the mark
+  as the run writes the note, also after the run ended.
 - A removal sends `DELETE` with the hash of the copy. A rename sends the
   note under its new name with `absent`, and then removes the old name.
   With a front, the memory tool deletes and renames one note at a time. It
