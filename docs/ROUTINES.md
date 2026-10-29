@@ -668,18 +668,21 @@ In practice:
   Evidence tab only.
 - No explanation sentence in the chrome. A definition sits behind a
   question mark.
-- Drop the word `matched`. The line of past tickets reads `212 of 212 past
-  tickets, handled the same way`, with the key `Open the tickets`.
+- Drop the word `matched`. The line of past runs reads `212 of 212 past
+  runs, handled the same way`. The replay keeps no list of the past runs,
+  so the line has no key to open them.
+- Every line of the place counts runs, not tickets, because a routine
+  works on the runs of any agent.
 - Scrollbars are part of the instrument. They are thin, with a thumb of
   `--line` and the 4-pixel radius, which turns `--muted` under the
   pointer. They have no track, in both themes, on every scrolling pane.
 
 | Pane | Content |
 |---|---|
-| List | `Routines` with its count chip and a `N live` chip. `Find a routine`. Groups in attention order: Needs you (ready), Live, Rehearsing, Proposed, Paused, then Retired behind a toggle. A row holds the name, the status word with its light, and one meta line. Examples of a meta line: `triage, rehearsed 1,480 tickets`, `identity desk, 96 this week`, `triage, 84% agreed over 120 tickets`, `triage, from 212 tickets`. |
+| List | `Routines` with its count chip and a `N live` chip. `Find a routine`. Groups in attention order: Needs you (ready), Live, Rehearsing, Proposed, Paused, then Retired behind a toggle. A row holds the name, the status word with its light, and one meta line. Examples of a meta line: `triage, rehearsed 1,480 runs`, `identity desk, 96 this week`, `triage, 84% agreed over 120 runs`, `triage, from 212 runs`. |
 | Main | header: the name as the title, the status word with its light, the tabs Steps, Evidence, Runbook, and More (Pause, Resume, Retire). Then the groove, then the body of the tab. |
-| Steps | the card that needs you, then Steps, What it decides, and Afterward. The card says `Needs your sign-off`, with the three figures and the keys `Not yet` and `Sign off`. For a proposed routine, it says `Proposed from 212 tickets`, with the keys `Retire` and `Rehearse`. Steps are numbered, with the tool name as meta. What it decides shows the question, the answers as slots, and the band of its act. |
-| Evidence | Rehearsal: per-day bars of agreed, disagreed, and handed to the agent, with the three totals. Past tickets. How sure it was: the reliability table in words. Where it disagreed: the last disagreements, with what happened afterward. Sent back. Made from. |
+| Steps | the card that needs you, then Steps, What it decides, and Afterward. The card says `Needs your sign-off`, with the three figures and the keys `Not yet` and `Sign off`. For a proposed routine, it says `Proposed from 212 runs`, with the keys `Retire` and `Rehearse`. Steps are numbered, with the tool name as meta. What it decides shows the question, the answers as slots, and the band of its act. |
+| Evidence | Rehearsal: per-day bars of agreed, disagreed, and handed to the agent, with the three totals. Past runs. How sure it was: the reliability table in words. Where it disagreed: the last disagreements, with what happened afterward. Sent back. Made from. |
 | Runbook | the wiki page of the routine. Before sign-off, the page renders the routine the same way, with the line `Not yet signed off`. |
 | Details | `Triage` with the chip `agent` and the key `Profile`. The mark, the tagline. This week: the share bar by routines, by the agent, and with a person, and the three counts. Per run: the cost by a routine and by the agent. Sent back: the count of the week. |
 

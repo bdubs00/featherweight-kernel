@@ -360,7 +360,7 @@ one record:
   "state": "checked",
   "uses": 7,
   "lastUsed": "2026-10-27T20:00:00Z",
-  "outOfDate": {"since": "…", "source": "page:agents/triage/labels.md"}
+  "outOfDate": {"since": "…", "source": "page:agents/triage/labels.md", "version": "<sha256>"}
 }
 ```
 
@@ -384,9 +384,24 @@ one record:
 - `item:<source>/<key>` with `version`: when a source or a Duty sees an
   event for the item with another version, the note goes out of date. The
   sources and duties packages call a hook (section 6.4).
+- A note of the review gets the pages that its candidate rests on. A call
+  of `pages_read` of the front that read the newest version of a page
+  names `page:<path>`, with the hash of the page as the version (section
+  7.1).
 
-If a note goes out of date, the journal names the source that changed.
-The next after-work review then sees the note as a task (section 7).
+If a note goes out of date, the journal names the source that changed,
+and `outOfDate` holds `since`, `source`, and `version`, the version of the
+source now. A later change of the same source moves `version`. The next
+after-work review sees the note as a task, a `recheck` in the scope of the
+note (section 7.1). A note that a person wrote gets none.
+
+The move to out of date has no undo, because an undo would make the agent
+trust the note over its source again. An owner corrects the note instead,
+with a new text or a put-away. When a person writes a note that is out of
+date, the source that changed takes the version of `outOfDate`, because
+the person read the source as it is now. A page that was removed leaves
+the sources. So the corrected note is checked against the page as it is,
+and the journal counts a correction.
 
 ### 5.3 Routes
 
@@ -411,7 +426,9 @@ principals, such as `duty:<name>`.
 | `GET /v1/knowhow/waiting?agent=` | the changes that wait for a person |
 | `POST /v1/knowhow/waiting/{id}` | `{"keep": true}` or `{"keep": false}`. Each change pins the hash of its target. A target that changed since gets 409. |
 | `GET /v1/knowhow/summary?agent=&days=7` | the four numbers of section 1, split into normal and held-back runs |
-| `POST /v1/knowhow/propose?agent=` | run the pass that proposes routines (section 6.5) at once, for the agent, or without one for every agent that the caller owns. It needs the owner role. It answers `{"proposed", "staysOut"}`, and 409 when proposals or routines are off. |
+| `POST /v1/knowhow/review/{agent}` | start the after-work review of the agent now (section 7). It needs the owner role. 202 with the run, or 200 with `started: false` and the reason when the agent has no open candidate. 409 with the reason when no review agent is set. |
+| `POST /v1/knowhow/propose` | run the pass that proposes routines (section 6.5) at once, for every agent that the caller owns. It answers `{"proposed", "staysOut"}`, and 409 when proposals or routines are off. |
+| `POST /v1/knowhow/propose/{agent}` | run the same pass for one agent. It needs the owner role. It answers `{"agent", "proposed", "staysOut"}`, and 409 as above. |
 
 The kernel reads and sends these shapes on the routes of the notes and the
 runs (`memory/front.go`, and the fake front `memory/fronttest`):
@@ -466,9 +483,17 @@ One entry per change, under `<agent>/journal/<time>-<id>`:
 - `why` is one plain sentence that a person reads. Code writes it from a
   fixed set of sentences, except for `learned` and `updated`, where the
   after-work review writes it.
-- Undo of a note puts back the revision before the change. If
-  `docs/ROUTINES.md` allows the opposite move, undo of a routine move makes
-  that move.
+- `runs` names the runs that the change came from. A change that one run
+  made, such as a note that the memory tool wrote or put away, names that
+  run.
+- Undo of a note puts back the revision before the change. Undo of a
+  change that made a note puts the note away. So does undo of the keep of
+  a note that waited for a person (`undo.revision` 0), because the agent
+  never had the note before the keep. If `docs/ROUTINES.md` allows the
+  opposite move, undo of a routine move makes that move.
+- An entry `out-of-date` has no `undo` (section 5.2). An undo of an
+  earlier change of a note that is out of date now answers 409 with
+  `outOfDate: true`, and the page offers Edit and Put away in its place.
 - The journal keeps 90 days or 5,000 entries per agent, whichever is less.
 
 ### 5.5 Resting and put away
@@ -528,11 +553,12 @@ sets them.
 These rules change `docs/ROUTINES.md` section 4.
 
 - Proposals. A daily pass of the front reads the archive. An owner starts
-  the same pass at once with `POST /v1/knowhow/propose` (section 5.3), so
-  a person does not wait for the next day. For each Duty of each agent,
-  it takes the completed runs of the last 30 days. It needs at least 10
-  runs, at least 2 of them verified (section 1), and no rejected run among
-  those it uses. It calls `routine.Propose` and then
+  the same pass at once with `POST /v1/knowhow/propose` for the agents
+  that it owns, or `POST /v1/knowhow/propose/{agent}` for one (section
+  5.3), so a person does not wait for the next day. For each Duty of each
+  agent, it takes the completed runs of the last 30 days. It needs at
+  least 10 runs, at least 2 of them verified (section 1), and no rejected
+  run among those it uses. It calls `routine.Propose` and then
   `routine.LeaveOneOut`. A proposal with a free hole, or with a diverged
   run, stays out, and the journal says why. A good proposal is stored
   bound to its Duty (`duty`), as `proposed`, and moves to `rehearsing` at
@@ -563,8 +589,11 @@ These rules change `docs/ROUTINES.md` section 4.
 
 The duties engine marks a share of the firings of each Duty as held back,
 with `fw.knowhow: off`. The share is `workbench.knowhow.heldBack`, default
-0.05. The choice is a stable hash of the run id. The value 0 turns it off.
-The summary compares held-back runs with normal runs of the same Duties.
+0, so no run is held back until a person sets a share, such as 0.05 for 1
+run in 20. A held-back run does its work without what the agent learned,
+and the comparison needs about 400 firings before it says anything. The
+choice is a stable hash of the run id. The summary compares held-back
+runs with normal runs of the same Duties.
 
 ## 7. The after-work review
 
@@ -581,7 +610,9 @@ workbench:
 
 Without `review.agent`, no review runs, and the page says "The after-work
 review is off: no agent is set." Nothing picks a model or a price by
-default. The kernel refuses a run with no model, as it does now.
+default. The kernel refuses a run with no model, as it does now. An owner
+starts the review of an agent at once with Review now on the page, or
+`POST /v1/knowhow/review/{agent}` (section 5.3).
 
 ### 7.1 Candidates
 
@@ -592,11 +623,20 @@ candidates by code, without a model:
 |---|---|
 | `gotcha` | A tool call that failed, and a later call of the same tool in the same run that passed with a different input |
 | `place` | The same read call (tool and input) in two or more runs of an agent, with the same result |
-| `outcome` | A run with a receipt, an outcome grader verdict, a definition of done that passed, or a thumbs up or down |
-| `recheck` | A note that went out of date |
+| `outcome` | A run with a receipt, an outcome grader verdict, a definition of done that passed (`fw.CheckedDone`, so not a weak pass), or a thumbs up or down |
+| `recheck` | A note that went out of date, unless a person wrote it |
 
-Each candidate holds its runs, its sources, and its origin. If its text
-came from any of these, its origin is `untrusted`:
+A candidate belongs to the scope of the agent, because the runs of the
+agent read the notes of that scope, the default of the kernel. So the
+same finding in the runs of two people is one candidate. A recheck keeps
+the scope of its note.
+
+Each candidate holds its runs, its sources, and its origin. The sources
+are the runs, and the pages of the wiki that the candidate rests on: a
+place gets the page of its read call, and an outcome the pages that its
+runs read, at most eight a run. A read names a page only when it read the
+newest version. If its text came from any of these, its origin is
+`untrusted`:
 
 - a `found`, `event`, or `source` block
 - a tool that can read the open world (its annotation)
@@ -613,14 +653,18 @@ The front's MCP server offers two tools to the review profile only:
   evidence.
 - `knowhow_keep {candidate, op, name, text, why}` decides one candidate.
   `op` is `add`, `supersede`, or `skip`. The note goes to the scope of the
-  runs of the candidate. Notes of one principal never move to another
-  scope.
+  agent, where every run of the agent reads it. A recheck writes to the
+  scope of its note. Notes of one principal never move to another scope.
+  An `add` without a name gets one from the kind and the first six words
+  of the text, and the answer names it.
 
 The front checks every `knowhow_keep`:
 
 - The text is at most 600 characters and states a fact. The front refuses
   a line that starts with one of these words, and it gives the reason:
   `always`, `never`, `do not`, `don't`, `you must`, `make sure`.
+- The text holds no path of one machine, such as `/home/<name>/`, `~/`,
+  or `/tmp`, because the next run can run on another machine.
 - The note gets the sources of the candidate. The model cannot add others.
 - An `untrusted` candidate needs two runs with different triggers, or it
   waits for a second one.
@@ -660,7 +704,8 @@ position. It has three tabs, with the agent picker of the place:
 The header of the place shows the four numbers of section 1 for the last
 7 days. It also holds the switch "Ask me before it keeps what it learns".
 With the switch on, waiting changes show as decision cards: "Keep this?"
-with `Keep` and `Not now`, as the sign-off card does.
+with `Keep` and `Not now`, as the sign-off card does. While the review is
+on, an owner sees `Review now`, which starts the review at once.
 
 ### 8.3 With and without what it learned
 
@@ -686,8 +731,13 @@ page never shows a percentage from fewer runs. Two examples:
 - No embeddings. Search stays lexical.
 - No erasure from the ledger or the bus. Put away is not erasure, and the
   page never calls it deletion.
-- No note moves from one person to another. Agent notes come only from a
-  person with the right to edit the agent.
+- No note of one person moves to the scope of another. The review keeps
+  its notes in the scope of the agent, so a note that it kept from the
+  runs of one person reaches the runs of every person of the agent, and
+  every viewer of the agent reads it. The limits are the rules of the
+  review (section 7.3), the journal with its undo, and `askFirst`. A pool
+  whose workers set `tools.memory.scope: principal` does not get the notes
+  of the review.
 - No model fills a free hole of a routine.
 - Context editing inside a run is a separate change.
 - Hosted runs (Claude Code and opencode) keep notes at the front through
