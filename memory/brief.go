@@ -38,12 +38,17 @@ var SystemSectionFront = strings.Replace(strings.Replace(SystemSection,
 
 // Section returns the memory section of the system prompt for the notes
 // of a scope: SystemSectionFront when a front keeps them, and
-// SystemSection otherwise.
+// SystemSection otherwise. A run of the principal scope also reads the
+// notes of its agent, and the section says so (AgentSection).
 func (s *Store) Section(scope fw.MemoryScope) string {
+	sec := SystemSection
 	if s.Front(scope) {
-		return SystemSectionFront
+		sec = SystemSectionFront
 	}
-	return SystemSection
+	if _, ok := AgentScope(scope); ok {
+		sec += AgentSection
+	}
+	return sec
 }
 
 // ContextList is the first line of the data of ContextText.
@@ -77,27 +82,175 @@ func (s *Store) ContextText(ctx context.Context, scope fw.MemoryScope) (string, 
 // notes that the index leaves out. Without a front, the text is the index
 // of ContextText, and Used holds no hash. With a front (docs/KNOWHOW.md
 // section 4.4), the store first takes the notes of the front into its copy
-// (Pull), then lists them by group with their labels (frontBrief).
+// (Pull), then lists them by group with their labels (frontGroup).
+//
+// A run of the principal scope also reads the notes of the agent scope of
+// its agent (AgentScope): with a front, the store pulls both scopes at
+// once. The block then lists two groups, each after its line: the notes
+// of the agent under AgentPrefix first (AgentNotesHead), then the notes of
+// the scope (OwnNotesHead). Both groups share the bounds of the block, and
+// each has half of them first (fitGroups). The same rules hold for both:
+// a note that is out of date or resting stays out and is counted. When
+// the agent has no note to list, the block is the block of the scope
+// alone.
 func (s *Store) Brief(ctx context.Context, scope fw.MemoryScope, hint string) (Brief, error) {
-	if s.Front(scope) {
-		return s.frontBrief(ctx, scope, hint)
+	front := s.Front(scope)
+	answered := true
+	if front {
+		answered = s.pullFor(ctx, scope)
 	}
-	shown, more, cut, err := s.indexNotes(ctx, scope)
-	if err != nil || (len(shown) == 0 && !cut) {
+	group := s.localGroup
+	if front {
+		group = s.frontGroup
+	}
+	own, err := group(ctx, scope, Prefix)
+	if err != nil {
 		return Brief{}, err
 	}
-	var sb strings.Builder
-	sb.WriteString(ContextList)
+	groups := []*briefGroup{own}
+	if agent, ok := AgentScope(scope); ok {
+		g, err := group(ctx, agent, AgentPrefix)
+		if err != nil {
+			return Brief{}, err
+		}
+		groups = []*briefGroup{g, own}
+	}
+	walked, cut := 0, false
+	for _, g := range groups {
+		walked += g.walked
+		cut = cut || g.cut
+	}
+	if walked == 0 && !cut && answered {
+		return Brief{}, nil
+	}
+	size := fitGroups(groups)
+	heads := len(groups) > 1 && groups[0].shown > 0
+	var lines []string
 	var used []fw.MemoryUsedRef
-	for _, n := range shown {
-		sb.WriteString("\n" + indexLine(n, ""))
-		used = append(used, fw.MemoryUsedRef{Ref: NoteRef(scope, n.name)})
+	more, outOfDate, resting := 0, 0, 0
+	for _, g := range groups {
+		if heads && g.shown > 0 {
+			lines = append(lines, g.head)
+		}
+		for _, n := range g.notes[:g.shown] {
+			lines = append(lines, g.line(n))
+			used = append(used, fw.MemoryUsedRef{Ref: NoteRef(g.scope, n.name), Hash: n.hash})
+		}
+		more += len(g.notes) - g.shown
+		outOfDate += g.outOfDate
+		resting += g.resting
+	}
+	var sb strings.Builder
+	if front {
+		// The first line counts only the notes that the block lists. The
+		// lines after the list count the notes that it leaves out.
+		fmt.Fprintf(&sb, "Notes: %d listed, %.1f of %d KB shown.", len(used), shownKB(size), IndexMaxBytes>>10)
+		if !answered {
+			sb.WriteString("\n" + NoAnswerNote)
+		}
+	} else {
+		sb.WriteString(ContextList)
+	}
+	for _, l := range lines {
+		sb.WriteString("\n" + l)
+	}
+	if left := leftOutLine(outOfDate, resting); left != "" {
+		sb.WriteString("\n" + left)
 	}
 	writeMore(&sb, more, hint)
 	if cut {
 		sb.WriteString("\n" + CutNote)
 	}
 	return Brief{Text: sb.String(), Used: used}, nil
+}
+
+// briefNote is one note of a group of the block, with its label and the
+// hash that fw.memory.used names.
+type briefNote struct {
+	note
+	hash  string
+	label string
+}
+
+// briefGroup is the notes of one scope for the block, in the order of the
+// block.
+type briefGroup struct {
+	scope  fw.MemoryScope
+	prefix string // the path of the notes for the model: Prefix or AgentPrefix
+	head   string // the line before the notes when the block lists two groups
+	notes  []briefNote
+	// walked counts the notes of the copy, also those that the block
+	// leaves out; outOfDate and resting count those that it leaves out
+	// because of their state.
+	walked             int
+	outOfDate, resting int
+	cut                bool // the walk stopped at its bound (CutNote)
+	shown              int  // the notes that the block lists (fitGroups)
+}
+
+// line returns the line of a note of the group in the block.
+func (g *briefGroup) line(n briefNote) string { return indexLineAt(g.prefix, n.note, n.label) }
+
+// newGroup returns an empty group of the notes of scope under prefix.
+func newGroup(scope fw.MemoryScope, prefix string) *briefGroup {
+	g := &briefGroup{scope: scope, prefix: prefix, head: OwnNotesHead}
+	if prefix == AgentPrefix {
+		g.head = AgentNotesHead
+	}
+	return g
+}
+
+// localGroup returns the notes of a scope without a front, newest first.
+func (s *Store) localGroup(ctx context.Context, scope fw.MemoryScope, prefix string) (*briefGroup, error) {
+	dir, err := s.Dir(scope)
+	if err != nil {
+		return nil, err
+	}
+	notes, cut, err := walkNotes(ctx, dir, IndexMaxNotes)
+	if err != nil {
+		return nil, fmt.Errorf("memory: index of %s: %w", dir, err)
+	}
+	g := newGroup(scope, prefix)
+	g.walked, g.cut = len(notes), cut
+	for _, n := range notes {
+		g.notes = append(g.notes, briefNote{note: n})
+	}
+	return g, nil
+}
+
+// fitGroups sets how many notes of each group the block lists, within
+// IndexMaxNotes and IndexMaxBytes for all the groups together, and
+// returns the bytes of the lines that it lists. Each group first has an
+// equal part of both bounds, so the notes of one group never push all the
+// notes of another out. Then the room that is left goes to the groups in
+// their order: with the notes of the agent first, those get it first. A
+// group lists its notes in order and stops at the first one that does not
+// fit, so a short note never comes before a note that ranks above it. The
+// first note of the block is listed even when its line alone passes the
+// bound. With one group, this is the bound of the index as it was.
+func fitGroups(groups []*briefGroup) int {
+	size, count := 0, 0
+	partNotes, partBytes := IndexMaxNotes/len(groups), IndexMaxBytes/len(groups)
+	for _, g := range groups {
+		gsize := 0
+		for g.shown < len(g.notes) {
+			n := len(g.line(g.notes[g.shown])) + 1
+			if g.shown == partNotes || (count > 0 && gsize+n > partBytes) {
+				break
+			}
+			g.shown, count, gsize, size = g.shown+1, count+1, gsize+n, size+n
+		}
+	}
+	for _, g := range groups {
+		for g.shown < len(g.notes) {
+			n := len(g.line(g.notes[g.shown])) + 1
+			if count == IndexMaxNotes || (count > 0 && size+n > IndexMaxBytes) {
+				break
+			}
+			g.shown, count, size = g.shown+1, count+1, size+n
+		}
+	}
+	return size
 }
 
 // writeMore adds the sentence that counts the notes that the index leaves

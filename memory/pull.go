@@ -14,6 +14,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
@@ -337,42 +338,60 @@ func (s *Store) localHashes(ctx context.Context, files *noteFiles) (map[string]s
 	return out, nil
 }
 
-// frontBrief is Brief with a front: it pulls the notes of the front, then
-// lists the notes of the copy in three groups, each note with its label:
-// notes that a person wrote ("(from a person)"), checked notes ("(checked
-// <date>)"), and the other notes. Inside a group, the notes that runs used
+// pullFor takes the notes of the front into the copy for a run of scope:
+// the notes of the scope, and the notes of the agent scope that a run of
+// the principal scope also reads (AgentScope). It pulls both at once, so
+// the start of a run waits PullWait at most. It reports whether the front
+// answered every pull.
+func (s *Store) pullFor(ctx context.Context, scope fw.MemoryScope) bool {
+	agent, ok := AgentScope(scope)
+	if !ok {
+		return s.Pull(ctx, scope).Answered
+	}
+	var wg sync.WaitGroup
+	var other PullResult
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		other = s.Pull(ctx, agent)
+	}()
+	own := s.Pull(ctx, scope)
+	wg.Wait()
+	return own.Answered && other.Answered
+}
+
+// frontGroup returns the notes of the copy of a scope for the block with
+// a front, after the pull, in three ranks, each note with its label: notes
+// that a person wrote ("(from a person)"), checked notes ("(checked
+// <date>)"), and the other notes. Inside a rank, the notes that runs used
 // most come first, then the newest. Notes that are out of date or resting
-// stay out of the list, and one line counts them. The first line says how
-// many notes the block lists, and no others, and how much of the bound
-// the list fills. A front that did not answer adds NoAnswerNote, and the
-// labels then come from the last answer of the front.
-func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint string) (Brief, error) {
-	pulled := s.Pull(ctx, scope)
+// stay out of the group, and the group counts them. The labels come from
+// the last answer of the front.
+func (s *Store) frontGroup(ctx context.Context, scope fw.MemoryScope, prefix string) (*briefGroup, error) {
 	dir, err := s.Dir(scope)
 	if err != nil {
-		return Brief{}, err
+		return nil, err
 	}
 	notes, cut, err := walkNotes(ctx, dir, -1)
 	if err != nil {
-		return Brief{}, fmt.Errorf("memory: index of %s: %w", dir, err)
+		return nil, fmt.Errorf("memory: index of %s: %w", dir, err)
 	}
-	if len(notes) == 0 && !cut && pulled.Answered {
-		return Brief{}, nil
+	g := newGroup(scope, prefix)
+	g.walked, g.cut = len(notes), cut
+	if len(notes) == 0 {
+		return g, nil
 	}
 	files, err := fw.DirFiles(dir)
 	if err != nil {
-		return Brief{}, err
+		return nil, err
 	}
 	st := readStateAt(dir)
 	type entry struct {
-		note
-		hash  string
-		group int
-		label string
-		uses  int
+		briefNote
+		rank int
+		uses int
 	}
 	var list []entry
-	outOfDate, resting := 0, 0
 	for _, n := range notes {
 		hash := ""
 		if c, ok := st.Hashes[n.name]; ok && c.Size == n.size && c.Mod == n.mod.UnixNano() && c.Ino == n.ino {
@@ -380,14 +399,14 @@ func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint strin
 		} else if h, err := hashFile(files, n.name); err == nil {
 			hash = h
 		}
-		e := entry{note: n, hash: hash, group: 2}
+		e := entry{briefNote: briefNote{note: n, hash: hash}, rank: 2}
 		if f, ok := st.Front[n.name]; ok && f.Hash == hash {
 			switch f.State {
 			case StateOutOfDate:
-				outOfDate++
+				g.outOfDate++
 				continue
 			case StateResting:
-				resting++
+				g.resting++
 				continue
 			case StatePutAway, StateWaiting:
 				continue
@@ -398,9 +417,9 @@ func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint strin
 			}
 			switch {
 			case f.By == "person" || strings.HasPrefix(f.By, "person:"):
-				e.group, e.label = 0, "(from a person)"
+				e.rank, e.label = 0, "(from a person)"
 			case f.State == StateChecked:
-				e.group, e.label = 1, "(checked)"
+				e.rank, e.label = 1, "(checked)"
 				if !f.At.IsZero() {
 					e.label = "(checked " + f.At.UTC().Format("2006-01-02") + ")"
 				}
@@ -410,8 +429,8 @@ func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint strin
 	}
 	slices.SortStableFunc(list, func(a, b entry) int {
 		switch {
-		case a.group != b.group:
-			return a.group - b.group
+		case a.rank != b.rank:
+			return a.rank - b.rank
 		case a.uses != b.uses:
 			return b.uses - a.uses
 		}
@@ -420,36 +439,10 @@ func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint strin
 		}
 		return strings.Compare(a.name, b.name)
 	})
-	var lines []string
-	var used []fw.MemoryUsedRef
-	size := 0
 	for _, e := range list {
-		line := indexLine(e.note, e.label)
-		if len(lines) == IndexMaxNotes || (len(lines) > 0 && size+len(line)+1 > IndexMaxBytes) {
-			break
-		}
-		lines = append(lines, line)
-		used = append(used, fw.MemoryUsedRef{Ref: NoteRef(scope, e.name), Hash: e.hash})
-		size += len(line) + 1
+		g.notes = append(g.notes, e.briefNote)
 	}
-	var sb strings.Builder
-	// The first line counts only the notes that the block lists. The lines
-	// after the list count the notes that it leaves out.
-	fmt.Fprintf(&sb, "Notes: %d listed, %.1f of %d KB shown.", len(lines), shownKB(size), IndexMaxBytes>>10)
-	if !pulled.Answered {
-		sb.WriteString("\n" + NoAnswerNote)
-	}
-	for _, l := range lines {
-		sb.WriteString("\n" + l)
-	}
-	if left := leftOutLine(outOfDate, resting); left != "" {
-		sb.WriteString("\n" + left)
-	}
-	writeMore(&sb, len(list)-len(lines), hint)
-	if cut {
-		sb.WriteString("\n" + CutNote)
-	}
-	return Brief{Text: sb.String(), Used: used}, nil
+	return g, nil
 }
 
 // leftOutLine counts the notes of the copy that the block leaves out

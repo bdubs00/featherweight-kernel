@@ -75,7 +75,9 @@ func (s *Store) Search(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQue
 
 // Recall searches the notes of the scope, the runs of its agent that its
 // principal started, the workspace of the run in ctx, and the skills that
-// the profile of the run allows. The runs, the files, and the skills need
+// the profile of the run allows. In the principal scope, the notes also
+// hold the notes of the agent scope of the agent (AgentScope), with their
+// refs mem://agent/<agent>/<name>. The runs, the files, and the skills need
 // the agent in ctx (fw.AgentFrom); without it, only notes match. With a
 // front, the search of runs also asks the archive of the front, and keeps
 // one hit per run id. The result says in its notes when a bound stopped a
@@ -133,12 +135,16 @@ func (s *Store) Recall(ctx context.Context, scope fw.MemoryScope, q fw.MemoryQue
 }
 
 // Get implements fw.Memory. A ref starts with mem://, run://, file://, or
-// skill://. A note ref resolves in the scope of the caller. A run ref that
-// this Task does not hold reads a run of the front that a search of the
-// same scope found.
+// skill://. A note ref resolves in the scope of the caller, and in the
+// principal scope a ref of a note of the agent (AgentScope) resolves in the
+// agent scope, to read. A run ref that this Task does not hold reads a run
+// of the front that a search of the same scope found.
 func (s *Store) Get(ctx context.Context, scope fw.MemoryScope, ref string) (fw.MemoryRecord, error) {
 	switch {
 	case strings.HasPrefix(ref, "mem://"):
+		if agent, ok := AgentScope(scope); ok && strings.HasPrefix(ref, NoteRef(agent, "")) {
+			return s.getNote(agent, ref)
+		}
 		return s.getNote(scope, ref)
 	case strings.HasPrefix(ref, "run://"):
 		id := strings.TrimPrefix(ref, "run://")
@@ -157,10 +163,28 @@ func (s *Store) Get(ctx context.Context, scope fw.MemoryScope, ref string) (fw.M
 	return fw.MemoryRecord{}, fmt.Errorf("the ref %q must start with mem://, run://, file://, or skill://", ref)
 }
 
-// searchNotes searches the notes of the scope: through the index when the
-// build has one, else by a scan that reads at most MaxSearchBytes. It
-// returns a note for the reader when a bound stopped the scan.
+// searchNotes searches the notes of the scope, and in the principal scope
+// the notes of the agent too (AgentScope). The scans of both read at most
+// MaxSearchBytes together. It returns a note for the reader when a bound
+// stopped a scan.
 func (s *Store) searchNotes(ctx context.Context, scope fw.MemoryScope, terms []string) ([]fw.MemoryHit, string) {
+	budget := int64(MaxSearchBytes)
+	hits, note := s.searchScope(ctx, scope, terms, &budget)
+	if agent, ok := AgentScope(scope); ok {
+		more, n := s.searchScope(ctx, agent, terms, &budget)
+		hits = append(hits, more...)
+		if note == "" {
+			note = n
+		}
+	}
+	return hits, note
+}
+
+// searchScope searches the notes of one scope: through the index when the
+// build has one, else by a scan that reads at most budget bytes and takes
+// what it read from budget. It returns a note for the reader when a bound
+// stopped the scan.
+func (s *Store) searchScope(ctx context.Context, scope fw.MemoryScope, terms []string, budget *int64) ([]fw.MemoryHit, string) {
 	dir, err := s.Dir(scope)
 	if err != nil {
 		return nil, ""
@@ -184,15 +208,14 @@ func (s *Store) searchNotes(ctx context.Context, scope fw.MemoryScope, terms []s
 	if cut {
 		note = fmt.Sprintf("The search of the notes stopped after %d entries of the memory directory, so some notes were not searched.", maxWalk)
 	}
-	budget := int64(MaxSearchBytes)
 	var hits []fw.MemoryHit
 	for _, n := range notes {
-		if budget < min(n.size, maxRead) {
+		if *budget < min(n.size, maxRead) {
 			note = fmt.Sprintf("The search of the notes stopped after it read %d MB, so some notes were not searched.", MaxSearchBytes>>20)
 			break
 		}
 		body := readBounded(files, n.name, maxRead)
-		budget -= int64(len(body))
+		*budget -= int64(len(body))
 		score, snippet := matchScore(terms, n.name, n.title, body)
 		if score == 0 {
 			continue

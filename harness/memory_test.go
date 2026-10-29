@@ -1627,3 +1627,100 @@ func TestScanWrapsAMessageFromAnAgent(t *testing.T) {
 		t.Fatalf("prompt = %q, %d, fromAgent %v; want %q", text, last, st.fromAgent, want)
 	}
 }
+
+// TestMemoryServerReadsTheAgent checks the memory server of a hosted run of
+// the principal scope: list and recall show the notes of the agent scope
+// under /memories/.agent, and fw.memory.used names a note of the agent by
+// its ref. A remember or a forget of such a note answers that it belongs
+// to the agent, and the note stays as it is, while the run keeps its own
+// notes. A run of the agent scope keeps its rules: .agent is a hidden name
+// there.
+func TestMemoryServerReadsTheAgent(t *testing.T) {
+	d := newDirs(t)
+	a, _ := memAgent(t, d, "kind: claude-code", fw.NewMemLedger(), "anthropic/claude-test", false, func(cfg *fw.Config) {
+		cfg.Tools.Memory.Scope = fw.MemoryScopePrincipal
+	})
+	h := a.Runner().(*host)
+	ctx := testCtx(t)
+	review := "Gitea refuses a label name with a space.\n"
+	// A run without a principal keeps a note in the agent scope.
+	local := fw.RunInfo{RunID: "run-0", Agent: "default"}
+	agent := h.mem.Scope(local)
+	if _, err := h.mem.Remember(fw.WithRunInfo(ctx, local), agent, fw.MemoryRecord{Ref: memory.NoteRef(agent, "labels.md"), Body: review}, ""); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var changes []fw.MemoryChangedData
+	var used []fw.MemoryUsedRef
+	newRun := func(info fw.RunInfo) *memRun {
+		run := testRun(h, info.RunID, info.Agent, &mu, &changes)
+		run.info, run.scope = info, h.mem.Scope(info)
+		run.use = func(_ context.Context, d fw.MemoryUsedData) {
+			mu.Lock()
+			used = append(used, d.Refs...)
+			mu.Unlock()
+		}
+		return run
+	}
+	run := newRun(fw.RunInfo{RunID: "run-p", Agent: "default", Principal: "ada@example.com"})
+	if run.scope.Kind != fw.MemoryPrincipalScope {
+		t.Fatalf("scope = %+v", run.scope)
+	}
+	call := func(run *memRun, tool, input string) (string, bool) {
+		t.Helper()
+		canon := canonOf(t, tool, input)
+		return h.memCall(ctx, &memArm{tool: tool, input: canon, callID: "call_" + tool, run: run}, canon)
+	}
+
+	if text, isErr := call(run, memRemember, `{"path":"prefs.md","text":"Ada wants short answers.\n"}`); isErr {
+		t.Fatalf("remember the own note: %q", text)
+	}
+	text, isErr := call(run, memList, `{}`)
+	wantList := memory.ContextList + "\n" + memory.AgentNotesHead + "\n- /memories/.agent/labels.md: Gitea refuses a label name with a space. ("
+	if isErr || !strings.HasPrefix(text, wantList) || !strings.Contains(text, "\n"+memory.OwnNotesHead+"\n- /memories/prefs.md: Ada wants short answers. (") {
+		t.Fatalf("list = %q", text)
+	}
+	for _, ref := range []string{"/memories/.agent/labels.md", "mem://agent/default/labels.md"} {
+		text, isErr := call(run, memRecall, `{"ref":"`+ref+`"}`)
+		if isErr || !strings.HasPrefix(text, "mem://agent/default/labels.md\nPath: /memories/.agent/labels.md\n") || !strings.Contains(text, review) {
+			t.Fatalf("recall %s = %q", ref, text)
+		}
+	}
+	if text, isErr := call(run, memRecall, `{"query":"gitea","kinds":["note"]}`); isErr || !strings.Contains(text, "[note] mem://agent/default/labels.md") {
+		t.Fatalf("recall a query = %q", text)
+	}
+	if text, isErr := call(run, memRecall, `{"ref":"/memories/.agent"}`); !isErr || !strings.Contains(text, "holds the notes of this agent") {
+		t.Fatalf("recall of the directory = %q", text)
+	}
+	for _, c := range []struct{ tool, input string }{
+		{memRemember, `{"path":"/memories/.agent/labels.md","text":"x"}`},
+		{memRemember, `{"path":".agent/new.md","text":"x"}`},
+		{memForget, `{"path":"/memories/.agent/labels.md"}`},
+		{memForget, `{"path":"/memories/.agent"}`},
+	} {
+		if text, isErr := call(run, c.tool, c.input); !isErr || !strings.Contains(text, "belong to this agent") || !strings.Contains(text, "Keep your own note instead") {
+			t.Fatalf("%s %s = %q, %v", c.tool, c.input, text, isErr)
+		}
+	}
+	if got := readFile(t, filepath.Join(d.fwHome, "memory", "agents", "default", "labels.md")); got != review {
+		t.Fatalf("the note of the agent = %q", got)
+	}
+	mu.Lock()
+	for _, c := range changes {
+		if c.Ref != "mem://principal/default/prefs.md" {
+			t.Fatalf("a change outside the scope of the run: %+v", c)
+		}
+	}
+	if !slices.Contains(used, fw.MemoryUsedRef{Ref: "mem://agent/default/labels.md", Hash: sha(review)}) {
+		t.Fatalf("used = %+v", used)
+	}
+	mu.Unlock()
+	if _, err := memCanon(memRemember, json.RawMessage(`{"path":".agent/.x/y.md","text":"x"}`)); err == nil {
+		t.Fatal("the canonical input took a hidden name under .agent")
+	}
+
+	// A run of the agent scope: .agent is a hidden name.
+	if text, isErr := call(newRun(local), memRemember, `{"path":".agent/x.md","text":"x"}`); !isErr || !strings.Contains(text, "hidden") {
+		t.Fatalf("remember under .agent in the agent scope = %q", text)
+	}
+}

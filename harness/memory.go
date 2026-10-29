@@ -769,18 +769,18 @@ func memCanon(tool string, raw json.RawMessage) (json.RawMessage, error) {
 			}
 			switch {
 			case f.name == "path":
-				name, err := memNoteName(s)
+				full, err := memCanonPath(s)
 				if err != nil {
 					return nil, err
 				}
-				s = memory.Prefix + "/" + name
+				s = full
 			case f.name == "ref":
 				if s = strings.TrimSpace(s); strings.HasPrefix(s, memory.Prefix) {
-					name, err := memNoteName(s)
+					full, err := memCanonPath(s)
 					if err != nil {
 						return nil, err
 					}
-					s = memory.Prefix + "/" + name
+					s = full
 				}
 			}
 			out[f.name] = s
@@ -1039,6 +1039,9 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		if err := decodeArgs(canon, &in); err != nil {
 			return "Error: " + err.Error(), true
 		}
+		if name, ok := memAgentName(run.scope, in.Path); ok {
+			return memory.AgentReadOnly(name), true
+		}
 		name, err := memNoteName(in.Path)
 		if err != nil {
 			return "Error: " + err.Error(), true
@@ -1070,6 +1073,9 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		if err := decodeArgs(canon, &in); err != nil {
 			return "Error: " + err.Error(), true
 		}
+		if name, ok := memAgentName(run.scope, in.Path); ok {
+			return memory.AgentReadOnly(name), true
+		}
 		name, err := memNoteName(in.Path)
 		if err != nil {
 			return "Error: " + err.Error(), true
@@ -1092,18 +1098,38 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		if err != nil {
 			return "Error: " + err.Error(), true
 		}
-		if len(recs) == 0 && !cut {
+		// A run of the principal scope also lists the notes of its agent,
+		// first, as the block at the start of the run does.
+		var agentRecs []fw.MemoryRecord
+		if agent, ok := memory.AgentScope(scope); ok {
+			var acut bool
+			if agentRecs, acut, err = store.List(ctx, agent); err != nil {
+				return "Error: " + err.Error(), true
+			}
+			cut = cut || acut
+		}
+		if len(recs) == 0 && len(agentRecs) == 0 && !cut {
 			return "No notes under " + memory.Prefix + ".", false
 		}
 		var sb strings.Builder
 		sb.WriteString(memory.ContextList)
-		for _, rec := range recs {
-			fmt.Fprintf(&sb, "\n- %s", memShow(scope, rec.Ref))
-			if rec.Title != "" {
-				fmt.Fprintf(&sb, ": %s", memory.ClipLine(rec.Title))
+		write := func(recs []fw.MemoryRecord) {
+			for _, rec := range recs {
+				fmt.Fprintf(&sb, "\n- %s", memShow(scope, rec.Ref))
+				if rec.Title != "" {
+					fmt.Fprintf(&sb, ": %s", memory.ClipLine(rec.Title))
+				}
+				fmt.Fprintf(&sb, " (%d bytes, %s)", rec.Size, rec.Updated.UTC().Format(time.RFC3339))
 			}
-			fmt.Fprintf(&sb, " (%d bytes, %s)", rec.Size, rec.Updated.UTC().Format(time.RFC3339))
 		}
+		if len(agentRecs) > 0 {
+			sb.WriteString("\n" + memory.AgentNotesHead)
+			write(agentRecs)
+			if len(recs) > 0 {
+				sb.WriteString("\n" + memory.OwnNotesHead)
+			}
+		}
+		write(recs)
 		if cut {
 			sb.WriteString("\n" + memory.CutNote)
 		}
@@ -1116,7 +1142,16 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 // a run with a directory of its own reads no file of the workspace, and no
 // run reads a file under a private path or a hidden path (fileRefDenied).
 func (h *host) memGet(ctx context.Context, run *memRun, ref string) (string, bool) {
-	if strings.HasPrefix(ref, memory.Prefix) {
+	if name, ok := memAgentName(run.scope, ref); ok && strings.HasPrefix(ref, memory.Prefix) {
+		agent, _ := memory.AgentScope(run.scope)
+		if name == "." {
+			return "Error: " + memory.AgentPrefix + " holds the notes of this agent. Name one of them, such as " + memory.AgentPrefix + "/notes.md, or list them with list.", true
+		}
+		if err := memory.CheckName(name); err != nil {
+			return "Error: " + err.Error(), true
+		}
+		ref = memory.NoteRef(agent, name)
+	} else if strings.HasPrefix(ref, memory.Prefix) {
 		name, err := memNoteName(ref)
 		if err != nil {
 			return "Error: " + err.Error(), true
@@ -1267,6 +1302,62 @@ func (h *host) refPrivate(ref string) bool {
 // /memories/notes.md or notes.md. A name with a hidden part, or one that
 // leaves the memory, is refused.
 func memNoteName(p string) (string, error) {
+	name, err := memRel(p)
+	if err != nil {
+		return "", err
+	}
+	if err := memory.CheckName(name); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+// memCanonPath returns the full form of the path of a note that a model
+// gives: /memories/<name>, or /memories/.agent/<name> for a note of the
+// agent, which a run of the principal scope reads (memAgentName), or
+// /memories/.agent for their directory. The form does not depend on the
+// scope of the run: memCall decides what a run does with such a path, as
+// the memory tool of the turn loop does after the policy.
+func memCanonPath(p string) (string, error) {
+	rel, err := memRel(p)
+	if err != nil {
+		return "", err
+	}
+	if name, ok := memory.AgentName(rel); ok {
+		if name == "." {
+			return memory.AgentPrefix, nil
+		}
+		if err := memory.CheckName(name); err != nil {
+			return "", err
+		}
+		return memory.AgentPrefix + "/" + name, nil
+	}
+	if err := memory.CheckName(rel); err != nil {
+		return "", err
+	}
+	return memory.Prefix + "/" + rel, nil
+}
+
+// memAgentName reports whether the path that a model gives names the
+// notes of the agent under /memories/.agent, in a run of the principal
+// scope (memory.AgentScope), and returns the name of the note in the scope
+// of the agent, or "." for the directory. A run of another scope names no
+// note of the agent this way.
+func memAgentName(scope fw.MemoryScope, p string) (string, bool) {
+	if _, ok := memory.AgentScope(scope); !ok {
+		return "", false
+	}
+	rel, err := memRel(p)
+	if err != nil {
+		return "", false
+	}
+	return memory.AgentName(rel)
+}
+
+// memRel returns the clean name, relative to the memory, of the path that
+// a model gives: /memories/notes.md or notes.md. It does not check the
+// name of a note.
+func memRel(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if rest, ok := strings.CutPrefix(p, memory.Prefix); ok {
 		if rest != "" && rest[0] != '/' {
@@ -1279,22 +1370,14 @@ func memNoteName(p string) (string, error) {
 	if p == "" {
 		return "", errors.New("the path names no note; name one such as notes.md")
 	}
-	name := path.Clean(p)
-	if err := memory.CheckName(name); err != nil {
-		return "", err
-	}
-	return name, nil
+	return path.Clean(p), nil
 }
 
 // memShow returns the path of a note ref, such as /memories/notes.md, or
-// the ref itself when it names no note of the scope.
-func memShow(scope fw.MemoryScope, ref string) string {
-	prefix := memory.NoteRef(scope, "")
-	if name, ok := strings.CutPrefix(ref, prefix); ok && name != "" {
-		return memory.Prefix + "/" + name
-	}
-	return ref
-}
+// /memories/.agent/notes.md for a note of the agent that a run of the
+// principal scope reads, or the ref itself when it names no note that the
+// scope reads (memory.ShowRef).
+func memShow(scope fw.MemoryScope, ref string) string { return memory.ShowRef(scope, ref) }
 
 // decodeArgs decodes a canonical input. An unknown field is an error, as
 // the input schema says.

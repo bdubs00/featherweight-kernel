@@ -165,6 +165,34 @@ in the files of the process, because the front has no such scope.
   replaces the Task and its `$FW_HOME`, so the notes of a replaced Task
   reach the front only if the deploy copies `$FW_HOME/memory` into the
   new Task before its first run.
+- Notes of the agent: the after-work review keeps its notes in the scope
+  `agent` (section 7.2). A run of the scope `principal` reads them too,
+  beside the notes of its principal, and never changes them. Its own
+  writes still go to its scope `principal`. When the run starts, the
+  store pulls the scope `agent` as it pulls the scope of the run
+  (`GET /v1/knowhow/notes?agent=<agent>&scope=agent`, with no
+  `principal`). It pulls both at once, so the start of a run still waits
+  5 s at most. The pull of the scope `agent` keeps the rules above, so a
+  copy from before the front goes to the front as a note of the agent, as
+  it does for a run of the scope `agent`. Without a front, the run reads
+  the local scope `agent` of the same home: the notes that runs without a
+  principal keep there. This is how `scope: principal` works, with no
+  switch. The scopes `agent` and `shared` do not change.
+- The model sees the notes of the agent under `/memories/.agent`. A part
+  of a name that starts with `.` is never a note (`memory.CheckName`):
+  the store, the native API, and the pull refuse such a name, and the
+  walks skip it. So no note of the principal can take this path, and the
+  notes of the agent never hide a note of the principal. The memory tool
+  reads a note there with `view`, and a view of `/memories` lists them
+  after the notes of the run. A `create`, a `str_replace`, an `insert`, a
+  `delete`, or a `rename` that names a path under `/memories/.agent`
+  changes nothing, and the tool answers with an error: "Error: the notes
+  under /memories/.agent belong to this agent, so this run can read them
+  but cannot change them. Keep your own note instead, such as
+  /memories/labels.md." The hosted `fw-memory` server of Claude Code and
+  opencode does the same: `list` names the notes of the agent first,
+  `recall` reads `/memories/.agent/<name>`, and `remember` and `forget`
+  of such a path answer the same error.
 - Push: every change through `memory.Store` sends the new text to the
   front. This includes the memory tool, the native API, and the hosted
   `fw-memory` server. The push carries the hash that the copy had as
@@ -254,6 +282,38 @@ block lists, so a model never looks for a note that the line counts and
 the list lacks. Hermes Agent shows the same, and an agent that sees the
 limit keeps its notes short.
 
+A run of the scope `principal` whose agent has notes to list gets two
+groups, each after one line:
+
+```
+Notes: 3 listed, 0.3 of 4 KB shown.
+Notes of this agent, read-only:
+- /memories/.agent/rules.md: Tickets close after 7 days. (from a person)
+- /memories/.agent/gotchas/labels.md: Gitea refuses a label name with a space. (checked 2026-10-27)
+Your own notes:
+- /memories/prefs.md: Ada wants short answers.
+1 note is out of date. View /memories to read them.
+```
+
+- The notes of the agent come first. Inside each group, the order and the
+  labels above hold.
+- The same rules hold for both groups. A note that is out of date,
+  resting, put away, or waiting stays out, and the line after the list
+  counts the notes of both groups. A held-back run gets neither group.
+- The bound of about 4 KB and 40 notes covers both groups together. Each
+  group first has half of it, 2 KB and 20 notes, so the notes of one
+  group never push all the notes of the other out. The room that one
+  group leaves goes to the other. When both need more, the notes of the
+  agent get what is left first. The first line counts the notes of both
+  groups.
+- When the agent has no note to list, the block is the block of the
+  principal alone, without the two lines.
+- Without a front, the block lists the same two groups, each newest
+  first, with no labels.
+- The memory section of the system prompt says where the notes of the
+  agent are, and that the run can read them but not change them
+  (`memory.AgentSection`).
+
 What the kernel reads for this block:
 
 - The group and the label come from the list of the front: `by`, `state`,
@@ -285,6 +345,10 @@ What the kernel reads for this block:
 - A view of a directory reads no note and records nothing. A search of
   recall records nothing either: only a read with a ref counts.
 - Without a front, `brief` names its notes without a hash.
+- A run of the scope `principal` names a note of the agent with the ref
+  of the scope `agent`, such as `mem://agent/triage/gotchas/labels.md`,
+  in `brief`, `view`, and `recall`. So the front counts the use on the
+  note of the agent.
 - A hosted run records `brief` for its first prompt and `recall` for a
   read of `fw-memory` with a ref.
 
@@ -303,6 +367,8 @@ skipped in a held-back run, not failed (docs/ARCHITECTURE.md section
 caused.
 
 `fw.run.started` records `knowhow: "off"`. Every other run is a normal run.
+A held-back run of the scope `principal` reads neither its own notes nor
+the notes of the agent.
 A held-back run of Claude Code or opencode gets no memory tools either.
 
 ### 4.7 Recall across Tasks
@@ -315,6 +381,13 @@ hits with the local runs, keeps one hit per run id, and keeps the bound of
 hit. A ref of a run that only the front holds reads the run that the last
 search of the same scope found. If the front does not answer within 5 s,
 the result says so in a note.
+
+In the scope `principal`, a search of notes also finds the notes of the
+agent, with refs `mem://agent/<agent>/<name>`. A ref of such a note reads
+it, and nothing writes it. The scans of both scopes read 16 MB together.
+The search of the native API (`GET /v1/memory`) shares the store, so it
+finds them too. `GET /v1/memory/notes` and the routes of one note stay in
+the scope of the caller.
 
 ### 4.8 Routines bound to a Duty, and their risk
 
@@ -738,8 +811,8 @@ page never shows a percentage from fewer runs. Two examples:
   runs of one person reaches the runs of every person of the agent, and
   every viewer of the agent reads it. The limits are the rules of the
   review (section 7.3), the journal with its undo, and `askFirst`. A pool
-  whose workers set `tools.memory.scope: principal` does not get the notes
-  of the review.
+  whose workers set `tools.memory.scope: principal` reads the notes of the
+  review too, and cannot change them (section 4.2).
 - No model fills a free hole of a routine.
 - Context editing inside a run is a separate change.
 - Hosted runs (Claude Code and opencode) keep notes at the front through

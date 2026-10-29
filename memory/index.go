@@ -117,8 +117,12 @@ func (s *Store) indexNotes(ctx context.Context, scope fw.MemoryScope) (shown []n
 // indexLine returns the line of a note in the index: "- /memories/<path>:
 // <first line>", with the label after it, such as "(from a person)", when
 // label is not empty. The path is escaped (EscapeName).
-func indexLine(n note, label string) string {
-	line := "- " + Prefix + "/" + EscapeName(n.name)
+func indexLine(n note, label string) string { return indexLineAt(Prefix, n, label) }
+
+// indexLineAt is indexLine for a note whose path for the model starts with
+// prefix, such as AgentPrefix for a note of the agent.
+func indexLineAt(prefix string, n note, label string) string {
+	line := "- " + prefix + "/" + EscapeName(n.name)
 	if n.title != "" {
 		line += ": " + n.title
 	}
