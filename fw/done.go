@@ -667,7 +667,7 @@ func (a *Agent) runDone(ctx context.Context, rs *runState, c *cursor, d *Done, p
 	for i, chk := range d.Checks {
 		if _, ok := tools[chk.Tool]; !ok && held && KnowhowTool(chk.Tool) {
 			pass.Checks = append(pass.Checks, DoneResult{Name: chk.Name, Tool: chk.Tool, Passed: true,
-				Skipped: "this run is held back from what the agent learned, so it has no tool " + chk.Tool})
+				Skipped: "this is a comparison run, which goes without what the agent learned, so it has no tool " + chk.Tool})
 			continue
 		}
 		var why string

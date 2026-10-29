@@ -667,7 +667,7 @@ func TestDoneHeldBackSkips(t *testing.T) {
 	a := newTestAgent(t, newScript(write, endTurn("Done.")).Model(), WithTools(pathTools(t)...), WithProfile(prof))
 	r, err := a.Run(ctx, "Write the draft.", AsAgent("writer"), held)
 	mustState(t, r, err, StateCompleted)
-	if r.Done == nil || len(r.Done.Checks) != 1 || !r.Done.Checks[0].Passed || !strings.Contains(r.Done.Checks[0].Skipped, "held back") ||
+	if r.Done == nil || len(r.Done.Checks) != 1 || !r.Done.Checks[0].Passed || !strings.Contains(r.Done.Checks[0].Skipped, "comparison run") ||
 		!r.Done.Weak || r.Stop != RunStopAnswered {
 		t.Fatalf("held back: done %+v, stop %q", r.Done, r.Stop)
 	}
