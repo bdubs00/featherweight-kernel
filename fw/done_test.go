@@ -761,3 +761,116 @@ func TestDoneAnswer(t *testing.T) {
 		})
 	}
 }
+
+// A run that stops at a limit of tool calls, of turns, of tokens, or of
+// cost runs its checks after its final report, or at once when it makes
+// none, with their own budget. A pass gives the run its state of done, and
+// the run still fails at its limit. A failed pass gives the model no other
+// turn. A check of the answer reads the final report.
+func TestDoneAtALimit(t *testing.T) {
+	ctx := testCtx(t)
+	prices := PriceTable{"anthropic/claude-opus-5-5": {Input: 1_000_000, Output: 0}}
+	report := endTurn("I fixed the retries. The tests are left to run.")
+	for _, c := range []struct {
+		name    string
+		script  []*Response
+		budget  Budget
+		checks  []DoneCheck
+		limit   string
+		done    string
+		weak    bool
+		report  bool
+		calls   int // the calls of the gate
+		reason  string
+		priced  bool
+		answers int // the model calls
+	}{
+		{name: "tool calls, the work done", script: []*Response{callTools(use("c1", "fix", `{}`)), report},
+			budget: Budget{MaxToolCalls: 1}, checks: []DoneCheck{testsPass}, limit: "maxToolCalls", done: DoneChecked, report: true, calls: 1, answers: 2},
+		{name: "tool calls, the work not done", script: []*Response{callTools(use("c1", "tests", `{}`)), report},
+			budget: Budget{MaxToolCalls: 1}, checks: []DoneCheck{testsPass}, limit: "maxToolCalls", done: DoneFailed, report: true, calls: 2,
+			reason: "the run stopped at its limit of 1 tool calls (budget.maxToolCalls), so the model gets no other turn", answers: 2},
+		{name: "turns", script: []*Response{callTools(use("c1", "fix", `{}`)), report},
+			budget: Budget{MaxTurns: 1}, checks: []DoneCheck{testsPass}, limit: "maxTurns", done: DoneChecked, report: true, calls: 1, answers: 2},
+		{name: "turns, a check of the report", script: []*Response{callTools(use("c1", "fix", `{}`)), report},
+			budget: Budget{MaxTurns: 1}, checks: []DoneCheck{testsPass, {Tool: DoneAnswer, Contains: []string{"fixed the retries"}}},
+			limit: "maxTurns", done: DoneChecked, report: true, calls: 1, answers: 2},
+		// The second response passes the limit of money, so its call does
+		// not run, and the run stops with no report.
+		{name: "tokens", script: []*Response{callTools(use("c1", "fix", `{}`)), callTools(use("c2", "fix", `{}`)), endTurn("never")},
+			budget: Budget{MaxTokens: 20}, checks: []DoneCheck{testsPass}, limit: "maxTokens", done: DoneChecked, calls: 1, answers: 2},
+		{name: "cost", script: []*Response{callTools(use("c1", "fix", `{}`)), callTools(use("c2", "fix", `{}`)), endTurn("never")},
+			budget: Budget{MaxCostUSD: 15}, checks: []DoneCheck{testsPass}, limit: "maxCostUSD", done: DoneChecked, calls: 1, priced: true, answers: 2},
+		{name: "cost, a check of the answer with no report", script: []*Response{callTools(use("c1", "fix", `{}`)), callTools(use("c2", "fix", `{}`)), endTurn("never")},
+			budget: Budget{MaxCostUSD: 15}, checks: []DoneCheck{{Tool: DoneAnswer, Contains: []string{"fixed"}}}, limit: "maxCostUSD", done: DoneFailed,
+			priced: true, answers: 2, reason: "the run stopped at its limit of $15.0000 (budget.maxCostUSD), so the model gets no other turn"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := &gate{}
+			s := newScript(c.script...)
+			prof := AgentProfile{Name: "fixer", Done: &Done{Checks: c.checks}}
+			opts := []Option{WithTools(g.tools()...), WithProfile(prof)}
+			if c.priced {
+				opts = append(opts, WithPrices(prices))
+			}
+			a := newTestAgent(t, s.Model(), opts...)
+			r, err := a.Run(ctx, "Fix the checkout retries.", AsAgent("fixer"), WithRunBudget(c.budget))
+			mustState(t, r, err, StateFailed)
+			if len(s.requests()) != c.answers || g.count() != c.calls {
+				t.Fatalf("model calls %d, calls of the gate %d", len(s.requests()), g.count())
+			}
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			if len(doneNotes(t, evs)) != 0 {
+				t.Fatalf("the model got the failures after the stop: %v", eventTypes(evs))
+			}
+			passes := donePassesOf(t, evs)
+			if len(passes) != 1 || passes[0].Limit != c.limit || passes[0].Answer != 0 || passes[0].Continue ||
+				passes[0].Passed != (c.done == DoneChecked) || passes[0].Weak != c.weak || passes[0].Reason != c.reason {
+				t.Fatalf("passes = %+v", passes)
+			}
+			types := eventTypes(evs)
+			n := len(types)
+			if types[n-1] != EvRunFinished || types[n-2] != EvDoneChecked {
+				t.Fatalf("events = %v", types)
+			}
+			if c.report && (r.Output != TextOf(report.Content) || types[n-3] == EvBudgetExceeded) {
+				t.Fatalf("output %q, events %v", r.Output, types)
+			}
+			d := finishedOf(t, evs)
+			if d.Outcome != OutcomeFailed || d.Done != c.done || d.DoneWeak != c.weak || d.Stop != RunStopBudget(c.limit) ||
+				d.Error != "budget exceeded: "+c.limit {
+				t.Fatalf("finished = %+v", d)
+			}
+			for _, got := range []*Run{r, ProjectRun(evs)} {
+				if got.State != StateFailed || got.Stop != RunStopBudget(c.limit) || got.Done == nil || got.Done.State != c.done || len(got.Done.Checks) != len(c.checks) {
+					t.Fatalf("run = %+v, done %+v", got, got.Done)
+				}
+			}
+			own := 0
+			for _, e := range evs {
+				if e.Type == EvToolRequested && !doneCall(e) {
+					own++
+				}
+			}
+			if r.Usage.ToolCalls != own {
+				t.Fatalf("the calls of the checks count in the usage: %+v, own calls %d", r.Usage, own)
+			}
+		})
+	}
+}
+
+// At the deadline of its working time, the limit of a person's time, a
+// run makes its final report and runs no check.
+func TestDoneNotAtTheDeadline(t *testing.T) {
+	ctx := testCtx(t)
+	g := &gate{}
+	s := newCallSteps(hang(nil), answer(endTurn("the report")))
+	prof := AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{testsPass}}}
+	a := newTestAgent(t, s.Model(), WithTools(g.tools()...), WithProfile(prof))
+	r, err := a.Run(ctx, "Fix the checkout retries.", AsAgent("fixer"), WithRunBudget(Budget{Deadline: 200 * time.Millisecond}))
+	mustState(t, r, err, StateFailed)
+	evs := ledgerEvents(t, a.Ledger(), r.ID)
+	if g.count() != 0 || countType(evs, EvDoneChecked) != 0 || r.Done != nil || r.Stop != RunStopBudget("deadline") || r.Output != "the report" {
+		t.Fatalf("checks %d, run %+v", g.count(), r)
+	}
+}

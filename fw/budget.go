@@ -112,9 +112,10 @@ func (c *cursor) lastReport() string {
 
 // stopOver ends a run at the limit o and appends fw.budget.exceeded. A run
 // that makes its final report (wantsReport) goes on to stepReport, which
-// finishes it; every other stop finishes the run as failed at once. No run
-// under the owner of a shared limit can spend more, so the open ones stop
-// now instead of at their next step.
+// finishes it; every other stop finishes the run as failed at once, after
+// the checks of its definition of done (doneAtLimit). No run under the
+// owner of a shared limit can spend more, so the open ones stop now
+// instead of at their next step.
 func (a *Agent) stopOver(ctx context.Context, rs *runState, c *cursor, o overrun) error {
 	report := a.wantsReport(ctx, rs, c, o)
 	d := o.data()
@@ -129,6 +130,19 @@ func (a *Agent) stopOver(ctx context.Context, rs *runState, c *cursor, o overrun
 			a.stopTree(o)
 		}
 		return nil
+	}
+	if doneAtLimit(rs, o) {
+		// The runs under this run must not work while the checks run.
+		if o.shared() {
+			a.stopTree(o)
+		}
+		pass, err := a.limitDone(ctx, rs, c, d, c.lastReport())
+		if err != nil {
+			return err
+		}
+		rs.emitMu.Lock()
+		defer rs.emitMu.Unlock()
+		return a.finishAtLimitLocked(ctx, rs, c.lastReport(), d, pass)
 	}
 	if err := a.finishAs(ctx, rs, OutcomeFailed, c.lastReport(), "budget exceeded: "+o.text(rs.id), RunStopBudget(o.limit)); err != nil {
 		return err
@@ -308,21 +322,42 @@ func (a *Agent) stepReport(ctx context.Context, rs *runState, c *cursor, n int) 
 }
 
 // finishReport finishes a run after its final report call: the text of
-// the report is the output, and the error names the limit. A follow-up or
-// a change of the budget that arrived since the driver read the log keeps
-// the run open, as it does at the end of a turn: the next step checks the
-// budget again, so a larger budget lets the run go on, and a run that
-// stays over its limit stops with the report as its output.
+// the report is the output, and the error names the limit. The checks of
+// the definition of done of the run run first, after the report
+// (limitDone), except at the deadline. A follow-up or a change of the
+// budget that arrived since the driver read the log keeps the run open,
+// as it does at the end of a turn, and a pass that ran meanwhile is not
+// recorded: the next step checks the budget again, so a larger budget lets
+// the run go on, and a run that stays over its limit stops with the report
+// as its output.
 func (a *Agent) finishReport(ctx context.Context, rs *runState, c *cursor, n int) error {
-	rs.emitMu.Lock()
-	defer rs.emitMu.Unlock()
-	for _, e := range rs.events[n:] {
-		if freshInput(e) {
+	fresh := func() bool {
+		for _, e := range rs.events[n:] {
+			if freshInput(e) {
+				return true
+			}
+		}
+		return false
+	}
+	var pass *DoneCheckedData
+	if doneAtLimit(rs, overrun{limit: c.rep.data.Limit, owner: rs}) {
+		rs.emitMu.Lock()
+		cut := fresh()
+		rs.emitMu.Unlock()
+		if cut {
 			return nil
 		}
+		var err error
+		if pass, err = a.limitDone(ctx, rs, c, c.rep.data, c.rep.text); err != nil {
+			return err
+		}
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeFailed, Output: c.rep.text, Error: "budget exceeded: " + c.rep.data.text(rs.id), Stop: RunStopBudget(c.rep.data.Limit)})
-	return err
+	rs.emitMu.Lock()
+	defer rs.emitMu.Unlock()
+	if fresh() {
+		return nil
+	}
+	return a.finishAtLimitLocked(ctx, rs, c.rep.text, c.rep.data, pass)
 }
 
 // freshInput reports whether an event gives a run new input: a message
@@ -353,14 +388,14 @@ func limitPhrase(d BudgetExceededData, self string) string {
 	switch d.Limit {
 	case "maxTurns":
 		return fmt.Sprintf("its limit of %d model turns (budget.maxTurns)", int(d.Max))
-	case "maxToolCalls":
+	case "maxToolCalls", "maxTokens", "maxCostUSD":
 		if d.Scope == ScopeTree {
 			if d.Run != self {
-				return fmt.Sprintf("the limit of %d tool calls of run %s, which this run shares (budget.maxToolCalls)", int(d.Max), d.Run)
+				return fmt.Sprintf("the limit of %s of run %s, which this run shares (budget.%s)", amountOf(d.Limit, d.Max), d.Run, d.Limit)
 			}
-			return fmt.Sprintf("the limit of %d tool calls that it shares with the runs under it (budget.maxToolCalls)", int(d.Max))
+			return fmt.Sprintf("the limit of %s that it shares with the runs under it (budget.%s)", amountOf(d.Limit, d.Max), d.Limit)
 		}
-		return fmt.Sprintf("its limit of %d tool calls (budget.maxToolCalls)", int(d.Max))
+		return fmt.Sprintf("its limit of %s (budget.%s)", amountOf(d.Limit, d.Max), d.Limit)
 	case "deadline":
 		if d.Max > 0 {
 			return "the deadline of its working time, " + FormatDuration(seconds(d.Max)) + " (budget.deadline)"

@@ -307,9 +307,10 @@ type routineRun struct {
 	// asks for does not run, because nobody answers a check.
 	check bool
 	// ownBudget is true for the calls of a definition of done, which have
-	// a tool budget of their own (done.go). The limits of tool calls of
-	// the run and of its tree then do not refuse them, and the count of
-	// the calls of the run leaves them out (doneCall).
+	// a tool budget of their own (done.go). The limits of tool calls, of
+	// tokens, and of cost of the run and of its tree then do not refuse
+	// them, and the count of the calls of the run leaves them out
+	// (doneCall). The deadline still stops them.
 	ownBudget bool
 }
 
@@ -682,11 +683,9 @@ func (rr *routineRun) apply(ctx context.Context, r Routine, q RunQueuedData, sai
 func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input json.RawMessage) (ToolResult, string, error) {
 	a, rs := rr.a, rr.rs
 	spec := t.Spec()
-	if rr.ownBudget {
-		if o, spent := a.costSpent(rs); spent {
-			return ToolResult{}, "not run: " + o.why(), nil
-		}
-	} else if o, spent := a.limitSpent(rs); spent {
+	// A call of a check of done calls no model, so only the deadline
+	// stops it (done.go).
+	if o, spent := a.limitSpent(rs); spent && !rr.ownBudget {
 		return ToolResult{}, "not run: " + o.why(), nil
 	}
 	if d, past := a.pastDeadline(rs); past {

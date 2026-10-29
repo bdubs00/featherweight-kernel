@@ -677,8 +677,10 @@ type RunFinishedData struct {
 	// Done is DoneChecked on the end of a completed run whose definition
 	// of done passed, DoneFailed on the end of a run that its checks
 	// ended, and empty for a run without a definition of done (see Done).
-	// So a consumer of the lifecycle events tells a checked result from a
-	// run whose model stopped.
+	// A run that stopped at a limit of its budget other than the deadline
+	// carries the state of the pass that ran after the stop (limitDone)
+	// beside its stop at the limit. So a consumer of the lifecycle events
+	// tells a checked result from a run whose model stopped.
 	Done string `json:"done,omitempty"`
 	// DoneWeak is true with Done DoneChecked when the pass shows nothing
 	// about the work of the run (see CheckedDone). Such a run stops as

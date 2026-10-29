@@ -24,8 +24,11 @@ package fw
 //
 // The checks have a tool budget of their own: at most MaxDoneChecks calls
 // a pass, each within the time limit of the block. The limits of tool
-// calls of the run and of its tree neither refuse them nor count them, so
-// a run that used its tool calls still has its work checked.
+// calls, of tokens, and of cost of the run and of its tree neither refuse
+// them nor count them, because a check calls no model. So a run that used
+// its tool calls still has its work checked, also a run that stops at such
+// a limit: its checks run after its final report (limitDone). Only the
+// deadline of the run, the limit of a person's time, stops a check.
 //
 // A pass that passed can be weak: it shows nothing about the work of this
 // run (weakPass), such as a pass of a run that changed nothing, unless a
@@ -360,10 +363,13 @@ func (a *Agent) resolveDone(req RunRequest, named AgentProfile, parent *runState
 // number of the failed pass, from 1, for a pass that failed, and one more
 // than the failed passes before it for a pass that passed. Attempts is the
 // number of failed passes that end the run. Answer is the sequence number
-// of the fw.model.responded whose answer the pass checked. Continue is
-// true when the model gets one more turn with the failures. Reason says
-// why a failed pass does not continue. Weak is true for a pass that passed
-// and shows nothing about the work of the run (weakPass).
+// of the fw.model.responded whose answer the pass checked, and 0 for a
+// pass after a routine or at a limit, which no answer of a turn started.
+// Continue is true when the model gets one more turn with the failures.
+// Reason says why a failed pass does not continue. Weak is true for a pass
+// that passed and shows nothing about the work of the run (weakPass).
+// Limit names the limit of the budget at which the run stopped, such as
+// maxToolCalls, for a pass that ran after that stop (limitDone).
 type DoneCheckedData struct {
 	Passed   bool         `json:"passed"`
 	Weak     bool         `json:"weak,omitempty"`
@@ -373,6 +379,7 @@ type DoneCheckedData struct {
 	Answer   uint64       `json:"answer"`
 	Continue bool         `json:"continue,omitempty"`
 	Reason   string       `json:"reason,omitempty"`
+	Limit    string       `json:"limit,omitempty"`
 }
 
 // DoneResult is the result of one check of a pass. Why says why a check
@@ -531,6 +538,66 @@ func (a *Agent) checkDone(ctx context.Context, rs *runState, c *cursor, n int) (
 		return true, err
 	}
 	return true, a.notDoneLocked(ctx, rs, c, n, pass)
+}
+
+// doneAtLimit reports whether a run that stops at the limit o of its
+// budget runs its checks of done before it finishes (limitDone): it has a
+// definition of done, the limit is a limit of turns, of tool calls, of
+// tokens, or of cost, and the run holds the limit itself. The deadline is
+// the limit of the working time that a person gave the run, so no check
+// runs past it. A run that stops at a limit that an ancestor holds for the
+// tree runs none, because the tree must stop now.
+func doneAtLimit(rs *runState, o overrun) bool {
+	return rs.queuedData().Done.on() && o.limit != "deadline" && (o.owner == nil || o.owner == rs)
+}
+
+// limitDone runs the checks of the definition of done of a run that
+// stopped at a limit of its budget (doneAtLimit), after its final report
+// when it makes one, and returns the pass. A run that stopped at a limit
+// may still have done its work, such as a run whose last tool call did
+// it, so the checks give it its state of done. The checks cost no tokens
+// and have a tool budget of their own (runDone). A check of the answer
+// reads output, the final report or the output that the run finishes
+// with. The pass has the answer 0 and names the limit. A pass that failed
+// gives the model no other turn, because the run stopped. The caller
+// records the pass with the end of the run (finishAtLimitLocked), which
+// still names the limit.
+func (a *Agent) limitDone(ctx context.Context, rs *runState, c *cursor, d BudgetExceededData, output string) (*DoneCheckedData, error) {
+	done := rs.queuedData().Done
+	failed := 0
+	for _, p := range donePasses(rs.eventLog(), c.respSeq) {
+		if !p.Passed {
+			failed++
+		}
+	}
+	pass := DoneCheckedData{Attempt: failed + 1, Attempts: done.attempts(), Limit: d.Limit}
+	if err := a.runDone(ctx, rs, c, done, &pass, output); err != nil {
+		return nil, err
+	}
+	if !pass.Passed {
+		pass.Reason = "the run stopped at " + limitPhrase(d, rs.id) + ", so the model gets no other turn"
+	}
+	a.log.Info("done checked at a limit", "run", rs.id, "limit", d.Limit, "passed", pass.Passed, "weak", pass.Weak)
+	return &pass, nil
+}
+
+// finishAtLimitLocked records the pass of the checks at a limit, when one
+// ran, and finishes the run as failed with the limit in its error and its
+// stop. The pass gives the end its state of done: DoneChecked with the
+// mark of a weak pass, or DoneFailed. The caller holds rs.emitMu.
+func (a *Agent) finishAtLimitLocked(ctx context.Context, rs *runState, output string, d BudgetExceededData, pass *DoneCheckedData) error {
+	end := RunFinishedData{Outcome: OutcomeFailed, Output: output, Error: "budget exceeded: " + d.text(rs.id), Stop: RunStopBudget(d.Limit)}
+	if pass != nil {
+		if _, err := a.emitLocked(ctx, rs, EvDoneChecked, *pass); err != nil {
+			return err
+		}
+		end.Done = DoneFailed
+		if pass.Passed {
+			end.Done, end.DoneWeak = DoneChecked, pass.Weak
+		}
+	}
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, end)
+	return err
 }
 
 // freshSince reports whether a message arrived after the latest model
