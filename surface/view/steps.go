@@ -6,7 +6,6 @@ package view
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -69,7 +68,8 @@ func StepPhrase(tool string, input json.RawMessage, spec fw.ToolSpec) string {
 
 // ActivityPhrase words what a run that works does now (fw.Run.Activity):
 // the step phrase of the tool call that it waits for, such as
-// `Ran "go test ./..."`, or "Thinking in turn 7" while the model works.
+// `Ran "go test ./..."`, or "Thinking" while the model works. The words
+// name no turn: a person does not count the turns of a run.
 // input is the input of the call: the input of the fw.tool.requested of
 // the run whose call id is Activity.CallID. Without it, the phrase names
 // the tool. ActivityPhrase returns "" for a run without an activity.
@@ -79,9 +79,6 @@ func ActivityPhrase(r *fw.Run, input json.RawMessage) string {
 	}
 	act := r.Activity
 	if act.Tool == "" {
-		if act.Turn > 0 {
-			return fmt.Sprintf("Thinking in turn %d", act.Turn)
-		}
 		return "Thinking"
 	}
 	return StepPhrase(act.Tool, input, fw.ToolSpec{})

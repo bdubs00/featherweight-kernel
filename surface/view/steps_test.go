@@ -44,7 +44,7 @@ func TestActivityPhrase(t *testing.T) {
 	}{
 		{nil, nil, ""},
 		{&fw.Run{}, in, ""},
-		{&fw.Run{Activity: &fw.RunActivity{Turn: 7}}, nil, "Thinking in turn 7"},
+		{&fw.Run{Activity: &fw.RunActivity{Turn: 7}}, nil, "Thinking"},
 		{&fw.Run{Activity: &fw.RunActivity{Turn: 7, Tool: "bash", CallID: "c1"}}, in, `Ran "go test ./..."`},
 		{&fw.Run{Activity: &fw.RunActivity{Turn: 7, Tool: "bash", CallID: "c1"}}, nil, "bash"},
 		{&fw.Run{Activity: &fw.RunActivity{Turn: 2, Tool: "front.bridge_post", CallID: "c2"}}, nil, "front.bridge_post"},
