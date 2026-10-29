@@ -640,7 +640,8 @@ projection keeps these figures per routine, in the bucket under
 A `rehearsing` routine is `ready` under three conditions over its current
 version:
 
-- `acted >= readyAfter` (default 200)
+- `agreed + disagreed >= readyAfter` (default 200): the runs of `acted`
+  whose comparison came. A run that still works counts toward no bound.
 - `agreed / acted >= readyAgreement` (default 0.95)
 - `sentBack.agreed == 0`
 

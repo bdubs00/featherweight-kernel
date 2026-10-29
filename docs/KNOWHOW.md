@@ -475,16 +475,24 @@ note (section 7.1). A note that a person wrote gets none.
 
 The move to out of date has no undo, because an undo would make the agent
 trust the note over its source again. An owner corrects the note instead,
-with a new text or a put-away. When a person writes a note that is out of
-date, the source that changed takes the version of `outOfDate`, because
-the person read the source as it is now. A page that was removed leaves
-the sources. So the corrected note is checked against the page as it is,
-and the journal counts a correction.
+with a new text or a put-away. When a person writes a note, each page of
+its sources takes the hash of the page now, because the person read the
+page as it is. The page of the front sends the sources as they were, so
+the front reads the wiki. A page that was removed leaves the sources. When
+a person writes a note that is out of date, an item that changed takes the
+version of `outOfDate`. So the corrected note is checked against the page
+as it is, and the journal counts a correction.
 
 ### 5.3 Routes
 
 All routes are under the front. A worker reaches them with the static
-token. The kernel's run metadata (`mcp.CallRun`, and the headers that the
+token. The kernel names the writer of each change in `by`: `agent` with
+the run for the memory tool of a run and for its pull, and
+`person:<subject>` for a person that it acts for. The page names none. A
+change of the static token without `by` is the change of the admin who
+holds the token, a person: `person:token`, without a run. The switch, an
+undo, and a decision through the static token record `person:token` too.
+The kernel's run metadata (`mcp.CallRun`, and the headers that the
 kernel sends) names the agent and the run, never the model. A person needs
 the right to view the agent to read, and the right to edit it to change.
 A person reads the notes of their own principal and the agent notes. An
@@ -504,9 +512,9 @@ principals, such as `duty:<name>`.
 | `GET /v1/knowhow/waiting?agent=` | the changes that wait for a person |
 | `POST /v1/knowhow/waiting/{id}` | `{"keep": true}` or `{"keep": false}`. Each change pins the hash of its target. A target that changed since gets 409. |
 | `GET /v1/knowhow/summary?agent=&days=7` | the four numbers of section 1, split into normal and held-back runs |
-| `POST /v1/knowhow/review/{agent}` | start the after-work review of the agent now (section 7). It needs the owner role. 202 with the run, or 200 with `started: false` and the reason when the agent has no open candidate. 409 with the reason when no review agent is set. |
-| `POST /v1/knowhow/propose` | run the pass that proposes routines (section 6.5) at once, for every agent that the caller owns. It answers `{"proposed", "staysOut"}`, and 409 when proposals or routines are off. |
-| `POST /v1/knowhow/propose/{agent}` | run the same pass for one agent. It needs the owner role. It answers `{"agent", "proposed", "staysOut"}`, and 409 as above. |
+| `POST /v1/knowhow/review/{agent}` | start the after-work review of the agent now (section 7). It first reads the finished runs up to now, also those that ended within the last two minutes. It needs the owner role. 202 with the run, or 200 with `started: false` and the reason when the agent has no open candidate. 409 with the reason when no review agent is set. |
+| `POST /v1/knowhow/propose` | run the pass that proposes routines (section 6.5) at once, for every agent that the caller owns. It answers `{"proposed", "staysOut"}`, and 409 when proposals or routines are off. `staysOut` names every other Duty with runs in the window and why it got no proposal: too few runs, too few runs that can make a routine, or too few verified runs, each with the counts, the routine that it has already, or a proposal that stayed out. |
+| `POST /v1/knowhow/propose/{agent}` | run the same pass for one agent. It needs the owner role. It answers `{"agent", "proposed", "staysOut"}`, with `staysOut` as above, and 409 as above. |
 
 The kernel reads and sends these shapes on the routes of the notes and the
 runs (`memory/front.go`, and the fake front `memory/fronttest`):
@@ -638,7 +646,9 @@ These rules change `docs/ROUTINES.md` section 4.
   least 10 runs, at least 2 of them verified (section 1), and no rejected
   run among those it uses. It calls `routine.Propose` and then
   `routine.LeaveOneOut`. A proposal with a free hole, or with a diverged
-  run, stays out, and the journal says why. A good proposal is stored
+  run, stays out, and the journal says why. A Duty with too few verified
+  runs stays out too, and the journal says so once, with the counts, until
+  the Duty gets its routine. Too few runs writes no entry. A good proposal is stored
   bound to its Duty (`duty`), as `proposed`, and moves to `rehearsing` at
   once, unless `askFirst` is on.
 - Agreement. A rehearsal compares what the routine would do with what the
@@ -652,9 +662,11 @@ These rules change `docs/ROUTINES.md` section 4.
   with `done: failed`), moves a live routine to `rehearsing`. The journal
   says `stepped-back` with the run.
 - Ready by risk. A rehearsing routine is ready under three conditions:
-  - `acted` reaches the bound of its risk: `read` 20 and `write` 50, the
-    defaults of `workbench.routines.readyAfter`.
-  - Agreement is at least 0.95.
+  - The runs of `acted` whose comparison came (`agreed` plus `disagreed`)
+    reach the bound of its risk: `read` 20 and `write` 50, the defaults of
+    `workbench.routines.readyAfter`. A run that still works counts toward
+    no bound.
+  - `agreed` is at least 0.95 of `acted`.
   - `sentBack.agreed` is 0.
 
   A ready `read` routine goes live by itself, unless `askFirst` is on. A
@@ -690,7 +702,8 @@ Without `review.agent`, no review runs, and the page says "The after-work
 review is off: no agent is set." Nothing picks a model or a price by
 default. The kernel refuses a run with no model, as it does now. An owner
 starts the review of an agent at once with Review now on the page, or
-`POST /v1/knowhow/review/{agent}` (section 5.3).
+`POST /v1/knowhow/review/{agent}` (section 5.3). It reads the finished runs
+up to now first.
 
 ### 7.1 Candidates
 
@@ -701,8 +714,8 @@ candidates by code, without a model:
 |---|---|
 | `gotcha` | A tool call that failed, and a later call of the same tool in the same run that passed with a different input |
 | `place` | The same read call (tool and input) in two or more runs of an agent, with the same result |
-| `outcome` | A run with a receipt, an outcome grader verdict, a definition of done that passed (`fw.CheckedDone`, so not a weak pass), or a thumbs up or down |
-| `recheck` | A note that went out of date, unless a person wrote it |
+| `outcome` | A run with a receipt, an outcome grader verdict, a definition of done that passed (`fw.CheckedDone`, so not a weak pass), or a thumbs up or down. Its evidence holds the note that a person wrote with a thumb. |
+| `recheck` | A note that went out of date, unless a person wrote it. Its evidence holds the text of the note now and the text of the page now, cut to 4 KB, and each listing for the review writes it again. A recheck ends when its note is no longer out of date, was put away, or a person wrote it. |
 
 A candidate belongs to the scope of the agent, because the runs of the
 agent read the notes of that scope, the default of the kernel. So the
@@ -721,7 +734,9 @@ newest version. If its text came from any of these, its origin is
 - an MCP tool of another service
 - a message of another principal
 
-Candidates wait 14 days, then drop.
+Candidates wait 14 days, then drop. A decided candidate stays decided,
+except an outcome: a new run that went badly, or that a person gave a
+thumb, opens it again with that run alone, and its 14 days start again.
 
 ### 7.2 Tools of the review
 
@@ -744,6 +759,7 @@ The front checks every `knowhow_keep`:
 - The text holds no path of one machine, such as `/home/<name>/`, `~/`,
   or `/tmp`, because the next run can run on another machine.
 - The note gets the sources of the candidate. The model cannot add others.
+  A recheck names the page at its version now.
 - An `untrusted` candidate needs two runs with different triggers, or it
   waits for a second one.
 - A `supersede` keeps the old revision for undo.
