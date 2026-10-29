@@ -403,7 +403,7 @@ principals, such as `duty:<name>`.
 | `GET /v1/knowhow/notes?agent=&scope=&principal=` | the list: name, hash, state, description, by, at, uses, sources count |
 | `GET /v1/knowhow/notes/{agent}/{scope}/{name…}?principal=` | one record with text |
 | `PUT /v1/knowhow/notes/{agent}/{scope}/{name…}?principal=` | `{"text", "ifHash", "sources", "by", "run"}`. 412 when `ifHash` does not match. |
-| `DELETE /v1/knowhow/notes/{agent}/{scope}/{name…}?principal=&ifHash=` | put the note away |
+| `DELETE /v1/knowhow/notes/{agent}/{scope}/{name…}?principal=&ifHash=&by=&run=` | put the note away. `by` and `run` are those of a put. |
 | `GET /v1/knowhow/runs?agent=&principal=&q=&limit=` | runs of the archive of that agent and that principal: id, title, input, output, at, outcome, each cut to 2 KB |
 | `GET /v1/knowhow/journal?agent=&limit=&before=` | entries, newest first |
 | `POST /v1/knowhow/journal/{id}/undo` | take back one entry. 409 when a later change touched the same note or routine. |

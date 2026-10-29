@@ -81,9 +81,10 @@ func (f *noteFiles) push(name string, data []byte, hash string, old []byte, exis
 // true when the removal waits for a person: the next pull brings the note
 // back until a person agrees.
 func (f *noteFiles) pushRemove(name string, old []byte) (waiting bool, err error) {
+	by, run := byOf(f.ctx)
 	ctx, cancel := f.pushCtx()
 	defer cancel()
-	waiting, err = f.store.front.remove(ctx, f.scope, name, hashOf(old))
+	waiting, err = f.store.front.remove(ctx, f.scope, name, hashOf(old), by, run)
 	switch {
 	case err == nil:
 		f.updateState(func(st *scopeState) bool {
@@ -134,7 +135,7 @@ func (f *noteFiles) pushRename(oldname, newname string, data []byte) (waiting bo
 		st.Front[newname] = n
 		return true
 	})
-	removeWaits, err := f.store.front.remove(ctx, f.scope, oldname, hash)
+	removeWaits, err := f.store.front.remove(ctx, f.scope, oldname, hash, by, run)
 	switch {
 	case err == nil:
 		f.updateState(func(st *scopeState) bool {

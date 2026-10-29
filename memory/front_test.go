@@ -105,12 +105,13 @@ func TestFrontPush(t *testing.T) {
 		t.Fatalf("push of a person = %+v", last)
 	}
 
-	// A removal puts the note away with the hash of the copy.
+	// A removal puts the note away with the hash of the copy, and names
+	// the writer and the run, as a push does.
 	if err := s.Forget(ctx, scope, NoteRef(scope, "prefs.md")); err != nil {
 		t.Fatal(err)
 	}
 	del := f.Changes()[3]
-	if del.Method != "DELETE" || del.IfHash != fronttest.Hash("Short answers.\n") {
+	if del.Method != "DELETE" || del.IfHash != fronttest.Hash("Short answers.\n") || del.By != "agent" || del.Run != "r1" {
 		t.Fatalf("removal = %+v", del)
 	}
 	if n, _ := f.Get("triage", "principal", "ada@example.com", "prefs.md"); n.State != "put-away" {

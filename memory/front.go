@@ -351,12 +351,20 @@ func (f *front) put(ctx context.Context, scope fw.MemoryScope, name string, body
 	return out.waits(code), nil
 }
 
-// remove puts a note away at the front. A note that the front does not
-// have is gone already. A 412 is ErrFrontConflict. waiting is true when
-// the removal waits for a person, as for put.
-func (f *front) remove(ctx context.Context, scope fw.MemoryScope, name, ifHash string) (waiting bool, err error) {
+// remove puts a note away at the front, with the writer and the run of
+// the change as a put has them (byOf), so the journal of the front names
+// both. A note that the front does not have is gone already. A 412 is
+// ErrFrontConflict. waiting is true when the removal waits for a person,
+// as for put.
+func (f *front) remove(ctx context.Context, scope fw.MemoryScope, name, ifHash, by, run string) (waiting bool, err error) {
 	q := noteQuery(scope)
 	q.Set("ifHash", ifHash)
+	if by != "" {
+		q.Set("by", by)
+	}
+	if run != "" {
+		q.Set("run", run)
+	}
 	var out frontChange
 	code, err := f.do(ctx, http.MethodDelete, notePath(scope, name), q, nil, &out)
 	switch {

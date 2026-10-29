@@ -303,7 +303,8 @@ func (f *Front) note(w http.ResponseWriter, r *http.Request, agent, scope, princ
 		f.changes = append(f.changes, c)
 		writeJSON(w, http.StatusOK, map[string]any{"name": name, "hash": Hash(b.Text)})
 	case http.MethodDelete:
-		c := Change{Method: "DELETE", Name: name, Principal: principal, IfHash: r.URL.Query().Get("ifHash")}
+		q := r.URL.Query()
+		c := Change{Method: "DELETE", Name: name, Principal: principal, IfHash: q.Get("ifHash"), By: q.Get("by"), Run: q.Get("run")}
 		switch {
 		case !exists || cur.State == "put-away":
 			c.Status = http.StatusNotFound
