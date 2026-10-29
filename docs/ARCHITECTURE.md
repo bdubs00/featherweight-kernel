@@ -70,7 +70,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | Type | Data |
 |---|---|
 | `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5), kept events of a branch (section 4.7), the check of a check run (section 23), the data blocks of the caller (section 7.8.4) |
-| `fw.run.started` | model (none for a check run, section 23), tool names, brief (the sections that tools add to the system prompt), context (the data that tools and the caller add to the first user message, sections 7.8.2 and 7.8.4), time zone, and `knowhow: "off"` for a run that is held back (section 7.8.4) |
+| `fw.run.started` | model (none for a check run, section 23), tool names, brief (the sections that tools add to the system prompt), context (the data that tools and the caller add to the first user message, sections 7.8.2 and 7.8.4), time zone, and `knowhow: "off"` for a comparison run (section 7.8.4) |
 | `fw.memory.changed` | one change of a memory note by a tool call: call id, tool, operation, ref, old ref, scope, agent, size, SHA-256, the sources of a write, and `waiting` when the front holds the change for a person; never the text (section 7.8.1) |
 | `fw.memory.used` | the notes that a run read: `how` (`brief`, `view`, or `recall`) and `refs`, each a ref and the hash of the text that the run read. It never holds the text or the principal (section 7.8.4) |
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2), or a trusted quality receipt with its own cost snapshot (section 10.1) |
@@ -789,7 +789,7 @@ Know-how is what an agent learns on the job. `docs/KNOWHOW.md` is its contract. 
 
 **The notes that a run read.** A run records `fw.memory.used` for the notes that it read. `brief` names the notes that the block lists, after `fw.run.started`. `view` names one note that the memory tool shows. `recall` names a note that `recall` or `fw-memory` reads by its ref. The event holds refs and hashes, never text or the principal (`fw.RecordMemoryUse`). Without a front, `brief` holds refs without hashes. A note of the agent that a run of the scope `principal` reads has the ref of the scope `agent`, such as `mem://agent/triage/labels.md`, so the front counts the use on that note. The front counts the uses of each note from it.
 
-**Held back.** The metadata `fw.knowhow` with the value `off` holds a run back. Such a run gets no memory tool and no recall tool, so it gets no memory block, neither the notes of its principal nor those of its agent. The routine runner does not act on it. `fw.run.started` records `knowhow: "off"`. A hosted run gets no memory tools either.
+**Comparison runs.** The metadata `fw.knowhow` with the value `off` makes a run a comparison run. A comparison run goes without what the agent learned, so a person can see what learning is worth. Such a run gets no memory tool and no recall tool, so it gets no memory block, neither the notes of its principal nor those of its agent. The routine runner does not act on it. `fw.run.started` records `knowhow: "off"`. A hosted run gets no memory tools either.
 
 **Recall across Tasks.** With a front, the search of runs also asks the archive of the front (`GET /v1/knowhow/runs`). The archive gives the runs of the same agent and the same principal, within 5 seconds. Recall keeps one hit per run id, the hit of this Task first, and the bound of its hits. A ref of such a run reads the run that the search found. A front that does not answer adds a note to the result.
 
@@ -3029,7 +3029,7 @@ No decider exists by default, and a decider has no default model. The System One
 
 ### 22.3 The runner
 
-The runner acts once per run, after `fw.run.started` and before the first model turn. It acts on the routines with the standing `shadow` or `live`. A routine with `duty` counts only for a run whose metadata `workbench.duty` names that Duty (section 7.8.4). It never acts on a replay, a branch, a check run (section 23), or a run that is held back (section 7.8.4). After a restart, it never runs a routine again.
+The runner acts once per run, after `fw.run.started` and before the first model turn. It acts on the routines with the standing `shadow` or `live`. A routine with `duty` counts only for a run whose metadata `workbench.duty` names that Duty (section 7.8.4). It never acts on a replay, a branch, a check run (section 23), or a comparison run (section 7.8.4). After a restart, it never runs a routine again.
 
 1. The runner asks each decider once for the routines that share it. It calls the tool `decide` of the kernel, `fw.DecideTool`, through the tool path of the model, whatever `tools.builtin` holds. The call and the probabilities are therefore in `fw.tool.requested` and `fw.tool.responded`. The question ids are `<routine>.<question>`, and the state is the input of the run.
 2. It records one `fw.routine.decided` per routine, in the order of the profile. A shadow routine has the mode `shadow`. If the canary share picks the run, a live routine has the mode `canary`. Otherwise it has the mode `live`. The pick is a stable hash of the run id. If every question passes its band and its expected answers, the routine applies. When a decider fails, each of its routines does not apply, with the reason.
@@ -3190,7 +3190,7 @@ When the model ends a turn with its answer, the kernel closes the turn. Then it 
 
 The checks have a tool budget of their own: at most 8 calls a pass, one per check, each within the `timeout` of the block. The limits of tool calls of the run and of its tree (`budget.maxToolCalls`) neither refuse a check nor count it, and the usage of the run (`usage.toolCalls`) leaves the calls of the checks out. So a run that used its tool calls still has its work checked, and a failed pass takes no call from the turn that fixes the work. A limit of tokens or of cost, and the deadline of the run, still stop a check.
 
-A run that is held back from Know-how (`fw.knowhow: off`, docs/KNOWHOW.md section 4.6) has no `memory` and no `recall` tool. A check of one of these tools is skipped there, not failed. Its result has `"passed": true` and `skipped` with the reason.
+A comparison run goes without what the agent learned (`fw.knowhow: off`, docs/KNOWHOW.md section 4.6), so it has no `memory` and no `recall` tool. A check of one of these tools is skipped there, not failed. Its result has `"passed": true` and `skipped` with the reason.
 
 Each call of a check gets fresh tool state. The kernel sets `RunInfo.Fresh` on the call. `bash` then runs the command in a new shell in the directory of the run, and it kills that shell after the call. The shell of the run keeps its directory and its variables. So a `cd` or an `export` of the model cannot change a check, and a check cannot change the shell of the model. A check that needs a directory below the directory of the run names it in its command.
 

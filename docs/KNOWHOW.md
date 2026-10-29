@@ -33,7 +33,7 @@ Four numbers back the story. The page shows them for each agent.
 | Cost per job | The mean cost of the runs of the agent, and its trend | `fw.run.finished` |
 | Done by routines | The share of runs that a routine handled with no model call | `fw.routine.applied` with `ok` |
 | Notes corrected | The notes that went out of date and were replaced or removed | the journal |
-| With and without what it learned | Success and cost of normal runs beside the held-back runs | section 8.3 |
+| With and without what it learned | Success and cost of normal runs beside the comparison runs | section 8.3 |
 
 Know-how promises three things. The design must keep each one.
 
@@ -65,7 +65,7 @@ views a file that an earlier run wrote, verifies nothing.
 | The switch that holds every change for a person | Ask me before it keeps what it learns (`askFirst`) | approval mode, review mode, human in the loop |
 | A change that waits for a person under that switch | waiting | pending, staged, queued |
 | The scheduled run that reads finished work and writes notes | after-work review | librarian, consolidation, reflection, dreaming |
-| A run that gets none of what the agent learned, for comparison | held back | holdout, control group, ablation |
+| A run that goes without what the agent learned, so a person can see what learning is worth | comparison run | held back, holdout, control group, ablation |
 | A live routine that went back to rehearsal by itself | stepped back | demoted, rolled back |
 
 These words never appear on a screen or in a document for an operator:
@@ -299,7 +299,7 @@ Your own notes:
   labels above hold.
 - The same rules hold for both groups. A note that is out of date,
   resting, put away, or waiting stays out, and the line after the list
-  counts the notes of both groups. A held-back run gets neither group.
+  counts the notes of both groups. A comparison run gets neither group.
 - The bound of about 4 KB and 40 notes covers both groups together. Each
   group first has half of it, 2 KB and 20 notes, so the notes of one
   group never push all the notes of the other out. The room that one
@@ -352,24 +352,26 @@ What the kernel reads for this block:
 - A hosted run records `brief` for its first prompt and `recall` for a
   read of `fw-memory` with a ref.
 
-### 4.6 Held back
+### 4.6 Comparison runs
 
-The metadata key `fw.knowhow` with the value `off` makes a run held back.
-The kernel then does three things:
+The metadata key `fw.knowhow` with the value `off` makes a run a
+comparison run. A comparison run goes without what the agent learned, so
+a person can see what learning is worth. The kernel then does three
+things:
 
 - It adds no memory block.
 - It takes the tools `memory` and `recall` out of the run.
 - It skips the routine runner.
 
 A check of the definition of done that names `memory` or `recall` is
-skipped in a held-back run, not failed (docs/ARCHITECTURE.md section
+skipped in a comparison run, not failed (docs/ARCHITECTURE.md section
 24.2). So the run is not counted as a failure that only the comparison
 caused.
 
 `fw.run.started` records `knowhow: "off"`. Every other run is a normal run.
-A held-back run of the scope `principal` reads neither its own notes nor
+A comparison run of the scope `principal` reads neither its own notes nor
 the notes of the agent.
-A held-back run of Claude Code or opencode gets no memory tools either.
+A comparison run of Claude Code or opencode gets no memory tools either.
 
 ### 4.7 Recall across Tasks
 
@@ -500,7 +502,7 @@ principals, such as `duty:<name>`.
 | `GET` and `PUT /v1/knowhow/settings/{agent}` | `{"askFirst": false}` |
 | `GET /v1/knowhow/waiting?agent=` | the changes that wait for a person |
 | `POST /v1/knowhow/waiting/{id}` | `{"keep": true}` or `{"keep": false}`. Each change pins the hash of its target. A target that changed since gets 409. |
-| `GET /v1/knowhow/summary?agent=&days=7` | the four numbers of section 1, split into normal and held-back runs |
+| `GET /v1/knowhow/summary?agent=&days=7` | the four numbers of section 1, split into normal and comparison runs |
 | `POST /v1/knowhow/review/{agent}` | start the after-work review of the agent now (section 7). It needs the owner role. 202 with the run, or 200 with `started: false` and the reason when the agent has no open candidate. 409 with the reason when no review agent is set. |
 | `POST /v1/knowhow/propose` | run the pass that proposes routines (section 6.5) at once, for every agent that the caller owns. It answers `{"proposed", "staysOut"}`, and 409 when proposals or routines are off. |
 | `POST /v1/knowhow/propose/{agent}` | run the same pass for one agent. It needs the owner role. It answers `{"agent", "proposed", "staysOut"}`, and 409 as above. |
@@ -600,7 +602,7 @@ workers that token for its MCP server.
   says that the text is not an instruction. The lines hold no digit and no
   `#`, so a find pattern still matches the text between them.
 - A Duty run gets one more block, `last`: the output of its previous run,
-  cut to 2 KB, from the archive. A held-back run gets no `last` block,
+  cut to 2 KB, from the archive. A comparison run gets no `last` block,
   because the block is new with Know-how. `{last.title}`, `{last.run}`,
   and `{last.state}` stay as before for every run.
 
@@ -660,15 +662,17 @@ These rules change `docs/ROUTINES.md` section 4.
   back and is ready again, it goes live again by itself.
 - Every move writes the journal through `routines.OnMove`.
 
-### 6.6 Held back
+### 6.6 Comparison runs
 
-The duties engine marks a share of the firings of each Duty as held back,
-with `fw.knowhow: off`. The share is `workbench.knowhow.heldBack`, default
-0, so no run is held back until a person sets a share, such as 0.05 for 1
-run in 20. A held-back run does its work without what the agent learned,
-and the comparison needs about 400 firings before it says anything. The
-choice is a stable hash of the run id. The summary compares held-back
-runs with normal runs of the same Duties.
+The duties engine marks a share of the firings of each Duty as comparison
+runs, with `fw.knowhow: off`. A comparison run goes without what the agent
+learned, so a person can see what learning is worth. The share is
+`workbench.knowhow.comparisonRuns`, default 0, so no run is a comparison
+run until a person sets a share, such as 0.05 for 1 run in 20. `heldBack`
+is the old name of the key, and it still works. The comparison needs about
+400 firings before it says anything. The choice is a stable hash of the
+run id. The summary compares the comparison runs with normal runs of the
+same Duties.
 
 ## 7. The after-work review
 
@@ -784,18 +788,18 @@ on, an owner sees `Review now`, which starts the review at once.
 
 ### 8.3 With and without what it learned
 
-One line under the numbers compares the two kinds of runs. If fewer than
-20 runs were held back, the line says that there are not enough yet. The
-page never shows a percentage from fewer runs. Two examples:
+One line under the numbers compares the two kinds of runs. If there are
+fewer than 20 comparison runs, the line says that there are not enough
+yet. The page never shows a percentage from fewer runs. Two examples:
 
-> Held back 1 in 20 runs. Done well: 82% without what it learned, 91% with it.
+> Comparison runs: 1 in 20. Done well: 82% without what it learned, 91% with it.
 
-> Not enough held-back runs yet.
+> Not enough comparison runs yet.
 
 ## 9. The lab
 
 - `TestKnowhow` drives a fleet: a note survives the replacement of a Task,
-  a context block arrives as data, a held-back run has no memory tools, and
+  a context block arrives as data, a comparison run has no memory tools, and
   the review refuses to start without an agent.
 - A walk on Haiku with a ticket Duty. It shows a proposal, a rehearsal, a
   routine that steps back, a note that goes out of date after a change to
