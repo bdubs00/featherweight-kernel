@@ -578,12 +578,18 @@ const (
 )
 
 // RoutineAppliedData is the payload of fw.routine.applied: a live routine
-// that applies ran. OK is true when every step and every check passed.
-// Steps counts the steps and checks that ran, the failed one included.
-// FailedStep is the place of the failed one, from 1, among the steps and
-// then the checks; 0 when none failed. Reason says why the routine
+// that applies ran. OK is true when every step and every check passed, and
+// so did the checks of done of the run. Steps counts the steps and checks
+// that ran, the failed one included. FailedStep is the place of the failed
+// one, from 1, among the steps and then the checks, one place after them
+// for the checks of done; 0 when none failed. Reason says why the routine
 // stopped. Answer is the rendered answer of a routine that completed,
-// which is the output of the run.
+// which is the output of the run. Done is the state of the checks of done
+// of the run on the work of the routine: DoneChecked or DoneFailed, and
+// empty for a run without a definition of done or a routine that stopped
+// before them. DoneWeak is true with Done DoneChecked when the pass shows
+// nothing about the work of the routine (weakPass). The run then finishes
+// as answered, as a run of the model with a weak pass does.
 type RoutineAppliedData struct {
 	Routine    string `json:"routine"`
 	Version    int    `json:"version"`
@@ -592,6 +598,8 @@ type RoutineAppliedData struct {
 	FailedStep int    `json:"failedStep,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	Answer     string `json:"answer,omitempty"`
+	Done       string `json:"done,omitempty"`
+	DoneWeak   bool   `json:"doneWeak,omitempty"`
 }
 
 // RoutineComparedData is the payload of fw.routine.compared: at the end of
@@ -601,6 +609,15 @@ type RoutineAppliedData struct {
 // chosen option of the routine, or yes or no. Observed is what the agent
 // did, read with the observe block of the question, and "" when nothing
 // matched. Agree is true when the two are equal, case ignored.
+//
+// Calls is true for the comparison of the calls, which has no question:
+// in a rehearsal that applies, the steps and the checks of the routine,
+// rendered on the run, against the calls of the agent and their results
+// (CompareRoutineCalls). Agree is then true when every step and every
+// check with a call matched. For a step that differs, Step is its place
+// from 1, among the steps and then the checks, Said and Observed are the
+// input of the routine and of the agent, each bounded to 200 bytes, and
+// Reason says how they differ.
 type RoutineComparedData struct {
 	Routine  string `json:"routine"`
 	Version  int    `json:"version"`
@@ -609,6 +626,9 @@ type RoutineComparedData struct {
 	Said     string `json:"said"`
 	Observed string `json:"observed"`
 	Agree    bool   `json:"agree"`
+	Calls    bool   `json:"calls,omitempty"`
+	Step     int    `json:"step,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // ErrorData is the payload of fw.error.

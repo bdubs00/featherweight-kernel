@@ -2,10 +2,7 @@ package routine
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -216,112 +213,28 @@ type runOutcome struct {
 }
 
 // replayRun renders the steps and the checks of the routine for one run
-// and compares them with the calls of the agent. It counts the keys that
-// only the agent sets in extra, and the checks without a call of the
-// agent in unchecked.
+// and compares them with the calls of the agent (fw.CompareRoutineCalls).
+// It counts the keys that only the agent sets in extra, and the checks
+// without a call of the agent in unchecked.
 func replayRun(r fw.Routine, rec record, observed map[string]string, extra, unchecked map[Extra]int) runOutcome {
 	data := fw.RoutineData(rec.input, rec.meta)
 	for k, v := range observed {
 		data[k] = v
 	}
-	seen := map[string]int{}
-	match := func(place int, tool, input string, keys []string) (call, runOutcome) {
-		div := &Divergence{Run: rec.id, Step: place, Tool: tool}
-		j := seen[tool]
-		seen[tool]++
-		rendered, err := fw.RenderRoutineInput(input, data)
-		if errors.Is(err, fw.ErrEmptyHole) {
-			pattern := strings.TrimSuffix(strings.TrimPrefix(err.Error(), "hole "), " empty")
-			return call{}, runOutcome{handed: fmt.Sprintf("step %d %s: the routine finds no value for %s", place, tool, pattern)}
-		}
-		if err != nil {
-			div.Reason = err.Error()
-			return call{}, runOutcome{div: div}
-		}
-		div.Rendered = bound(fw.CanonicalJSON(rendered))
-		agent := rec.callsOf(tool)
-		if j >= len(agent) {
-			div.Reason = fmt.Sprintf("the agent made %d calls of %s, and this is call %d", len(agent), tool, j+1)
-			return call{}, runOutcome{div: div}
-		}
-		c := agent[j]
-		div.Recorded = bound(fw.CanonicalJSON(c.input))
-		if key, ok := sameKeys(rendered, c.input, keys, func(k string) { extra[Extra{Step: place, Tool: tool, Key: k}]++ }); !ok {
-			div.Reason = "the key " + key + " differs"
-			return call{}, runOutcome{div: div}
-		}
-		if c.isError {
-			div.Reason = "the call of the agent failed"
-			return call{}, runOutcome{div: div}
-		}
-		return c, runOutcome{}
+	cmp := fw.CompareRoutineCalls(r, data, rec.calls)
+	for _, k := range cmp.Extra {
+		extra[Extra{Step: k.Step, Tool: k.Tool, Key: k.Key}]++
 	}
-	for i, s := range r.Steps {
-		c, out := match(i+1, s.Tool, s.Input, s.Compare)
-		if out.div != nil || out.handed != "" {
-			return out
-		}
-		if s.As != "" {
-			data[s.As] = c.result
-		}
+	for _, k := range cmp.Unchecked {
+		unchecked[Extra{Step: k.Step, Tool: k.Tool}]++
 	}
-	for j, ck := range r.After {
-		place := len(r.Steps) + j + 1
-		if seen[ck.Tool] >= len(rec.callsOf(ck.Tool)) {
-			unchecked[Extra{Step: place, Tool: ck.Tool}]++
-			seen[ck.Tool]++
-			continue
-		}
-		c, out := match(place, ck.Tool, ck.Input, nil)
-		if out.div != nil || out.handed != "" {
-			return out
-		}
-		texts := [][]string{ck.Contains, ck.Lacks}
-		for kind, list := range texts {
-			for _, t := range list {
-				text, err := fw.RenderRoutine(t, data)
-				switch {
-				case errors.Is(err, fw.ErrEmptyHole):
-					return runOutcome{handed: fmt.Sprintf("check %d %s: the routine finds no value for its check", j+1, ck.Tool)}
-				case err != nil:
-					return runOutcome{div: &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: err.Error()}}
-				case kind == 0 && !strings.Contains(c.result, text):
-					return runOutcome{div: &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: fmt.Sprintf("the result lacks %q", text)}}
-				case kind == 1 && strings.Contains(c.result, text):
-					return runOutcome{div: &Divergence{Run: rec.id, Step: place, Tool: ck.Tool, Reason: fmt.Sprintf("the result holds %q", text)}}
-				}
-			}
-		}
+	switch {
+	case cmp.Handed != "":
+		return runOutcome{handed: cmp.Handed}
+	case cmp.Step > 0:
+		return runOutcome{div: &Divergence{Run: rec.id, Step: cmp.Step, Tool: cmp.Tool, Reason: cmp.Reason, Rendered: cmp.Rendered, Recorded: cmp.Recorded}}
 	}
 	return runOutcome{}
-}
-
-// sameKeys reports whether the recorded input holds the value of each key
-// of the rendered input, or of each key of keys when it names some, as
-// canonical JSON. It returns the first key that differs. It calls extra
-// for each key that only the recorded input holds.
-func sameKeys(rendered, recorded []byte, keys []string, extra func(string)) (string, bool) {
-	var want, got map[string]json.RawMessage
-	if json.Unmarshal(rendered, &want) != nil || json.Unmarshal(recorded, &got) != nil {
-		ok := fw.CanonicalJSON(rendered) == fw.CanonicalJSON(recorded)
-		return "(the whole input)", ok
-	}
-	for _, k := range slices.Sorted(maps.Keys(got)) {
-		if _, ok := want[k]; !ok {
-			extra(k)
-		}
-	}
-	if len(keys) == 0 {
-		keys = slices.Sorted(maps.Keys(want))
-	}
-	for _, k := range keys {
-		w, inWant := want[k]
-		g, inGot := got[k]
-		if inWant != inGot || (inWant && fw.CanonicalJSON(w) != fw.CanonicalJSON(g)) {
-			return k, false
-		}
-	}
-	return "", true
 }
 
 // score asks the decider the questions of the routine on the input of the

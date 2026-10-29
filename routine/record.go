@@ -9,8 +9,6 @@
 package routine
 
 import (
-	"encoding/json"
-
 	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
@@ -21,6 +19,7 @@ const maxShown = 200
 func bound(s string) string { return fw.ClipText(s, maxShown, "the text") }
 
 // record is what Replay and Propose read from the events of one run.
+// calls are the calls of the model with their results (fw.ModelCalls).
 type record struct {
 	id     string
 	agent  string
@@ -28,26 +27,17 @@ type record struct {
 	meta   map[string]string
 	output string
 	done   bool // the last fw.run.finished has the outcome completed
-	calls  []call
+	calls  []fw.RoutineCall
 	events []fw.Event
 }
 
-// call is one tool call of the model, with its result.
-type call struct {
-	tool      string
-	input     json.RawMessage
-	result    string
-	isError   bool
-	responded bool
-}
-
-// readRun reads the events of one run. The calls of the routine runner
-// (fw.ToolRequestedData.Routine) are not calls of the agent, and neither
-// are the events that a branch kept from its source.
+// readRun reads the events of one run. The calls that the kernel made
+// itself, of the routine runner or of a check of the definition of done,
+// are not calls of the agent, and neither are the events that a branch
+// kept from its source.
 func readRun(events []fw.Event) record {
-	rec := record{events: events}
+	rec := record{events: events, calls: fw.ModelCalls(events)}
 	var kept uint64
-	byID := map[string]int{}
 	for _, e := range events {
 		if e.Seq != 0 && e.Seq <= kept {
 			continue
@@ -57,24 +47,6 @@ func readRun(events []fw.Event) record {
 			var q fw.RunQueuedData
 			if e.Decode(&q) == nil && rec.id == "" {
 				rec.id, rec.agent, rec.input, rec.meta, kept = e.Subject, q.Agent, q.Input, q.Metadata, q.Kept
-			}
-		case fw.EvToolRequested:
-			var d fw.ToolRequestedData
-			if e.Decode(&d) != nil || d.Routine != "" {
-				continue
-			}
-			byID[d.CallID] = len(rec.calls)
-			rec.calls = append(rec.calls, call{tool: d.Tool, input: d.Input})
-		case fw.EvToolResponded:
-			var d fw.ToolRespondedData
-			if e.Decode(&d) != nil {
-				continue
-			}
-			if i, ok := byID[d.CallID]; ok {
-				c := &rec.calls[i]
-				// A command that failed counts as a failed call, as in the runner.
-				failed := d.ExitCode != nil && *d.ExitCode != 0
-				c.result, c.isError, c.responded = fw.TextOf(d.Content), d.IsError || failed, true
 			}
 		case fw.EvRunFinished:
 			var d fw.RunFinishedData
@@ -89,15 +61,4 @@ func readRun(events []fw.Event) record {
 		rec.id = events[0].Subject
 	}
 	return rec
-}
-
-// callsOf returns the calls of the agent of one tool, in order.
-func (r record) callsOf(tool string) []call {
-	var out []call
-	for _, c := range r.calls {
-		if c.tool == tool {
-			out = append(out, c)
-		}
-	}
-	return out
 }

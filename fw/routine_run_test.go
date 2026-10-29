@@ -395,7 +395,10 @@ func TestRoutineCanaryPick(t *testing.T) {
 			if len(h.writes) != 0 || len(s.requests()) != 1 || strings.Contains(firstMessage(s.requests()[0]), "<context") {
 				t.Fatalf("canary: writes %v, model calls %d", h.writes, len(s.requests()))
 			}
-			if cmp := decodeAll[RoutineComparedData](t, evs, EvRoutineCompared); len(cmp) != 2 || cmp[0].Mode != RoutineCanary {
+			// Two questions, and the calls: the agent made none, so the
+			// calls differ at the first step.
+			cmp := decodeAll[RoutineComparedData](t, evs, EvRoutineCompared)
+			if len(cmp) != 3 || cmp[0].Mode != RoutineCanary || !cmp[2].Calls || cmp[2].Agree || cmp[2].Step != 1 || cmp[2].Mode != RoutineCanary {
 				t.Fatalf("canary compared = %+v", cmp)
 			}
 		} else if len(s.requests()) != 0 || r.Output == "" {
@@ -834,6 +837,299 @@ func TestRoutineFailedCommand(t *testing.T) {
 			if first := firstMessage(s.requests()[0]); !strings.Contains(first, "error: exit code") {
 				t.Errorf("first message =\n%s", first)
 			}
+		})
+	}
+}
+
+// stock is a fake stock file and a fake report for the tests of the
+// comparison of the calls: read shows the file with line numbers, as the
+// files tool does, and write keeps the text of the report.
+type stock struct {
+	mu     sync.Mutex
+	text   string
+	report string
+}
+
+func (st *stock) tools() []Tool {
+	read := NewTool(ToolSpec{Name: "stock.read", ReadOnly: true, Idempotent: true}, func(_ context.Context, in json.RawMessage) (ToolResult, error) {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		var v struct {
+			Path string `json:"path"`
+		}
+		_ = json.Unmarshal(in, &v)
+		if v.Path == "report.txt" {
+			return TextResult("     1\t" + st.report + "\n"), nil
+		}
+		return TextResult("Here is the file with line numbers:\n     1\t" + st.text + "\n"), nil
+	})
+	write := NewTool(ToolSpec{Name: "stock.write"}, func(_ context.Context, in json.RawMessage) (ToolResult, error) {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		var v struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal(in, &v)
+		st.report = v.Text
+		return TextResult("written"), nil
+	})
+	return []Tool{read, write}
+}
+
+// stockRoutine copies the first line of the stock file into the report,
+// with no question.
+func stockRoutine(standing string) Routine {
+	zero := 0.0
+	return Routine{
+		Name: "stock-ack", Version: 1, Standing: standing, Canary: &zero,
+		Steps: []RoutineStep{
+			{Tool: "stock.read", Input: `{"path": "levels.txt"}`, As: "read"},
+			{Tool: "stock.write", Input: `{"path": "report.txt", "text": {{ json (find .read "\t(.+?)\n") }}}`},
+		},
+		Answer: `ACK {{ find .read "\t(.+?)\n" }}`,
+	}
+}
+
+// A rehearsing routine without questions gains agreement: at the end of
+// the run, its steps, rendered on the run with the results of the calls of
+// the agent, are compared with those calls. The calls of the checks of
+// done are no calls of the agent.
+func TestRoutineRehearsalComparesTheCalls(t *testing.T) {
+	cases := []struct {
+		name   string
+		text   string // the text that the agent writes
+		file   string // the first line of the stock file
+		agree  bool
+		none   bool // no comparison of the calls: the routine hands the run over
+		step   int
+		reason string
+	}{
+		{name: "agrees", text: "STOCK pens=90", file: "STOCK pens=90", agree: true},
+		{name: "differs", text: "STOCK pens=120", file: "STOCK pens=90", step: 2,
+			reason: "step 2 stock.write: the key text differs"},
+		{name: "handed", text: "STOCK pens=90", file: "", none: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := testCtx(t)
+			st := &stock{text: c.file}
+			s := newScript(
+				callTools(use("t1", "stock.read", `{"path": "levels.txt"}`)),
+				callTools(use("t2", "stock.write", fmt.Sprintf(`{"path": "report.txt", "text": %q}`, c.text))),
+				endTurn("ACK "+c.text),
+			)
+			prof := AgentProfile{Name: "clerk", Routines: []Routine{stockRoutine(RoutineShadow)},
+				Done: &Done{Checks: []DoneCheck{{Name: "the report is saved", Tool: "stock.read", Input: `{"path": "report.txt"}`, Contains: []string{"STOCK"}}}}}
+			a := newTestAgent(t, s.Model(), WithTools(st.tools()...), WithProfile(prof))
+			r, err := a.Run(ctx, "Acknowledge the stock file.", AsAgent("clerk"))
+			mustState(t, r, err, StateCompleted)
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			var dec RoutineDecidedData
+			firstOf(t, evs, EvRoutineDecided, &dec)
+			if dec.Mode != RoutineShadow || !dec.Applies || len(dec.Answers) != 0 {
+				t.Fatalf("decided = %+v", dec)
+			}
+			cmp := decodeAll[RoutineComparedData](t, evs, EvRoutineCompared)
+			if c.none {
+				if len(cmp) != 0 {
+					t.Fatalf("compared = %+v", cmp)
+				}
+				return
+			}
+			if len(cmp) != 1 {
+				t.Fatalf("compared = %+v", cmp)
+			}
+			got := cmp[0]
+			if !got.Calls || got.Question != "" || got.Mode != RoutineShadow || got.Routine != "stock-ack" || got.Version != 1 ||
+				got.Agree != c.agree || got.Step != c.step || got.Reason != c.reason {
+				t.Fatalf("compared = %+v", got)
+			}
+			if !c.agree && (got.Said != `{"path":"report.txt","text":"STOCK pens=90"}` || got.Observed != `{"path":"report.txt","text":"STOCK pens=120"}`) {
+				t.Errorf("said %s, observed %s", got.Said, got.Observed)
+			}
+			// The comparison comes before the end, after the checks of done.
+			types := eventTypes(evs)
+			if types[len(types)-1] != EvRunFinished || types[len(types)-2] != EvRoutineCompared || countType(evs, EvDoneChecked) != 1 {
+				t.Fatalf("events = %v", types)
+			}
+			checkCursorPrefixes(t, evs)
+		})
+	}
+}
+
+// ModelCalls leaves out the calls that the kernel made itself: of the
+// routine runner, of a check of done, and of a check run.
+func TestModelCallsLeavesOutTheCallsOfTheKernel(t *testing.T) {
+	id := "run-calls"
+	req := func(callID, tool, routine string) Event {
+		return MustEvent(id, EvToolRequested, ToolRequestedData{CallID: callID, Tool: tool, Input: json.RawMessage(`{}`), Routine: routine})
+	}
+	res := func(callID, text string) Event {
+		return MustEvent(id, EvToolResponded, ToolRespondedData{CallID: callID, Content: []Block{Text(text)}})
+	}
+	evs := []Event{
+		MustEvent(id, EvRunQueued, RunQueuedData{Agent: "clerk", Input: "go"}),
+		req(routineCallPrefix+"1", "decide", "ack"), res(routineCallPrefix+"1", "{}"),
+		req("toolu_1", "stock.read", ""), res("toolu_1", "STOCK"),
+		req(doneCallPrefix+"1", "stock.read", ""), res(doneCallPrefix+"1", "STOCK"),
+		req(checkCallPrefix+"1", "stock.read", ""), res(checkCallPrefix+"1", "STOCK"),
+	}
+	for i := range evs {
+		evs[i].Seq = uint64(i + 1)
+	}
+	calls := ModelCalls(evs)
+	if len(calls) != 1 || calls[0].Tool != "stock.read" || calls[0].Result != "STOCK" {
+		t.Fatalf("calls = %+v", calls)
+	}
+}
+
+// A run that a live routine finishes runs the checks of done of the run,
+// as a run of the model does. When they pass, the run ends as checked with
+// no model call. When one fails, the routine did not complete: the model
+// takes the run with the reason in its block, and its own answer gets
+// every attempt.
+func TestRoutineLiveRunsTheChecksOfDone(t *testing.T) {
+	check := DoneCheck{Name: "the report holds the line of today", Tool: "stock.read", Input: `{"path": "report.txt"}`, Contains: []string{"pens=90"}}
+	t.Run("passed", func(t *testing.T) {
+		ctx := testCtx(t)
+		s := newScript() // the model must not be called
+		st := &stock{text: "STOCK pens=90"}
+		prof := AgentProfile{Name: "clerk", Routines: []Routine{stockRoutine(RoutineLive)}, Done: &Done{Checks: []DoneCheck{check}, Attempts: 1}}
+		a := newTestAgent(t, s.Model(), WithTools(st.tools()...), WithProfile(prof))
+		r, err := a.Run(ctx, "Acknowledge the stock file.", AsAgent("clerk"))
+		mustState(t, r, err, StateCompleted)
+		if r.Output != "ACK STOCK pens=90" || len(s.requests()) != 0 {
+			t.Fatalf("output %q, model calls %d", r.Output, len(s.requests()))
+		}
+		if r.Done == nil || r.Done.State != DoneChecked || r.Stop != RunStopChecked || !CheckedDone(r.Done.State, r.Done.Weak) {
+			t.Fatalf("run done = %+v, stop %q", r.Done, r.Stop)
+		}
+		evs := ledgerEvents(t, a.Ledger(), r.ID)
+		types := eventTypes(evs)
+		n := len(types)
+		if types[n-5] != EvToolRequested || types[n-3] != EvDoneChecked || types[n-2] != EvRoutineApplied || types[n-1] != EvRunFinished {
+			t.Fatalf("events = %v", types)
+		}
+		passes := donePassesOf(t, evs)
+		if len(passes) != 1 || !passes[0].Passed || passes[0].Answer != 0 || passes[0].Continue {
+			t.Fatalf("passes = %+v", passes)
+		}
+		var app RoutineAppliedData
+		firstOf(t, evs, EvRoutineApplied, &app)
+		if !app.OK || app.Done != DoneChecked {
+			t.Fatalf("applied = %+v", app)
+		}
+		if d := finishedOf(t, evs); d.Done != DoneChecked || d.Stop != RunStopChecked {
+			t.Fatalf("finished = %+v", d)
+		}
+		checkCursorPrefixes(t, evs)
+	})
+	t.Run("failed", func(t *testing.T) {
+		ctx := testCtx(t)
+		// The routine writes an old line as a constant. The check of done
+		// catches it, and the model writes the right line.
+		zero := 0.0
+		stale := Routine{Name: "stock-ack", Version: 1, Standing: RoutineLive, Canary: &zero,
+			Steps:  []RoutineStep{{Tool: "stock.write", Input: `{"path": "report.txt", "text": "STOCK pens=120"}`}},
+			Answer: "ACK STOCK pens=120"}
+		s := newScript(
+			callTools(use("t1", "stock.write", `{"path": "report.txt", "text": "STOCK pens=90"}`)),
+			endTurn("ACK STOCK pens=90"),
+		)
+		st := &stock{text: "STOCK pens=90"}
+		prof := AgentProfile{Name: "clerk", Routines: []Routine{stale}, Done: &Done{Checks: []DoneCheck{check}, Attempts: 1}}
+		a := newTestAgent(t, s.Model(), WithTools(st.tools()...), WithProfile(prof))
+		r, err := a.Run(ctx, "Acknowledge the stock file.", AsAgent("clerk"))
+		mustState(t, r, err, StateCompleted)
+		if r.Output != "ACK STOCK pens=90" || len(s.requests()) != 2 || st.report != "STOCK pens=90" {
+			t.Fatalf("output %q, model calls %d, report %q", r.Output, len(s.requests()), st.report)
+		}
+		evs := ledgerEvents(t, a.Ledger(), r.ID)
+		var app RoutineAppliedData
+		firstOf(t, evs, EvRoutineApplied, &app)
+		want := `done: check 1 "the report holds the line of today" (stock.read) failed: the result lacks "pens=90"`
+		if app.OK || app.Answer != "" || app.FailedStep != 2 || app.Reason != want || app.Done != DoneFailed {
+			t.Fatalf("applied = %+v", app)
+		}
+		passes := donePassesOf(t, evs)
+		if len(passes) != 2 || passes[0].Passed || passes[0].Answer != 0 || !passes[0].Continue ||
+			!passes[1].Passed || passes[1].Attempt != 1 || passes[1].Answer == 0 {
+			t.Fatalf("passes = %+v", passes)
+		}
+		if first := firstMessage(s.requests()[0]); !strings.Contains(first, `<context source="routine">`) || !strings.Contains(first, "It stopped: "+want) {
+			t.Fatalf("first message =\n%s", first)
+		}
+		if d := finishedOf(t, evs); d.Done != DoneChecked || d.Stop != RunStopChecked {
+			t.Fatalf("finished = %+v", d)
+		}
+		checkCursorPrefixes(t, evs)
+	})
+}
+
+// A live routine whose checks of done pass weakly does not count as
+// checked, as a run of the model with a weak pass does not: the check only
+// reads the report, or the routine changed nothing. The run completes as
+// answered with done checked and weak, also for a consumer of the
+// lifecycle events alone.
+func TestRoutineLiveWeakDone(t *testing.T) {
+	strong := DoneCheck{Name: "the report holds the line of today", Tool: "stock.read", Input: `{"path": "report.txt"}`, Contains: []string{"pens=90"}}
+	weak := DoneCheck{Name: "the report is there", Tool: "stock.read", Input: `{"path": "report.txt"}`}
+	zero := 0.0
+	reader := Routine{Name: "stock-look", Version: 1, Standing: RoutineLive, Canary: &zero,
+		Steps:  []RoutineStep{{Tool: "stock.read", Input: `{"path": "levels.txt"}`, As: "read"}},
+		Answer: `SEEN {{ find .read "\t(.+?)\n" }}`}
+	for _, c := range []struct {
+		name    string
+		routine Routine
+		check   DoneCheck
+		report  string // the report before the run
+		weak    bool
+	}{
+		{"a weak check", stockRoutine(RoutineLive), weak, "", true},
+		{"no change", reader, strong, "STOCK pens=90", true},
+		{"a change and a strong check", stockRoutine(RoutineLive), strong, "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := testCtx(t)
+			s := newScript() // the model must not be called
+			st := &stock{text: "STOCK pens=90", report: c.report}
+			prof := AgentProfile{Name: "clerk", Routines: []Routine{c.routine}, Done: &Done{Checks: []DoneCheck{c.check}, Attempts: 1}}
+			a := newTestAgent(t, s.Model(), WithTools(st.tools()...), WithProfile(prof))
+			r, err := a.Run(ctx, "Acknowledge the stock file.", AsAgent("clerk"))
+			mustState(t, r, err, StateCompleted)
+			if len(s.requests()) != 0 || r.Output == "" {
+				t.Fatalf("output %q, model calls %d", r.Output, len(s.requests()))
+			}
+			stop := RunStopChecked
+			if c.weak {
+				stop = RunStopAnswered
+			}
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			passes := donePassesOf(t, evs)
+			if len(passes) != 1 || !passes[0].Passed || passes[0].Weak != c.weak || passes[0].Answer != 0 {
+				t.Fatalf("passes = %+v", passes)
+			}
+			var app RoutineAppliedData
+			firstOf(t, evs, EvRoutineApplied, &app)
+			if !app.OK || app.Done != DoneChecked || app.DoneWeak != c.weak {
+				t.Fatalf("applied = %+v", app)
+			}
+			d := finishedOf(t, evs)
+			if d.Done != DoneChecked || d.DoneWeak != c.weak || d.Stop != stop || CheckedDone(d.Done, d.DoneWeak) == c.weak {
+				t.Fatalf("finished = %+v", d)
+			}
+			var life []Event
+			for _, e := range evs {
+				if e.Type == EvRunQueued || e.Type == EvRunStarted || e.Type == EvRunFinished {
+					life = append(life, e)
+				}
+			}
+			for _, got := range []*Run{r, ProjectRun(evs), ProjectRun(life)} {
+				if got.Done == nil || got.Done.State != DoneChecked || got.Done.Weak != c.weak || got.Stop != stop {
+					t.Fatalf("run done = %+v, stop %q", got.Done, got.Stop)
+				}
+			}
+			checkCursorPrefixes(t, evs)
 		})
 	}
 }

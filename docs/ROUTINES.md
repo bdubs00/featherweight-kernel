@@ -245,16 +245,30 @@ again.
    fails ends the routine: an error result, a denied call, a template
    error, or an empty hole. A check that fails ends it too. The runner
    records `fw.routine.applied` with `ok` and the reason.
-4. After a routine that completed, the run finishes with the rendered
-   `answer` as its output and no model call. In every other case, the run
-   goes to the model: the routine did not complete, or no live routine
-   applies. For a live routine that did not apply or did not complete, the
-   first user message gets one `<context source="routine">` block. The
-   block holds the data of the decision and of what the routine did: the
-   answers with their probabilities, the steps that ran with their results
-   in brief, and the reason it stopped. The model therefore starts warm. A
-   shadow or canary run gets no block. The model must not see the answers
-   of the routine, or the comparison is worthless.
+4. A run with a definition of done (`ARCHITECTURE.md` section 24) checks
+   the work of a routine that completed, as it checks an answer of the
+   model. The kernel runs the checks before `fw.routine.applied` and
+   records the pass as `fw.done.checked` with `answer` 0, because no model
+   answered. The passes of the model leave that pass out, so the model
+   keeps every attempt. When a check fails, the routine did not complete:
+   `fw.routine.applied` has `ok: false`, `done: failed`, the failed step
+   one place after its steps and its checks, and a reason that starts with
+   `done:` and names the failed checks. After a routine that completed,
+   the run finishes with the rendered `answer` as its output and no model
+   call. With a definition of done, its end carries `done: checked` and
+   the stop `checked`, so it counts as checked only as any run does. A
+   weak pass (`ARCHITECTURE.md` section 24) gives `fw.routine.applied`
+   and the end `doneWeak: true`, and the stop is `answered`: the check
+   only reads a path, or the routine changed nothing. In every other
+   case, the run goes to the model: the routine did not complete, or no
+   live routine applies. For a live routine that did not apply or did not
+   complete, the first user message gets one
+   `<context source="routine">` block. The block holds the data of the
+   decision and of what the routine did: the answers with their
+   probabilities, the steps that ran with their results in brief, and the
+   reason it stopped. The model therefore starts warm. A shadow or canary
+   run gets no block. The model must not see the answers of the routine,
+   or the comparison is worthless.
 5. At the end of a run that the model completed, the runner compares the
    answers with what the agent did (section 3.5). It does so for each
    routine in the mode `shadow` or `canary`, and for each live routine
@@ -262,6 +276,16 @@ again.
    question that has `observe`, before `fw.run.finished`. A finished run
    therefore stays finished, and `LeavesFinished` needs no change. A run
    that fails gets no comparison.
+6. A routine in the mode `shadow` or `canary` that applies also gets one
+   comparison of its calls: `fw.routine.compared` with `calls: true` and
+   no question. The runner renders the steps and the checks on the run,
+   with the answers of the routine and with the results of the calls of
+   the agent, and compares them with those calls as Replay does (section
+   3.6). It agrees when every step and every check with a call matched.
+   So a routine without questions gains agreement too. A run on which a
+   `find` finds no value is one that the routine hands to the agent, and
+   it gets no comparison of the calls. The calls of the runner and of the
+   checks of done are no calls of the agent.
 
 The tool calls of the runner go through the same policy, limits, and
 budget as those of a model. A policy `ask` parks the run in the same
@@ -309,18 +333,23 @@ type RoutineAppliedData struct {
     Version    int    `json:"version"`
     OK         bool   `json:"ok"`
     Steps      int    `json:"steps"`                  // steps that ran, failed one included
-    FailedStep int    `json:"failedStep,omitempty"`   // 1-based, among steps then after
+    FailedStep int    `json:"failedStep,omitempty"`   // 1-based, among steps then after; one more for the checks of done
     Reason     string `json:"reason,omitempty"`
     Answer     string `json:"answer,omitempty"`       // the rendered answer of a routine that completed
+    Done       string `json:"done,omitempty"`         // the checks of done on its work: checked or failed
+    DoneWeak   bool   `json:"doneWeak,omitempty"`     // checked, by a pass that shows nothing about the work
 }
 type RoutineComparedData struct {
     Routine  string `json:"routine"`
     Version  int    `json:"version"`
     Mode     string `json:"mode"`                     // shadow | canary | live (a live routine that did not complete)
-    Question string `json:"question"`
-    Said     string `json:"said"`                     // the routine's chosen option, or yes/no
-    Observed string `json:"observed"`                 // what the agent did, "" when nothing matched
+    Question string `json:"question"`                 // "" for the comparison of the calls
+    Said     string `json:"said"`                     // the routine's chosen option, or yes/no; the input of the step that differs
+    Observed string `json:"observed"`                 // what the agent did, "" when nothing matched; the input of its call
     Agree    bool   `json:"agree"`
+    Calls    bool   `json:"calls,omitempty"`          // the comparison of the calls (section 3.3, item 6)
+    Step     int    `json:"step,omitempty"`           // the first step that differs, 1-based, among steps then after
+    Reason   string `json:"reason,omitempty"`         // how it differs: "step 2 files: the key file_text differs"
 }
 ```
 
@@ -379,14 +408,23 @@ fw routine replay --routine r.yaml [--ledger <dir>] [--agent name] [--decide] [-
 Without `--ledger`, the verb reads the ledger of the configuration.
 
 `Propose(runs [][]Event, opts) (Routine, Proposal)` is anti-unification of
-the tool calls of verified runs. It takes the sequence of tool names of
-each run. The most common sequence is the template. A list in an input
-takes the length that most runs give it. The runs with another sequence or
-another length are listed as divergent, with the reason. For each call
-position and each leaf of the input JSON, across runs, Propose decides the
-kind of the leaf:
+the tool calls of verified runs. The calls of a run are the calls of the
+model (`fw.ModelCalls`): the calls of the runner and of the checks of
+done, whose call ids start with `routine_` and `done_`, are no steps. It
+takes the sequence of tool names of each run. The most common sequence is
+the template. A list in an input takes the length that most runs give it.
+The runs with another sequence or another length are listed as divergent,
+with the reason. For each call position and each leaf of the input JSON,
+across runs, Propose decides the kind of the leaf:
 
-- A value that is equal everywhere is a constant.
+- A value that is equal everywhere and that the agent read in an earlier
+  result stays a value that the routine reads: a `find` over that result.
+  This holds for a text with a space in it, such as a line of a file, and
+  for a number after the word that labels it, such as `pens=` before
+  `120`. So a routine that copies a line of a file writes the line that
+  the file holds on its run, not the line of the runs that it came from.
+- Any other value that is equal everywhere is a constant: a name, a path,
+  a key, a number without a label, or a value that only the input holds.
 - A key that some runs leave out and the others set to one value is left
   out, as an optional key. A key that some runs leave out and the others
   set to several values is a free hole of its own.
@@ -395,6 +433,8 @@ kind of the leaf:
   becomes a `find` template over that source. The context is the word
   that labels the value, such as `Number: (\d+)`. Only for a labeled
   context that is ambiguous, Propose takes the shortest unambiguous one.
+  A text needs a mark after it: the next character, or the end of the
+  text (`\z`), as for the last line of a file.
 - A value from a small set becomes a question, with those values as
   options plus `other`. A small set holds at most 8 distinct values over
   at least 10 runs. The `observe` of the question comes from the tool and
@@ -533,7 +573,7 @@ projection keeps these figures per routine, in the bucket under
 - per day (UTC):
   - `decided`: shadow and canary runs
   - `acted`: the routine applies, so it is ready to act
-  - `agreed`: every compared question agreed
+  - `agreed`: every compared question agreed, and so did the calls
   - `disagreed`
   - `handed`: applies false
   - `applied`: live, ok

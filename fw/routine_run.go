@@ -40,6 +40,7 @@ type routineCursor struct {
 	ok      bool   // it completed
 	answer  string // its answer
 	reason  string // why it stopped
+	weak    bool   // the checks of done passed weakly on its work
 	done    bool   // a fw.run.finished after fw.routine.applied
 	base    string // the context of fw.run.started
 	// compared is true when the run holds a comparison of its own.
@@ -135,7 +136,7 @@ func (c *cursor) applyRoutine(e Event) {
 		if e.Decode(&d) != nil || d.Routine != r.live {
 			return
 		}
-		r.applied, r.ok, r.answer, r.reason = true, d.OK, d.Answer, d.Reason
+		r.applied, r.ok, r.answer, r.reason, r.weak = true, d.OK, d.Answer, d.Reason, d.OK && d.DoneWeak
 	case EvRoutineCompared:
 		r.compared = r.compared || e.Seq > c.queued.Kept
 		return
@@ -347,8 +348,56 @@ func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor) error 
 	if err != nil {
 		return err
 	}
+	if applied.OK {
+		if err := a.checkRoutineDone(ctx, rs, routines[chosen], &applied); err != nil {
+			return err
+		}
+	}
 	_, err = a.emit(ctx, rs, EvRoutineApplied, applied)
 	return err
+}
+
+// checkRoutineDone runs the checks of the definition of done of the run
+// on the work of a live routine that completed, before fw.routine.applied,
+// as on an answer of the model. A run that a routine finishes therefore
+// counts as checked only as any run does (CheckedDone). The pass has the
+// answer 0, because no model answered: the passes of the model leave it
+// out, so the model keeps every attempt. When a check fails, the routine
+// did not complete. Its fw.routine.applied names the failed checks, one
+// place after its steps and its checks, and the model takes the run with
+// the context block of the routine.
+func (a *Agent) checkRoutineDone(ctx context.Context, rs *runState, r Routine, applied *RoutineAppliedData) error {
+	d := rs.queuedData().Done
+	if !d.on() {
+		return nil
+	}
+	// The cursor of the step that ran the routine does not count its
+	// calls yet.
+	c, _ := rs.executionCursor()
+	pass := DoneCheckedData{Attempt: 1, Attempts: d.attempts()}
+	if err := a.runDone(ctx, rs, c, d, &pass); err != nil {
+		return err
+	}
+	pass.Continue = !pass.Passed
+	a.log.Info("done checked after a routine", "run", rs.id, "routine", r.Name, "passed", pass.Passed)
+	if _, err := a.emit(ctx, rs, EvDoneChecked, pass); err != nil {
+		return err
+	}
+	if pass.Passed {
+		applied.Done, applied.DoneWeak = DoneChecked, pass.Weak
+		return nil
+	}
+	var failed []string
+	for i, res := range pass.Checks {
+		if !res.Passed {
+			why, _, _ := strings.Cut(res.Why, "\n")
+			failed = append(failed, DoneCheck{Name: res.Name, Tool: res.Tool}.label(i)+" failed: "+strings.TrimSuffix(why, ":"))
+		}
+	}
+	place := len(r.Steps) + len(r.After) + 1
+	applied.OK, applied.Answer, applied.Steps, applied.FailedStep, applied.Done = false, "", place, place, DoneFailed
+	applied.Reason = ClipText("done: "+strings.Join(failed, "; "), 500, "the reason")
+	return nil
 }
 
 // closeRoutine records the end of a live routine that a restart or a
@@ -385,15 +434,27 @@ func (rs *runState) routineWaits() bool {
 }
 
 // finishRoutine finishes a run whose routine completed, with its answer as
-// the output. A message that arrived meanwhile goes to the model instead,
-// which starts with the context block of the routine.
+// the output. A routine completes only when the checks of done of the run
+// passed (checkRoutineDone), so the end carries them as the end of a run
+// of the model does (endTurn): a weak pass completes the run as answered,
+// so it lands with the runs that a person checks. A message that arrived
+// meanwhile goes to the model instead, which starts with the context block
+// of the routine.
 func (a *Agent) finishRoutine(ctx context.Context, rs *runState, c *cursor, n int) error {
 	rs.emitMu.Lock()
 	defer rs.emitMu.Unlock()
 	if messageSince(rs.events, n) {
 		return nil
 	}
-	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: c.routine.answer, Stop: RunStopAnswered})
+	done, weak := "", false
+	if rs.queuedData().Done.on() {
+		done, weak = DoneChecked, c.routine.weak
+	}
+	stop := RunStopAnswered
+	if CheckedDone(done, weak) {
+		stop = RunStopChecked
+	}
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, RunFinishedData{Outcome: OutcomeCompleted, Output: c.routine.answer, Done: done, DoneWeak: weak, Stop: stop})
 	return err
 }
 
@@ -676,7 +737,8 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 
 // compareLocked appends one fw.routine.compared per observed question of
 // each routine that the run decided in mode shadow or canary, or in mode
-// live without completing, at the end of a run that the model completed.
+// live without completing, and one comparison of the calls for each
+// rehearsal that applies, at the end of a run that the model completed.
 // It runs once per run. The caller holds rs.emitMu and appends
 // fw.run.finished next.
 func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, output string) error {
@@ -684,7 +746,7 @@ func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, outp
 	if len(routines) == 0 || !c.answered {
 		return nil
 	}
-	for _, d := range routineComparisons(routines, c.routine, rs.events, output) {
+	for _, d := range routineComparisons(routines, c.routine, c.queued, rs.events, output) {
 		if _, err := a.emitLocked(ctx, rs, EvRoutineCompared, d); err != nil {
 			return err
 		}
@@ -695,14 +757,22 @@ func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, outp
 // routineComparisons returns the comparisons of a run from its cursor: for
 // each routine that the run decided in mode shadow or canary, or in mode
 // live without completing, and each of its questions with observe, what
-// the routine said against what the agent did. A run compares once, and a
-// branch never compares the decisions that it kept from its source.
-// output is the output text of the run.
-func routineComparisons(routines []Routine, r routineCursor, events []Event, output string) []RoutineComparedData {
+// the routine said against what the agent did. For each routine that the
+// run decided in mode shadow or canary and that applies, it adds the
+// comparison of the calls: its steps and its checks, rendered on this run
+// with its own answers, against the calls of the agent and their results.
+// So a routine without questions gains agreement too. A run that the
+// routine would hand to the agent, because a find finds no value, gets no
+// comparison of the calls. A run compares once, and a branch never
+// compares the decisions that it kept from its source. start is the start
+// of the run, and output is its output text.
+func routineComparisons(routines []Routine, r routineCursor, start RunQueuedData, events []Event, output string) []RoutineComparedData {
 	if r.compared {
 		return nil
 	}
 	var out []RoutineComparedData
+	var calls []RoutineCall
+	read := false
 	for _, d := range r.decided[r.kept:] {
 		if d.Mode == RoutineLive && r.ok && d.Routine == r.live {
 			continue
@@ -712,23 +782,48 @@ func routineComparisons(routines []Routine, r routineCursor, events []Event, out
 			continue
 		}
 		rt := routines[i]
+		said := map[string]string{}
 		for _, name := range rt.QuestionNames() {
 			q := rt.Questions[name]
 			ans, ok := d.Answers[name]
 			if !ok {
 				continue
 			}
+			said[name] = SaidOf(q, ans)
 			observed, ok := ObserveAnswer(q, output, events)
 			if !ok {
 				continue
 			}
-			said := SaidOf(q, ans)
 			out = append(out, RoutineComparedData{
 				Routine: rt.Name, Version: rt.Version, Mode: d.Mode, Question: name,
-				Said: said, Observed: observed,
-				Agree: strings.EqualFold(strings.TrimSpace(said), strings.TrimSpace(observed)),
+				Said: said[name], Observed: observed,
+				Agree: strings.EqualFold(strings.TrimSpace(said[name]), strings.TrimSpace(observed)),
 			})
 		}
+		if !d.Applies || (d.Mode != RoutineShadow && d.Mode != RoutineCanary) || len(rt.Steps)+len(rt.After) == 0 {
+			continue
+		}
+		if !read {
+			calls, read = ModelCalls(events), true
+		}
+		data := RoutineData(start.Input, start.Metadata)
+		for k, v := range said {
+			data[k] = v
+		}
+		cmp := CompareRoutineCalls(rt, data, calls)
+		if cmp.Handed != "" {
+			continue
+		}
+		c := RoutineComparedData{Routine: rt.Name, Version: rt.Version, Mode: d.Mode, Calls: true, Agree: cmp.Agree()}
+		if !c.Agree {
+			place := fmt.Sprintf("step %d", cmp.Step)
+			if cmp.Step > len(rt.Steps) {
+				place = fmt.Sprintf("check %d", cmp.Step-len(rt.Steps))
+			}
+			c.Step, c.Said, c.Observed = cmp.Step, cmp.Rendered, cmp.Recorded
+			c.Reason = place + " " + cmp.Tool + ": " + cmp.Reason
+		}
+		out = append(out, c)
 	}
 	return out
 }

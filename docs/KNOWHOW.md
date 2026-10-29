@@ -403,6 +403,7 @@ principals, such as `duty:<name>`.
 | `GET /v1/knowhow/waiting?agent=` | the changes that wait for a person |
 | `POST /v1/knowhow/waiting/{id}` | `{"keep": true}` or `{"keep": false}`. Each change pins the hash of its target. A target that changed since gets 409. |
 | `GET /v1/knowhow/summary?agent=&days=7` | the four numbers of section 1, split into normal and held-back runs |
+| `POST /v1/knowhow/propose?agent=` | run the pass that proposes routines (section 6.5) at once, for the agent, or without one for every agent that the caller owns. It needs the owner role. It answers `{"proposed", "staysOut"}`, and 409 when proposals or routines are off. |
 
 The kernel reads and sends these shapes on the routes of the notes and the
 runs (`memory/front.go`, and the fake front `memory/fronttest`):
@@ -518,17 +519,26 @@ sets them.
 
 These rules change `docs/ROUTINES.md` section 4.
 
-- Proposals. A daily pass of the front reads the archive. For each Duty of
-  each agent, it takes the completed runs of the last 30 days. It needs at
-  least 10 runs, at least 2 of them verified (section 1), and no rejected
-  run among those it uses. It calls `routine.Propose` and then
+- Proposals. A daily pass of the front reads the archive. An owner starts
+  the same pass at once with `POST /v1/knowhow/propose` (section 5.3), so
+  a person does not wait for the next day. For each Duty of each agent,
+  it takes the completed runs of the last 30 days. It needs at least 10
+  runs, at least 2 of them verified (section 1), and no rejected run among
+  those it uses. It calls `routine.Propose` and then
   `routine.LeaveOneOut`. A proposal with a free hole, or with a diverged
   run, stays out, and the journal says why. A good proposal is stored
   bound to its Duty (`duty`), as `proposed`, and moves to `rehearsing` at
   once, unless `askFirst` is on.
-- Step back. One disagreement in a canary run, or a run that the routine
-  applied and that came back with a `rejected` receipt, moves a live
-  routine to `rehearsing`. The journal says `stepped-back` with the run.
+- Agreement. A rehearsal compares what the routine would do with what the
+  agent did on the same run: its questions, and its calls with their
+  results (`docs/ROUTINES.md` section 3.3, item 6). So a routine without
+  questions, the only kind that Know-how proposes without a decider,
+  gains agreement and can become ready.
+- Step back. One disagreement in a canary run, a run that the routine
+  applied and that came back with a `rejected` receipt, or a run whose
+  checks of done failed on the work of the routine (`fw.routine.applied`
+  with `done: failed`), moves a live routine to `rehearsing`. The journal
+  says `stepped-back` with the run.
 - Ready by risk. A rehearsing routine is ready under three conditions:
   - `acted` reaches the bound of its risk: `read` 20 and `write` 50, the
     defaults of `workbench.routines.readyAfter`.
