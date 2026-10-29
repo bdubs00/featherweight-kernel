@@ -26,7 +26,9 @@ func TestSourcesOf(t *testing.T) {
 		{"Launch day: 2026-11-12.\nSource: page:launch/quillwork-3.md\n", src("page:launch/quillwork-3.md")},
 		{"x\n- sources: Page:/launch/a.md, file:docs/setup.md.\n", src("page:launch/a.md", "file:docs/setup.md")},
 		{"x\nSource: `page:a.md` and (file:b.txt)\nSource: page:a.md\n", src("page:a.md", "file:b.txt")},
-		// What a model wrote on the stack: no ref of a kind, so no source.
+		// What a model wrote on the stack: no ref of a kind. The store
+		// takes it as a page only when the front has the page
+		// (TestNoteNamesItsPageLoosely).
 		{"x\nSource: wiki page launch/quillwork-3.md\n", nil},
 		{"The source: page:a.md is wrong\n", nil},
 		{"Source: page:\nSource: run:01K1 item:gitea/issue/4\n", nil},
@@ -43,6 +45,87 @@ func TestSourcesOf(t *testing.T) {
 	}
 	if got := SourcesOf(many.String()); len(got) != MaxTextSources {
 		t.Fatalf("%d sources from one note", len(got))
+	}
+}
+
+// TestLooseSources checks the loose forms of a page on a line of sources:
+// a path after the word page or wiki, a path of the wiki with or without
+// .md, and a markdown link to a page. SourcesOf leaves them out, because
+// only the front knows whether such a page exists.
+func TestLooseSources(t *testing.T) {
+	for _, c := range []struct {
+		text  string
+		loose []string
+	}{
+		// What Haiku wrote on the stack (stack/evidence/2a-note-written).
+		{"Quillwork 3.0 launch day and webinar date (from wiki page).\nLaunch day: 2026-11-12. Webinar: 2026-11-19.\nSource: wiki page launch/quillwork-3.md\n", []string{"launch/quillwork-3.md"}},
+		{"x\nSource: wiki page launch/quillwork-3.md, version 3).\n", []string{"launch/quillwork-3.md"}},
+		{"x\nSource: launch/quillwork-3\n", []string{"launch/quillwork-3.md"}},
+		{"x\nSource: runbook.md\n", []string{"runbook.md"}},
+		{"x\nSource: the wiki page runbook\n", []string{"runbook.md"}},
+		{"x\nSource: [Quillwork 3](/launch/quillwork-3.md) and [the runbook](#pages/ops/runbook.md)\n", []string{"launch/quillwork-3.md", "ops/runbook.md"}},
+		{"x\nSources: page:a.md, wiki page a.md, b.md\n", []string{"b.md"}},
+		// No path: a word, a URL, a ref of another kind, a path that leaves the wiki.
+		{"x\nSource: the conversation with alice\n", nil},
+		{"x\nSource: https://example.com/launch/plan.md run:01K1 ../secret.md\n", nil},
+		{"Launch day is near, see launch/plan.md\n", nil},
+	} {
+		if _, got := parseSources(c.text); !reflect.DeepEqual(got, c.loose) {
+			t.Errorf("parseSources(%q) loose = %q, want %q", c.text, got, c.loose)
+		}
+	}
+	if got := SourcesOf("x\nSources: page:a.md, wiki page b.md\n"); len(got) != 1 || got[0].Ref != "page:a.md" {
+		t.Fatalf("SourcesOf = %+v", got)
+	}
+}
+
+// TestNoteNamesItsPageLoosely checks that a note whose line of sources
+// names a page in a loose form, as Haiku wrote it on the stack, gets the
+// page as its source with the hash of the page when the front has the
+// page, and no source for a page that the front does not have. Without a
+// front, a loose form gives no source.
+func TestNoteNamesItsPageLoosely(t *testing.T) {
+	s, f, _ := frontStore(t, "agent")
+	ctx := asRun()
+	scope := s.Scope(fw.RunInfoFrom(ctx))
+	f.PutPage("launch/quillwork-3.md", "# Quillwork 3\nLaunch day: 2026-11-12\n")
+	f.PutPage("ops/runbook.md", "# Runbook\n")
+	page := fronttest.Hash("# Quillwork 3\nLaunch day: 2026-11-12\n")
+	haiku := "Quillwork 3.0 launch day and webinar date (from wiki page).\nLaunch day: 2026-11-12. Webinar: 2026-11-19.\nSource: wiki page launch/quillwork-3.md\n"
+	for _, c := range []struct {
+		name, text string
+		want       []fronttest.Source
+	}{
+		{"haiku.md", haiku, []fronttest.Source{{Ref: "page:launch/quillwork-3.md", Version: page}}},
+		{"bare.md", "Launch day: 2026-11-12.\nSource: launch/quillwork-3\n", []fronttest.Source{{Ref: "page:launch/quillwork-3.md", Version: page}}},
+		{"link.md", "Restart the queue first.\nSource: [the runbook](ops/runbook.md), file:notes/q.txt\n",
+			[]fronttest.Source{{Ref: "file:notes/q.txt"}, {Ref: "page:ops/runbook.md", Version: fronttest.Hash("# Runbook\n")}}},
+		// The front has no such page, so the note names none.
+		{"gone.md", "Launch day: 2026-11-12.\nSource: wiki page launch/gone.md\n", nil},
+	} {
+		if _, err := s.Remember(ctx, scope, fw.MemoryRecord{Ref: NoteRef(scope, c.name), Body: c.text}, ""); err != nil {
+			t.Fatal(err)
+		}
+		n, ok := f.Get("triage", "agent", "", c.name)
+		if !ok || len(n.Sources) != len(c.want) || (len(c.want) > 0 && !reflect.DeepEqual(n.Sources, c.want)) {
+			t.Errorf("front note %s = %+v, want sources %+v", c.name, n, c.want)
+		}
+	}
+
+	// Without a front.
+	cfg := fw.DefaultConfig()
+	cfg.Home = t.TempDir()
+	local, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = local.Close() })
+	lscope := local.Scope(fw.RunInfoFrom(ctx))
+	if _, err := local.Remember(ctx, lscope, fw.MemoryRecord{Ref: NoteRef(lscope, "haiku.md"), Body: haiku}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _ := local.Get(ctx, lscope, NoteRef(lscope, "haiku.md")); len(rec.Links) != 0 {
+		t.Fatalf("local sources = %+v", rec.Links)
 	}
 }
 

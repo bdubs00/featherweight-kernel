@@ -516,12 +516,13 @@ func (f *noteFiles) writeLocked(name string, data []byte) error {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
 	// A write without sources of its own takes those that the text names
-	// (SourcesOf), and each page gets its version from the front.
+	// (textSources), and each page gets its version from the front.
 	links := f.links
 	if links == nil {
-		links = SourcesOf(string(data))
+		links = f.store.textSources(f.ctx, string(data))
+	} else {
+		links = f.store.versioned(f.ctx, links)
 	}
-	links = f.store.versioned(f.ctx, links)
 	waiting := false
 	if f.pushes() {
 		var err error

@@ -40,7 +40,7 @@ type PullResult struct {
 // and removes each copy that the front put away, holds back for a person,
 // or no longer lists. A note of the copy that the front never had, such as
 // a note from before the front was set, goes to the front as a new note of
-// the agent, with the sources that its lines name (SourcesOf). When the
+// the agent, with the sources that its lines name (textSources). When the
 // front keeps another text under the same name, such as the note of
 // another Task of the pool from before the front, the text of the copy
 // goes to the front under a free name first (adopt), so no note from
@@ -298,7 +298,7 @@ func (s *Store) linksOfCopy(ctx context.Context, st *scopeState, name string, da
 	if e, ok := st.Notes[name]; ok && e.Hash == hashOf(data) && len(e.Links) > 0 {
 		return e.Links
 	}
-	return s.versioned(ctx, SourcesOf(string(data)))
+	return s.textSources(ctx, string(data))
 }
 
 // localHashes returns the hash of each note of the copy. A note whose

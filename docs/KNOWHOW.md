@@ -196,6 +196,14 @@ in the files of the process, because the front has no such scope.
   changes. A page that the wiki does not have keeps no version, and the
   tool says so to the model after its result. `fw.memory.changed` records
   the sources of the write.
+- A model does not always write the ref. Haiku wrote `Source: wiki page
+  launch/quillwork-3.md`. So the line also takes loose forms of a page: a
+  path after the word `page` or `wiki`, a path of the wiki with or
+  without `.md`, and a markdown link to a page, also `#pages/<path>`. The
+  store keeps such a form as `page:<path>`, with the hash of the page,
+  only when the front has that page. A page that the front does not have,
+  a front that does not answer, and a store without a front give no
+  source. The kernel never guesses a page.
 - Ask first: when the front holds a change of the agent for a person, it
   answers `202` with `waiting`. The store keeps the text in the copy for
   this run, and `fw.memory.changed` carries `"waiting": true`. The memory
