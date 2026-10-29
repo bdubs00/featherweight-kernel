@@ -43,6 +43,10 @@ type routineCursor struct {
 	weak    bool   // the checks of done passed weakly on its work
 	done    bool   // a fw.run.finished after fw.routine.applied
 	base    string // the context of fw.run.started
+	// start holds the routines that the front gave the run at its start
+	// (RunStartedData.Routines), nil for a run with the routines of its
+	// profile.
+	start *StartRoutines
 	// compared is true when the run holds a comparison of its own.
 	compared bool
 	// decided holds every decision of the run, for the context block and
@@ -82,7 +86,7 @@ func (c *cursor) applyRoutine(e Event) {
 	case EvRunStarted:
 		var d RunStartedData
 		if e.Decode(&d) == nil {
-			r.base = d.Context
+			r.base, r.start = d.Context, d.Routines
 		}
 		return
 	case EvRoutineDecided:
@@ -252,7 +256,7 @@ func (a *Agent) routineDue(rs *runState, c *cursor) bool {
 	if c.queued.Metadata["replayOf"] != "" || a.k.override(rs.id) != nil {
 		return false
 	}
-	return len(routinesFor(a.profileOf(c.queued).Routines, c.queued.Metadata)) > 0
+	return len(routinesFor(a.routinesOf(c), c.queued.Metadata)) > 0
 }
 
 // routinesFor returns the routines that the runner considers for a run, in
@@ -307,9 +311,10 @@ type routineRun struct {
 	// asks for does not run, because nobody answers a check.
 	check bool
 	// ownBudget is true for the calls of a definition of done, which have
-	// a tool budget of their own (done.go). The limits of tool calls of
-	// the run and of its tree then do not refuse them, and the count of
-	// the calls of the run leaves them out (doneCall).
+	// a tool budget of their own (done.go). The limits of tool calls, of
+	// tokens, and of cost of the run and of its tree then do not refuse
+	// them, and the count of the calls of the run leaves them out
+	// (doneCall). The deadline still stops them.
 	ownBudget bool
 }
 
@@ -325,7 +330,7 @@ type routineVerdict struct {
 // that a restart between the two events takes.
 func (a *Agent) stepRoutine(ctx context.Context, rs *runState, c *cursor) error {
 	prof := a.profileOf(c.queued)
-	routines := routinesFor(prof.Routines, c.queued.Metadata)
+	routines := routinesFor(a.routinesOf(c), c.queued.Metadata)
 	_, tools := a.runTools(ctx, rs, prof)
 	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), calls: c.toolCalls - c.keptCalls, prefix: routineCallPrefix}
 	verdicts, err := rr.decide(ctx, routines, c.queued.Input)
@@ -375,7 +380,7 @@ func (a *Agent) checkRoutineDone(ctx context.Context, rs *runState, r Routine, a
 	// calls yet.
 	c, _ := rs.executionCursor()
 	pass := DoneCheckedData{Attempt: 1, Attempts: d.attempts()}
-	if err := a.runDone(ctx, rs, c, d, &pass); err != nil {
+	if err := a.runDone(ctx, rs, c, d, &pass, applied.Answer); err != nil {
 		return err
 	}
 	pass.Continue = !pass.Passed
@@ -682,11 +687,9 @@ func (rr *routineRun) apply(ctx context.Context, r Routine, q RunQueuedData, sai
 func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input json.RawMessage) (ToolResult, string, error) {
 	a, rs := rr.a, rr.rs
 	spec := t.Spec()
-	if rr.ownBudget {
-		if o, spent := a.costSpent(rs); spent {
-			return ToolResult{}, "not run: " + o.why(), nil
-		}
-	} else if o, spent := a.limitSpent(rs); spent {
+	// A call of a check of done calls no model, so only the deadline
+	// stops it (done.go).
+	if o, spent := a.limitSpent(rs); spent && !rr.ownBudget {
 		return ToolResult{}, "not run: " + o.why(), nil
 	}
 	if d, past := a.pastDeadline(rs); past {
@@ -742,7 +745,7 @@ func (rr *routineRun) call(ctx context.Context, routine string, t Tool, input js
 // It runs once per run. The caller holds rs.emitMu and appends
 // fw.run.finished next.
 func (a *Agent) compareLocked(ctx context.Context, rs *runState, c *cursor, output string) error {
-	routines := a.profileOf(c.queued).Routines
+	routines := a.routinesOf(c)
 	if len(routines) == 0 || !c.answered {
 		return nil
 	}

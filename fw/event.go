@@ -255,6 +255,11 @@ type RunStartedData struct {
 	// Knowhow is KnowhowOff for a run that is held back from Know-how
 	// (HeldBack), and empty for every other run.
 	Knowhow string `json:"knowhow,omitempty"`
+	// Routines holds the routines that the front of the fleet gave the run
+	// at its start (routines.front), in place of the routines of its
+	// profile, with their version, or why it gave none. It is nil for a
+	// run that takes the routines of its profile (see startRoutines).
+	Routines *StartRoutines `json:"routines,omitempty"`
 }
 
 // MessageReceivedData is the payload of fw.message.received.
@@ -677,8 +682,10 @@ type RunFinishedData struct {
 	// Done is DoneChecked on the end of a completed run whose definition
 	// of done passed, DoneFailed on the end of a run that its checks
 	// ended, and empty for a run without a definition of done (see Done).
-	// So a consumer of the lifecycle events tells a checked result from a
-	// run whose model stopped.
+	// A run that stopped at a limit of its budget other than the deadline
+	// carries the state of the pass that ran after the stop (limitDone)
+	// beside its stop at the limit. So a consumer of the lifecycle events
+	// tells a checked result from a run whose model stopped.
 	Done string `json:"done,omitempty"`
 	// DoneWeak is true with Done DoneChecked when the pass shows nothing
 	// about the work of the run (see CheckedDone). Such a run stops as

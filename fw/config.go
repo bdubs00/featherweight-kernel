@@ -54,6 +54,10 @@ type Config struct {
 	// takes the backward-compatible finite default of 64. Children use spawn limits.
 	MaxQueuedRuns int    `yaml:"maxQueuedRuns" json:"maxQueuedRuns"`
 	Version       string `yaml:"-" json:"version,omitempty"`
+	// Routines says where the routines of the agents come from: with
+	// routines.front, each run reads them from the front of a fleet at its
+	// start (see RoutineSource).
+	Routines RoutinesConfig `yaml:"routines,omitempty" json:"routines,omitempty"`
 	// Workspaces lists more directories of the workspace than the root of
 	// the files tool, such as the volume and the bindings of an ax Task,
 	// which the package ax sets. With tools.user, the tool user owns them

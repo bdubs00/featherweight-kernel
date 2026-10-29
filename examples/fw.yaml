@@ -118,6 +118,11 @@ providers:                      # one connection per provider; FW_PROVIDERS_<NAM
 #     model: clef                      # required: the model name to send; the response names the model served
 #     timeout: 30s                     # one call; 0 is 30s
 
+# routines:                     # where the routines of the agents come from; without it each profile carries its own (docs/ROUTINES.md section 3.1)
+#   front:                      # each run reads the routines of its agent from the front of a fleet at its start; FW_ROUTINES_FRONT_URL
+#     url: http://fw-front:8080   # GET {url}/v1/routines/now?agent=<name>, with the version of the list that the run holds
+#     tokenEnv: FW_API_TOKEN      # the variable that holds the static token of the front
+
 secrets:
   driver: env                   # env | vault | gsm
   options: {}                   # driver options; FW_SECRETS_OPTIONS_<NAME>
@@ -384,7 +389,9 @@ maxQueuedRuns: 0                # extra admitted root drivers; 0 selects the fin
 # The checks have a tool budget of their own, apart from budget.maxToolCalls.
 # A run counts as checked only when its pass shows the work of the run: a
 # run that changed nothing, or whose checks only view a file with no
-# contains and no lacks, completes as answered (section 24.2).
+# contains and no lacks, completes as answered (section 24.2). The reserved
+# tool name answer checks the final answer of the run with no tool call:
+# with contains or lacks, it is the strong check of a job that only reads.
 #
 # agents:
 #   fixer:
@@ -399,6 +406,13 @@ maxQueuedRuns: 0                # extra admitted root drivers; 0 selects the fin
 #           lacks: ["??"]         # substrings that the result must not hold; contains lists the ones it must hold
 #       attempts: 3               # failed passes that end the run; 1 gives no other turn; 0 is 3, the most is 10
 #       timeout: 5m               # the time limit of each check; 0 is 5m, the most is 10m
+#   stock-reader:
+#     done:
+#       checks:
+#         - name: the answer names the stock
+#           tool: answer          # reserved: checks the final answer of the run, makes no call, takes no input
+#           contains: ["pens="]
+#           lacks: ["could not"]
 
 # harness (section 19)
 # The block harness makes every run of the process a session of a hosted

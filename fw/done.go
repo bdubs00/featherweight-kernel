@@ -14,7 +14,9 @@ package fw
 // contains and no string of lacks. The checks run under the policy of the
 // run, and a check never asks a person: a call that the policy asks for
 // fails the check. The checks run before the grader of an outcome, because
-// a check is cheap and certain, and a grader is neither.
+// a check is cheap and certain, and a grader is neither. A check of the
+// answer (DoneAnswer) makes no call: its contains and lacks apply to the
+// final answer of the run.
 //
 // Each call of a check gets fresh tool state (RunInfo.Fresh): bash runs it
 // in a new shell in the directory of the run, never in the shell of the
@@ -22,11 +24,15 @@ package fw
 //
 // The checks have a tool budget of their own: at most MaxDoneChecks calls
 // a pass, each within the time limit of the block. The limits of tool
-// calls of the run and of its tree neither refuse them nor count them, so
-// a run that used its tool calls still has its work checked.
+// calls, of tokens, and of cost of the run and of its tree neither refuse
+// them nor count them, because a check calls no model. So a run that used
+// its tool calls still has its work checked, also a run that stops at such
+// a limit: its checks run after its final report (limitDone). Only the
+// deadline of the run, the limit of a person's time, stops a check.
 //
 // A pass that passed can be weak: it shows nothing about the work of this
-// run (weakPass). Then the run completes as answered, not as checked
+// run (weakPass), such as a pass of a run that changed nothing, unless a
+// check of the answer with contains or lacks passed. Then the run completes as answered, not as checked
 // (CheckedDone). In a run that is held back from Know-how, a check of the
 // memory or the recall tool is skipped, not failed, because the kernel
 // took that tool out of the run.
@@ -119,11 +125,21 @@ type Done struct {
 	Timeout  time.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
+// DoneAnswer is the reserved tool name of a check of the answer of a run
+// (DoneCheck.OfAnswer). Such a check makes no tool call, also when an
+// agent has a tool of that name.
+const DoneAnswer = "answer"
+
 // DoneCheck is one check of a definition of done: a tool call and what its
 // result text must hold (Contains) and must not hold (Lacks), as
 // substrings. Name says in a few words what the check shows, such as "the
 // tests pass", for a person and for the model. Input is a JSON object as
 // text; empty means {}.
+//
+// A check whose Tool is DoneAnswer checks the final answer of the run
+// instead of the result of a call: Contains and Lacks apply to the text of
+// the answer, and it takes no input. It is the check of a job that only
+// reads, whose product is its answer.
 type DoneCheck struct {
 	Name     string   `yaml:"name,omitempty" json:"name,omitempty"`
 	Tool     string   `yaml:"tool" json:"tool"`
@@ -133,14 +149,24 @@ type DoneCheck struct {
 }
 
 // Weak reports whether the check alone can show nothing about the work of
-// a run: its call only reads a file or a page by its path (ReadsPath), and
-// it names no Contains and no Lacks. Such a check passes for every path
-// that exists, also one that was there before the run. A pass whose every
-// check is weak is a weak pass. The profile editor of the workbench warns
-// about such a check with the same rule.
+// a run: it names no Contains and no Lacks, and either its call only reads
+// a file or a page by its path (ReadsPath), or it checks the answer
+// (OfAnswer). Such a check passes for every path that exists, also one
+// that was there before the run, and for every answer that is not empty.
+// A pass whose every check is weak is a weak pass. A check of the answer
+// that names a Contains or a Lacks is strong, also in a run that changed
+// nothing (weakPass). The profile editor of the workbench warns about a
+// weak check with the same rule.
 func (c DoneCheck) Weak() bool {
-	return len(c.Contains) == 0 && len(c.Lacks) == 0 && ReadsPath(c.Tool, json.RawMessage(c.Input))
+	if len(c.Contains) > 0 || len(c.Lacks) > 0 {
+		return false
+	}
+	return c.OfAnswer() || ReadsPath(c.Tool, json.RawMessage(c.Input))
 }
+
+// OfAnswer reports whether the check tests the final answer of the run
+// (DoneAnswer) and makes no tool call.
+func (c DoneCheck) OfAnswer() bool { return strings.TrimSpace(c.Tool) == DoneAnswer }
 
 // pathKeys are the keys of an input that name the path of a file or a
 // page.
@@ -238,8 +264,12 @@ func CheckDone(d *Done) error {
 		if len(c.Name) > maxDoneNameBytes || strings.ContainsAny(c.Name, "\r\n") {
 			return bad("done.checks[%d].name is longer than %d bytes or holds a line break", i, maxDoneNameBytes)
 		}
-		if _, err := doneInput(c.Input); err != nil {
+		in, err := doneInput(c.Input)
+		if err != nil {
 			return bad("done.checks[%d].input is not a JSON object", i)
+		}
+		if c.OfAnswer() && string(in) != "{}" {
+			return bad("done.checks[%d] checks the answer of the run (tool %s), which takes no input", i, DoneAnswer)
 		}
 		if n := len(c.Contains) + len(c.Lacks); n > maxDoneMatches {
 			return bad("done.checks[%d] has %d strings in contains and lacks; the most is %d", i, n, maxDoneMatches)
@@ -333,10 +363,13 @@ func (a *Agent) resolveDone(req RunRequest, named AgentProfile, parent *runState
 // number of the failed pass, from 1, for a pass that failed, and one more
 // than the failed passes before it for a pass that passed. Attempts is the
 // number of failed passes that end the run. Answer is the sequence number
-// of the fw.model.responded whose answer the pass checked. Continue is
-// true when the model gets one more turn with the failures. Reason says
-// why a failed pass does not continue. Weak is true for a pass that passed
-// and shows nothing about the work of the run (weakPass).
+// of the fw.model.responded whose answer the pass checked, and 0 for a
+// pass after a routine or at a limit, which no answer of a turn started.
+// Continue is true when the model gets one more turn with the failures.
+// Reason says why a failed pass does not continue. Weak is true for a pass
+// that passed and shows nothing about the work of the run (weakPass).
+// Limit names the limit of the budget at which the run stopped, such as
+// maxToolCalls, for a pass that ran after that stop (limitDone).
 type DoneCheckedData struct {
 	Passed   bool         `json:"passed"`
 	Weak     bool         `json:"weak,omitempty"`
@@ -346,6 +379,7 @@ type DoneCheckedData struct {
 	Answer   uint64       `json:"answer"`
 	Continue bool         `json:"continue,omitempty"`
 	Reason   string       `json:"reason,omitempty"`
+	Limit    string       `json:"limit,omitempty"`
 }
 
 // DoneResult is the result of one check of a pass. Why says why a check
@@ -475,7 +509,7 @@ func (a *Agent) checkDone(ctx context.Context, rs *runState, c *cursor, n int) (
 		}
 	}
 	pass := DoneCheckedData{Attempt: failed + 1, Attempts: d.attempts(), Answer: c.respSeq}
-	if err := a.runDone(ctx, rs, c, d, &pass); err != nil {
+	if err := a.runDone(ctx, rs, c, d, &pass, TextOf(c.resp.Content)); err != nil {
 		return true, err
 	}
 	if !pass.Passed {
@@ -504,6 +538,66 @@ func (a *Agent) checkDone(ctx context.Context, rs *runState, c *cursor, n int) (
 		return true, err
 	}
 	return true, a.notDoneLocked(ctx, rs, c, n, pass)
+}
+
+// doneAtLimit reports whether a run that stops at the limit o of its
+// budget runs its checks of done before it finishes (limitDone): it has a
+// definition of done, the limit is a limit of turns, of tool calls, of
+// tokens, or of cost, and the run holds the limit itself. The deadline is
+// the limit of the working time that a person gave the run, so no check
+// runs past it. A run that stops at a limit that an ancestor holds for the
+// tree runs none, because the tree must stop now.
+func doneAtLimit(rs *runState, o overrun) bool {
+	return rs.queuedData().Done.on() && o.limit != "deadline" && (o.owner == nil || o.owner == rs)
+}
+
+// limitDone runs the checks of the definition of done of a run that
+// stopped at a limit of its budget (doneAtLimit), after its final report
+// when it makes one, and returns the pass. A run that stopped at a limit
+// may still have done its work, such as a run whose last tool call did
+// it, so the checks give it its state of done. The checks cost no tokens
+// and have a tool budget of their own (runDone). A check of the answer
+// reads output, the final report or the output that the run finishes
+// with. The pass has the answer 0 and names the limit. A pass that failed
+// gives the model no other turn, because the run stopped. The caller
+// records the pass with the end of the run (finishAtLimitLocked), which
+// still names the limit.
+func (a *Agent) limitDone(ctx context.Context, rs *runState, c *cursor, d BudgetExceededData, output string) (*DoneCheckedData, error) {
+	done := rs.queuedData().Done
+	failed := 0
+	for _, p := range donePasses(rs.eventLog(), c.respSeq) {
+		if !p.Passed {
+			failed++
+		}
+	}
+	pass := DoneCheckedData{Attempt: failed + 1, Attempts: done.attempts(), Limit: d.Limit}
+	if err := a.runDone(ctx, rs, c, done, &pass, output); err != nil {
+		return nil, err
+	}
+	if !pass.Passed {
+		pass.Reason = "the run stopped at " + limitPhrase(d, rs.id) + ", so the model gets no other turn"
+	}
+	a.log.Info("done checked at a limit", "run", rs.id, "limit", d.Limit, "passed", pass.Passed, "weak", pass.Weak)
+	return &pass, nil
+}
+
+// finishAtLimitLocked records the pass of the checks at a limit, when one
+// ran, and finishes the run as failed with the limit in its error and its
+// stop. The pass gives the end its state of done: DoneChecked with the
+// mark of a weak pass, or DoneFailed. The caller holds rs.emitMu.
+func (a *Agent) finishAtLimitLocked(ctx context.Context, rs *runState, output string, d BudgetExceededData, pass *DoneCheckedData) error {
+	end := RunFinishedData{Outcome: OutcomeFailed, Output: output, Error: "budget exceeded: " + d.text(rs.id), Stop: RunStopBudget(d.Limit)}
+	if pass != nil {
+		if _, err := a.emitLocked(ctx, rs, EvDoneChecked, *pass); err != nil {
+			return err
+		}
+		end.Done = DoneFailed
+		if pass.Passed {
+			end.Done, end.DoneWeak = DoneChecked, pass.Weak
+		}
+	}
+	_, err := a.emitLocked(ctx, rs, EvRunFinished, end)
+	return err
 }
 
 // freshSince reports whether a message arrived after the latest model
@@ -556,13 +650,14 @@ func notDoneText(pass DoneCheckedData) string {
 }
 
 // runDone runs every check of d once and sets the results, Passed, and
-// Weak in pass. The checks have a tool budget of their own (ownBudget), so
-// a run that used its tool calls still runs them. In a run that is held
-// back from Know-how, a check of a tool that the kernel took out of the
-// run (KnowhowTool) is skipped. It returns an error only when the run
-// stops: its context ended or the agent shuts down. A restart then runs
-// the pass again.
-func (a *Agent) runDone(ctx context.Context, rs *runState, c *cursor, d *Done, pass *DoneCheckedData) error {
+// Weak in pass. answer is the final answer of the run, which a check of
+// the answer (DoneCheck.OfAnswer) reads with no tool call. The checks have
+// a tool budget of their own (ownBudget), so a run that used its tool
+// calls still runs them. In a run that is held back from Know-how, a check
+// of a tool that the kernel took out of the run (KnowhowTool) is skipped.
+// It returns an error only when the run stops: its context ended or the
+// agent shuts down. A restart then runs the pass again.
+func (a *Agent) runDone(ctx context.Context, rs *runState, c *cursor, d *Done, pass *DoneCheckedData, answer string) error {
 	prof := a.profileOf(c.queued)
 	_, tools := a.runTools(ctx, rs, prof)
 	rr := &routineRun{a: a, rs: rs, prof: prof, tools: tools, policy: a.policyFor(rs, prof), prefix: doneCallPrefix, check: true, ownBudget: true}
@@ -575,7 +670,13 @@ func (a *Agent) runDone(ctx context.Context, rs *runState, c *cursor, d *Done, p
 				Skipped: "this run is held back from what the agent learned, so it has no tool " + chk.Tool})
 			continue
 		}
-		why, err := a.oneDone(ctx, rr, tools, chk, d.timeout())
+		var why string
+		var err error
+		if chk.OfAnswer() {
+			why = answerDone(chk, answer)
+		} else {
+			why, err = a.oneDone(ctx, rr, tools, chk, d.timeout())
+		}
 		if err != nil {
 			return err
 		}
@@ -604,18 +705,34 @@ func doneCall(e Event) bool {
 // weakPass reports whether a pass that passed shows nothing about the work
 // of the run. That is so when no check of the pass that ran is strong: each
 // one is weak (DoneCheck.Weak) or was skipped. It is so too when the run
-// changed nothing (changedWork), because then every check saw only what
-// was there before the run. results are the results of the pass, in the
-// order of the checks of d.
+// changed nothing (changedWork), because then every check of a call saw
+// only what was there before the run. A strong check of the answer
+// (DoneCheck.OfAnswer) makes the pass strong also then, because the answer
+// is the product of a run that only reads, and it comes from this run.
+// results are the results of the pass, in the order of the checks of d.
 func weakPass(d *Done, results []DoneResult, events []Event, tools map[string]Tool) bool {
 	strong := false
 	for i, r := range results {
-		if i < len(d.Checks) && r.Skipped == "" && !d.Checks[i].Weak() {
-			strong = true
-			break
+		if i >= len(d.Checks) || r.Skipped != "" || d.Checks[i].Weak() {
+			continue
 		}
+		if d.Checks[i].OfAnswer() {
+			return false
+		}
+		strong = true
 	}
 	return !strong || !changedWork(events, tools)
+}
+
+// answerDone runs a check of the answer (DoneCheck.OfAnswer) on the final
+// answer of the run and returns why it failed, or "" when it passed: the
+// answer is not empty, and it holds every string of Contains and no string
+// of Lacks.
+func answerDone(chk DoneCheck, answer string) string {
+	if strings.TrimSpace(answer) == "" {
+		return "the run has no answer"
+	}
+	return matchDone(chk, answer, "the answer")
 }
 
 // changedWork reports whether the run made a call of its own that can have
@@ -686,17 +803,24 @@ func (a *Agent) oneDone(ctx context.Context, rr *routineRun, tools map[string]To
 	case failedExit(res.ExitCode):
 		return fmt.Sprintf("the exit code is %d:\n%s", *res.ExitCode, text), nil
 	}
+	return matchDone(chk, text, "the result"), nil
+}
+
+// matchDone returns why text, which what names, fails the strings of a
+// check: the first string of Contains that it lacks, or the first string
+// of Lacks that it holds, with the text; "" when it passes.
+func matchDone(chk DoneCheck, text, what string) string {
 	for _, s := range chk.Contains {
 		if !strings.Contains(text, s) {
-			return fmt.Sprintf("the result lacks %q:\n%s", s, text), nil
+			return fmt.Sprintf("%s lacks %q:\n%s", what, s, text)
 		}
 	}
 	for _, s := range chk.Lacks {
 		if strings.Contains(text, s) {
-			return fmt.Sprintf("the result holds %q:\n%s", s, text), nil
+			return fmt.Sprintf("%s holds %q:\n%s", what, s, text)
 		}
 	}
-	return "", nil
+	return ""
 }
 
 // doneMessage is the message from the kernel that gives the model the

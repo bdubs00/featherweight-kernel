@@ -41,6 +41,7 @@ type options struct {
 	noServices bool
 	spawner    Spawner
 	deciders   map[string]Decider
+	routines   RoutineSource
 	// followEvery and recordEvery replace the intervals of tree.go; only a
 	// test of this package sets them.
 	followEvery time.Duration
@@ -66,6 +67,11 @@ func WithDecider(name string, d Decider) Option {
 		o.deciders[name] = d
 	}
 }
+
+// WithRoutineSource gives each run the routines of its agent from src at
+// the start of the run, in place of the client that routines.front builds
+// (see RoutineSource). A test gives a fake front this way.
+func WithRoutineSource(src RoutineSource) Option { return func(o *options) { o.routines = src } }
 
 // WithRunner drives the runs of the agent through r, in place of the
 // registered runners and of the turn loop (see Runner).

@@ -437,6 +437,9 @@ func TestCheckDone(t *testing.T) {
 	if err := CheckDone(nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := CheckDone(&Done{Checks: []DoneCheck{{Tool: DoneAnswer, Input: "{}", Contains: []string{"pens="}}}}); err != nil {
+		t.Fatal(err)
+	}
 	many := make([]DoneCheck, MaxDoneChecks+1)
 	for i := range many {
 		many[i] = DoneCheck{Tool: "tests"}
@@ -453,6 +456,7 @@ func TestCheckDone(t *testing.T) {
 		{Checks: []DoneCheck{testsPass}, Attempts: MaxDoneAttempts + 1},
 		{Checks: []DoneCheck{testsPass}, Attempts: -1},
 		{Checks: []DoneCheck{testsPass}, Timeout: MaxDoneTimeout + time.Second},
+		{Checks: []DoneCheck{{Tool: DoneAnswer, Input: `{"path": "a.txt"}`, Contains: []string{"x"}}}},
 	} {
 		if err := CheckDone(d); !errors.Is(err, ErrInvalidRequest) {
 			t.Errorf("CheckDone(%+v) = %v", d, err)
@@ -510,6 +514,9 @@ func TestDoneCheckWeak(t *testing.T) {
 		{DoneCheck{Tool: "tests", Input: `{"package": "./..."}`}, false},
 		{DoneCheck{Tool: "thread_reader", Input: `{"path": "x"}`}, false},
 		{DoneCheck{Tool: "files"}, false},
+		{DoneCheck{Tool: DoneAnswer}, true},
+		{DoneCheck{Tool: DoneAnswer, Contains: []string{"pens="}}, false},
+		{DoneCheck{Tool: DoneAnswer, Lacks: []string{"I could not"}}, false},
 	} {
 		if got := c.chk.Weak(); got != c.weak {
 			t.Errorf("Weak(%s %s) = %v, want %v", c.chk.Tool, c.chk.Input, got, c.weak)
@@ -684,5 +691,186 @@ func TestDoneHeldBackSkips(t *testing.T) {
 	mustState(t, r, err, StateCompleted)
 	if r.Done == nil || r.Done.Checks[0].Skipped != "" || !r.Done.Checks[0].Passed || r.Stop != RunStopChecked {
 		t.Fatalf("normal run: done %+v, stop %q", r.Done, r.Stop)
+	}
+}
+
+// A check of the answer tests the final answer of the run with no tool
+// call. With contains or lacks it is strong, also in a run that changed
+// nothing, so a job that only reads counts as checked. A wrong answer gets
+// the failure and one more turn, as a failed check of a call does. Without
+// contains and lacks it is weak. A tool of the agent with the reserved
+// name is never called.
+func TestDoneAnswer(t *testing.T) {
+	ctx := testCtx(t)
+	count := DoneCheck{Name: "the answer names the pens", Tool: DoneAnswer, Contains: []string{"pens="}, Lacks: []string{"could not"}}
+	read := callTools(use("c1", "lookup", `{}`))
+	for _, c := range []struct {
+		name    string
+		script  []*Response
+		checks  []DoneCheck
+		output  string
+		weak    bool
+		turns   int
+		failure string
+	}{
+		{"a read and a right answer", []*Response{read, endTurn("Stock: pens=90.")}, []DoneCheck{count}, "Stock: pens=90.", false, 2, ""},
+		{"no call", []*Response{endTurn("Stock: pens=90.")}, []DoneCheck{count}, "Stock: pens=90.", false, 1, ""},
+		{"a wrong answer, then a right one", []*Response{read, endTurn("I could not read the stock."), endTurn("Stock: pens=90.")},
+			[]DoneCheck{count}, "Stock: pens=90.", false, 3, `the answer lacks "pens="`},
+		{"a weak check of the answer", []*Response{read, endTurn("Stock: pens=90.")}, []DoneCheck{{Tool: DoneAnswer}}, "Stock: pens=90.", true, 2, ""},
+		{"a weak check of a path beside it", []*Response{read, endTurn("Stock: pens=90.")},
+			[]DoneCheck{{Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`}, count}, "Stock: pens=90.", false, 2, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			called := 0
+			trap := NewTool(ToolSpec{Name: DoneAnswer}, func(context.Context, json.RawMessage) (ToolResult, error) {
+				called++
+				return TextResult("pens="), nil
+			})
+			s := newScript(c.script...)
+			prof := AgentProfile{Name: "clerk", Done: &Done{Checks: c.checks}}
+			a := newTestAgent(t, s.Model(), WithTools(append(pathTools(t), trap)...), WithProfile(prof))
+			r, err := a.Run(ctx, "How many pens are in stock? Only read.", AsAgent("clerk"))
+			mustState(t, r, err, StateCompleted)
+			if r.Output != c.output || len(s.requests()) != c.turns || called != 0 {
+				t.Fatalf("output %q, model calls %d, calls of the tool answer %d", r.Output, len(s.requests()), called)
+			}
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			for _, e := range evs {
+				var d ToolRequestedData
+				if e.Type == EvToolRequested && e.Decode(&d) == nil && strings.HasPrefix(d.CallID, doneCallPrefix) && d.Tool == DoneAnswer {
+					t.Fatalf("the check of the answer made a call: %+v", d)
+				}
+			}
+			passes := donePassesOf(t, evs)
+			last := passes[len(passes)-1]
+			if !last.Passed || last.Weak != c.weak {
+				t.Fatalf("passes = %+v", passes)
+			}
+			notes := doneNotes(t, evs)
+			if c.failure != "" && (len(passes) != 2 || passes[0].Passed || len(notes) != 1 || !strings.Contains(notes[0], c.failure)) {
+				t.Fatalf("passes = %+v, notes %q", passes, notes)
+			}
+			stop := RunStopChecked
+			if c.weak {
+				stop = RunStopAnswered
+			}
+			if d := finishedOf(t, evs); d.Done != DoneChecked || d.DoneWeak != c.weak || d.Stop != stop {
+				t.Fatalf("finished = %+v", d)
+			}
+		})
+	}
+}
+
+// A run that stops at a limit of tool calls, of turns, of tokens, or of
+// cost runs its checks after its final report, or at once when it makes
+// none, with their own budget. A pass gives the run its state of done, and
+// the run still fails at its limit. A failed pass gives the model no other
+// turn. A check of the answer reads the final report.
+func TestDoneAtALimit(t *testing.T) {
+	ctx := testCtx(t)
+	prices := PriceTable{"anthropic/claude-opus-5-5": {Input: 1_000_000, Output: 0}}
+	report := endTurn("I fixed the retries. The tests are left to run.")
+	for _, c := range []struct {
+		name    string
+		script  []*Response
+		budget  Budget
+		checks  []DoneCheck
+		limit   string
+		done    string
+		weak    bool
+		report  bool
+		calls   int // the calls of the gate
+		reason  string
+		priced  bool
+		answers int // the model calls
+	}{
+		{name: "tool calls, the work done", script: []*Response{callTools(use("c1", "fix", `{}`)), report},
+			budget: Budget{MaxToolCalls: 1}, checks: []DoneCheck{testsPass}, limit: "maxToolCalls", done: DoneChecked, report: true, calls: 1, answers: 2},
+		{name: "tool calls, the work not done", script: []*Response{callTools(use("c1", "tests", `{}`)), report},
+			budget: Budget{MaxToolCalls: 1}, checks: []DoneCheck{testsPass}, limit: "maxToolCalls", done: DoneFailed, report: true, calls: 2,
+			reason: "the run stopped at its limit of 1 tool calls (budget.maxToolCalls), so the model gets no other turn", answers: 2},
+		{name: "turns", script: []*Response{callTools(use("c1", "fix", `{}`)), report},
+			budget: Budget{MaxTurns: 1}, checks: []DoneCheck{testsPass}, limit: "maxTurns", done: DoneChecked, report: true, calls: 1, answers: 2},
+		{name: "turns, a check of the report", script: []*Response{callTools(use("c1", "fix", `{}`)), report},
+			budget: Budget{MaxTurns: 1}, checks: []DoneCheck{testsPass, {Tool: DoneAnswer, Contains: []string{"fixed the retries"}}},
+			limit: "maxTurns", done: DoneChecked, report: true, calls: 1, answers: 2},
+		// The second response passes the limit of money, so its call does
+		// not run, and the run stops with no report.
+		{name: "tokens", script: []*Response{callTools(use("c1", "fix", `{}`)), callTools(use("c2", "fix", `{}`)), endTurn("never")},
+			budget: Budget{MaxTokens: 20}, checks: []DoneCheck{testsPass}, limit: "maxTokens", done: DoneChecked, calls: 1, answers: 2},
+		{name: "cost", script: []*Response{callTools(use("c1", "fix", `{}`)), callTools(use("c2", "fix", `{}`)), endTurn("never")},
+			budget: Budget{MaxCostUSD: 15}, checks: []DoneCheck{testsPass}, limit: "maxCostUSD", done: DoneChecked, calls: 1, priced: true, answers: 2},
+		{name: "cost, a check of the answer with no report", script: []*Response{callTools(use("c1", "fix", `{}`)), callTools(use("c2", "fix", `{}`)), endTurn("never")},
+			budget: Budget{MaxCostUSD: 15}, checks: []DoneCheck{{Tool: DoneAnswer, Contains: []string{"fixed"}}}, limit: "maxCostUSD", done: DoneFailed,
+			priced: true, answers: 2, reason: "the run stopped at its limit of $15.0000 (budget.maxCostUSD), so the model gets no other turn"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			g := &gate{}
+			s := newScript(c.script...)
+			prof := AgentProfile{Name: "fixer", Done: &Done{Checks: c.checks}}
+			opts := []Option{WithTools(g.tools()...), WithProfile(prof)}
+			if c.priced {
+				opts = append(opts, WithPrices(prices))
+			}
+			a := newTestAgent(t, s.Model(), opts...)
+			r, err := a.Run(ctx, "Fix the checkout retries.", AsAgent("fixer"), WithRunBudget(c.budget))
+			mustState(t, r, err, StateFailed)
+			if len(s.requests()) != c.answers || g.count() != c.calls {
+				t.Fatalf("model calls %d, calls of the gate %d", len(s.requests()), g.count())
+			}
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			if len(doneNotes(t, evs)) != 0 {
+				t.Fatalf("the model got the failures after the stop: %v", eventTypes(evs))
+			}
+			passes := donePassesOf(t, evs)
+			if len(passes) != 1 || passes[0].Limit != c.limit || passes[0].Answer != 0 || passes[0].Continue ||
+				passes[0].Passed != (c.done == DoneChecked) || passes[0].Weak != c.weak || passes[0].Reason != c.reason {
+				t.Fatalf("passes = %+v", passes)
+			}
+			types := eventTypes(evs)
+			n := len(types)
+			if types[n-1] != EvRunFinished || types[n-2] != EvDoneChecked {
+				t.Fatalf("events = %v", types)
+			}
+			if c.report && (r.Output != TextOf(report.Content) || types[n-3] == EvBudgetExceeded) {
+				t.Fatalf("output %q, events %v", r.Output, types)
+			}
+			d := finishedOf(t, evs)
+			if d.Outcome != OutcomeFailed || d.Done != c.done || d.DoneWeak != c.weak || d.Stop != RunStopBudget(c.limit) ||
+				d.Error != "budget exceeded: "+c.limit {
+				t.Fatalf("finished = %+v", d)
+			}
+			for _, got := range []*Run{r, ProjectRun(evs)} {
+				if got.State != StateFailed || got.Stop != RunStopBudget(c.limit) || got.Done == nil || got.Done.State != c.done || len(got.Done.Checks) != len(c.checks) {
+					t.Fatalf("run = %+v, done %+v", got, got.Done)
+				}
+			}
+			own := 0
+			for _, e := range evs {
+				if e.Type == EvToolRequested && !doneCall(e) {
+					own++
+				}
+			}
+			if r.Usage.ToolCalls != own {
+				t.Fatalf("the calls of the checks count in the usage: %+v, own calls %d", r.Usage, own)
+			}
+		})
+	}
+}
+
+// At the deadline of its working time, the limit of a person's time, a
+// run makes its final report and runs no check.
+func TestDoneNotAtTheDeadline(t *testing.T) {
+	ctx := testCtx(t)
+	g := &gate{}
+	s := newCallSteps(hang(nil), answer(endTurn("the report")))
+	prof := AgentProfile{Name: "fixer", Done: &Done{Checks: []DoneCheck{testsPass}}}
+	a := newTestAgent(t, s.Model(), WithTools(g.tools()...), WithProfile(prof))
+	r, err := a.Run(ctx, "Fix the checkout retries.", AsAgent("fixer"), WithRunBudget(Budget{Deadline: 200 * time.Millisecond}))
+	mustState(t, r, err, StateFailed)
+	evs := ledgerEvents(t, a.Ledger(), r.ID)
+	if g.count() != 0 || countType(evs, EvDoneChecked) != 0 || r.Done != nil || r.Stop != RunStopBudget("deadline") || r.Output != "the report" {
+		t.Fatalf("checks %d, run %+v", g.count(), r)
 	}
 }

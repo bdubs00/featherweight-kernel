@@ -503,7 +503,7 @@ func (a *Agent) stepStart(ctx context.Context, rs *runState, c *cursor) error {
 	if o := a.k.override(rs.id); o != nil && o.zone != nil && *o.zone != "" {
 		zone = *o.zone
 	}
-	d := RunStartedData{Tools: names, TimeZone: zone, Knowhow: knowhowOf(c.queued)}
+	d := RunStartedData{Tools: names, TimeZone: zone, Knowhow: knowhowOf(c.queued), Routines: a.startRoutines(ctx, rs, c.queued)}
 	// A check run calls no model, so it names none, and no tool writes a
 	// brief or a context for it.
 	if c.queued.Check == nil {

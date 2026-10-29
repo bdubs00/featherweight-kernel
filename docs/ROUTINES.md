@@ -153,6 +153,41 @@ never enters the ledger, a log line, or an event. The redactor already
 strips the values of the environment. The client sends the token only as
 the `Authorization` header.
 
+```yaml
+routines:
+  front:
+    url: http://fw-front:8080        # the front of the fleet: GET {url}/v1/routines/now?agent=<name>
+    tokenEnv: FW_API_TOKEN           # the variable that holds the static token of the front
+```
+
+`routines.front` (`FW_ROUTINES_FRONT_URL`, `FW_ROUTINES_FRONT_TOKEN_ENV`)
+makes each run read the routines of its agent from the front of a fleet
+at its start, the way the memory tool reads its notes
+(`tools.memory.front`). The front keeps the routines in its store
+(section 4.1), so a move of a routine changes no configuration of a
+worker, and no Task is replaced for it. The client keeps the list of each
+agent with its version. It asks the front each time with that version
+(`If-None-Match`): the front answers 304 when the list is current, else
+the list and its new version. So a copy is applied only when the front
+says that it is current. The answer is
+`{"held": true, "version": "...", "routines": [...]}`:
+
+- `held: true`: the list replaces the routines of the profile, also when
+  it is empty.
+- `held: false`: the store keeps no routine of the agent, or the routines
+  of the front are off, and the run takes the routines of its profile.
+- No answer within 5 seconds, an error, or a list that the process does
+  not accept (`CheckRoutines`, such as a decider that it lacks): the run
+  applies no routine. The agent does the work, the safe direction.
+
+`fw.run.started` records what the run read in `routines`:
+`{"version": "...", "list": [...]}`, or `{"list": [], "error": "..."}`.
+It is absent for a run that takes the routines of its profile. The runner,
+a restart, and the comparison at the end of the run read this list, so a
+move during a run does not reach that run. A check run, a branch, a
+replay, and a run that is held back from Know-how read nothing. The token
+never enters an event.
+
 ### 3.2 The decider and the `decide` tool
 
 ```go
@@ -259,7 +294,10 @@ again.
    the stop `checked`, so it counts as checked only as any run does. A
    weak pass (`ARCHITECTURE.md` section 24) gives `fw.routine.applied`
    and the end `doneWeak: true`, and the stop is `answered`: the check
-   only reads a path, or the routine changed nothing. In every other
+   only reads a path, or the routine changed nothing. A check of the
+   answer (the reserved tool `answer`) tests the rendered `answer`, and
+   with `contains` or `lacks` it is strong also when the routine only
+   reads. In every other
    case, the run goes to the model: the routine did not complete, or no
    live routine applies. For a live routine that did not apply or did not
    complete, the first user message gets one
@@ -498,7 +536,8 @@ Routines cost nothing until a configuration asks for them. Without
 deciders and without routines, no run asks a decider, the tool `decide`
 is off, and the runner returns at once. The front keeps an empty store,
 which gives no profile a routine, so the hash of every pool stays and no
-Task is replaced.
+Task is replaced. A move of a routine replaces no Task of a pool that
+reads its routines from the front (section 4.2).
 
 | Where | On | Off |
 |---|---|---|
@@ -554,15 +593,23 @@ live routine puts it back to `rehearsing`: a new version rehearses again.
 
 ### 4.2 Reaching the runs
 
-The front merges the routines of an agent into the profile that its
-workers run. The pool overlay gains `routines`, as it carries skills,
-tools, and the policy. It sends `rehearsing` as standing `shadow` and
-`live` as `live`, and the overlay pass ships them to every Task of the
-pool. In some places the front starts a run itself with an inline profile:
-the quick chat, a bridge seat, and `enqueue`. There the inline profile
-carries the routines too. A run of an agent therefore always sees the
-routines that the store holds at that moment, pinned by the kernel in
-`fw.run.queued`.
+The front sends `rehearsing` as standing `shadow` and `live` as `live`.
+It gives each pool that reaches it (the entry `front` of `tools.mcp`)
+`routines.front`, and each run of such a pool reads the routines at its
+start from `GET /v1/routines/now?agent=<name>` (section 3.1). The routines
+of the store are not part of the overlay of the pool, and not part of its
+hash, so a move of a routine replaces no Task and erases no `/workspace`.
+The events of the routines (`fw.routine.decided`, `applied`, `compared`)
+are on the egress of every such pool, because any run can get a routine.
+
+The routines that a pool names in its own configuration
+(`agents.<name>.routines`) stay in the profile, as before. The front
+answers `held: false` for an agent without a record in the store, and the
+run takes those. A pool that does not reach the front keeps the old way:
+the pool overlay carries the routines of the store, its hash covers them,
+and a move replaces its Tasks. In some places the front starts a run
+itself with an inline profile: the quick chat, a bridge seat, and
+`enqueue`. There the inline profile carries the routines too.
 
 ### 4.3 Evidence
 
@@ -593,7 +640,8 @@ projection keeps these figures per routine, in the bucket under
 A `rehearsing` routine is `ready` under three conditions over its current
 version:
 
-- `acted >= readyAfter` (default 200)
+- `agreed + disagreed >= readyAfter` (default 200): the runs of `acted`
+  whose comparison came. A run that still works counts toward no bound.
 - `agreed / acted >= readyAgreement` (default 0.95)
 - `sentBack.agreed == 0`
 
@@ -614,6 +662,7 @@ as `agent_put`.
 | `GET /v1/routines/{agent}/{name}` | the record with `evidence` |
 | `PUT /v1/routines/{agent}/{name}` | create or replace the body. The body is `{"routine": {...}, "standing": "proposed", "source": {...}}`. A new routine starts as `proposed`. A caller with the right to edit the agent can say `rehearsing` instead. |
 | `POST /v1/routines/{agent}/{name}/standing` | `{"standing": "...", "note": "..."}`. A move that the table forbids gets 409, with the allowed moves. |
+| `GET /v1/routines/now?agent=<name>` | the routines that a run of the agent applies now, for the kernel (section 3.1): `{"held": bool, "version": "...", "routines": [...]}` with the kernel standing, and the version as the `ETag`. An `If-None-Match` with the current version answers 304. Routines that are off answer `held: false`. |
 | `GET /v1/routines/summary?agent=<name>&days=7` | `{"runs": n, "byRoutine": n, "byAgent": n, "withPerson": n, "costUSD": {"routine": x, "agent": y}, "sentBack": n}`. A run that finished with `fw.routine.applied ok` is by a routine. A run in which a person decided an approval is with a person. Every other run is by the agent. |
 
 The bossmode stream carries `{"kind": "routine", "agent": "...", "name": "..."}`

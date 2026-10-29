@@ -70,7 +70,7 @@ Every event is a CloudEvents 1.0 JSON object. CloudEvents is a CNCF standard env
 | Type | Data |
 |---|---|
 | `fw.run.queued` | agent, input, instructions, inline profile, budget, metadata, origin, principal and its kind, parent, depth, file references (section 7.10), extra tools (section 12.5), resolved profile (section 12.5), kept events of a branch (section 4.7), the check of a check run (section 23), the data blocks of the caller (section 7.8.4) |
-| `fw.run.started` | model (none for a check run, section 23), tool names, brief (the sections that tools add to the system prompt), context (the data that tools and the caller add to the first user message, sections 7.8.2 and 7.8.4), time zone, and `knowhow: "off"` for a comparison run (section 7.8.4) |
+| `fw.run.started` | model (none for a check run, section 23), tool names, brief (the sections that tools add to the system prompt), context (the data that tools and the caller add to the first user message, sections 7.8.2 and 7.8.4), time zone, `knowhow: "off"` for a comparison run (section 7.8.4), and `routines`, the routines that the front gave the run at its start with their version, or why it gave none (section 22.1) |
 | `fw.memory.changed` | one change of a memory note by a tool call: call id, tool, operation, ref, old ref, scope, agent, size, SHA-256, the sources of a write, and `waiting` when the front holds the change for a person; never the text (section 7.8.1) |
 | `fw.memory.used` | the notes that a run read: `how` (`brief`, `view`, or `recall`) and `refs`, each a ref and the hash of the text that the run read. It never holds the text or the principal (section 7.8.4) |
 | `fw.run.annotated` | metadata, usage, provider, model (section 8.2), or a trusted quality receipt with its own cost snapshot (section 10.1) |
@@ -244,6 +244,8 @@ A run that stops at a limit without a word leaves the person with an empty outpu
 The report call is one bounded call past a limit of turns, tool calls, or working time, and never past a limit of tokens or cost. `budget.reportMaxTokens` caps its output, and `budget.reportTimeout` bounds its time. A call that fails or takes too long appends `fw.error`, and the run finishes with no output. A limit of tokens or cost (`maxTokens`, `maxCostUSD`) gets no report call, because that call spends past a limit of money: the 90% note asks the model to finish instead, and the run stops at once. The kernel also makes the report call only when its most, the whole context as input and the output cap, fits what the run and the trees of its lineage have left of `maxTokens` and `maxCostUSD`; otherwise the run stops at once and the log says why. `budget.finalReport: false` turns the call off. A run that stops at a limit that an ancestor holds for its tree stops at once, and the ancestor reports for the tree at its own next step. A run makes one report for each budget: a follow-up without a change of the budget fails at once again, with the earlier report as its output. A child makes no report where its parent makes none: the budget of the parent caps `finalReport`, `reportMaxTokens`, and `reportTimeout` as it caps a limit, and a child in another process gets `finalReport: false` when its parent turns the report off.
 
 A follow-up or a change of the budget that arrives while the report call is in flight keeps the run open after the answer, as at the end of a turn (section 5.5). The next step checks the budget again: a larger budget lets the run go on with the report in its history, and a run that stays over its limit stops with the report as its output.
+
+A run with a definition of done (section 24) runs its checks before it finishes at a limit of turns, tool calls, tokens, or cost: after the final report when it makes one, else at once. The checks call no model, so they cost no tokens, and they have a tool budget of their own. A run that stopped at a limit may still have done its work, such as a run whose last tool call did it. The pass, `fw.done.checked` with `limit` set and `answer` 0, gives the run its state of done: `fw.run.finished` carries `done` and `doneWeak` as at the end of a turn. The run still finishes as `failed` with the budget error and the stop of the limit, such as `budget:maxToolCalls`. A pass that failed gives the model no other turn. At the deadline no check runs, because the deadline is the limit of a person's time. A run that stops at a limit that an ancestor holds for its tree runs none either, because the tree must stop now.
 
 #### The deadline during a model call
 
@@ -2996,6 +2998,8 @@ The inputs, the answer, and the strings of `contains` and `lacks` are Go `text/t
 
 An inline profile with a `routines` list replaces the routines of the named profile, as a tool list does. An empty list leaves the run without routines, and the JSON of a profile keeps an empty list, as it keeps the skills. The resolved profile holds the routines, so a run keeps the routines that it was queued with (section 12.5).
 
+With `routines.front`, each run reads the routines of its agent from the front of a fleet at its start instead (docs/ROUTINES.md section 3.1, `fw.RoutineSource`). The client keeps the list of each agent with its version and asks the front each time with that version, so a stale copy is never applied. When the front holds the agent, its list replaces the routines of the profile. When it does not, the run takes the routines of its profile. When it does not answer, or its list does not pass the checks below, the run applies no routine. `fw.run.started` records the list as `routines` with its version, and the runner, a restart, and the comparison at the end read that record. A move of a routine at the front then reaches the next run, and no configuration of a worker changes for it.
+
 When the kernel loads a profile, it checks the routines. It also checks the routines of each inline profile. It refuses these:
 
 - more than 64 routines in a profile
@@ -3078,7 +3082,7 @@ A proposal reads many runs. That is the work of the workbench or of a librarian 
 A process without deciders and without routines spends nothing on them. No run asks a decider, the tool `decide` is off, and the runner returns at once. The rendered Task of a profile without routines does not change. These steps turn routines on for one profile:
 
 1. Name a decider in `deciders`, or with the variables `FW_DECIDERS_<NAME>_*`, and add `decide` to `tools.builtin`. A routine with questions needs both. A routine without questions needs neither.
-2. Give the profile its routines under `agents.<name>.routines`, in `fw.yaml` or in a profile file, with the standing `shadow` first. The workbench gives the profiles of a pool the routines of its store instead (the workbench architecture, section 21.3).
+2. Give the profile its routines under `agents.<name>.routines`, in `fw.yaml` or in a profile file, with the standing `shadow` first. The workbench gives the runs of a pool the routines of its store instead, through `routines.front` (section 22.1, and the workbench architecture, section 21.3).
 3. Read the decisions and the comparisons in the ledger, or run `fw routine replay --decide` over the past runs.
 4. Set the standing to `live` once the routine agrees with the agent. `canary` keeps a share of the runs with the agent.
 
@@ -3180,7 +3184,20 @@ agents:
 
 A check passes on four conditions. Its call runs. Its result is not an error. Its exit code is zero, for a tool that reports one, such as `bash`. Its text holds every string of `contains` and no string of `lacks`.
 
-A check is weak when it only reads a file or a page by its path and names no `contains` and no `lacks` (`DoneCheck.Weak`). Such a check passes for any path that exists, also a file that was there before the run. "Only reads a path" means that the input names a path (the key `path`, `file`, `file_path`, `filePath`, or `filename`), and either its `command` is `view` or `read`, as for `files` and `memory`, or the first or the last word of the tool name is `read` or `view`, as for `read_file` or `front.pages_read` (`fw.ReadsPath`). The profile editor of the workbench warns a person who saves a weak check, with the same rule.
+The tool name `answer` is reserved (`fw.DoneAnswer`). A check with that tool makes no tool call, also when the agent has a tool of that name. It tests the final answer of the run: the answer must not be empty, and it must hold every string of `contains` and no string of `lacks`. It takes no input. The answer is the last answer of the model, the rendered answer of a live routine (section 22), or the final report of a run that stopped at a limit (section 24.2). A job that only reads, such as a status check, changes nothing, so a check of a call shows only what was there before the run. Its product is its answer, and a check of the answer tests that product:
+
+```yaml
+agents:
+  stock-reader:
+    done:
+      checks:
+        - name: the answer names the stock
+          tool: answer
+          contains: ["pens="]
+          lacks: ["could not"]
+```
+
+A check is weak when it names no `contains` and no `lacks`, and either it only reads a file or a page by its path, or it checks the answer (`DoneCheck.Weak`). Such a check passes for any path that exists, also a file that was there before the run. "Only reads a path" means that the input names a path (the key `path`, `file`, `file_path`, `filePath`, or `filename`), and either its `command` is `view` or `read`, as for `files` and `memory`, or the first or the last word of the tool name is `read` or `view`, as for `read_file` or `front.pages_read` (`fw.ReadsPath`). The profile editor of the workbench warns a person who saves a weak check, with the same rule.
 
 The kernel resolves the block once, at the queue of the run. It records the block with its defaults in the field `done` of `fw.run.queued`. A run keeps its definition of done for its life, as it keeps its outcome (section 20). A child run never takes the block of its named profile, as for an outcome. An inline profile adds its checks to the checks of the named profile and removes none. So a request cannot weaken the definition of done of the owner of an agent. A process that hosts another agent program (section 19) refuses the block, because the checks need the turn loop.
 
@@ -3188,7 +3205,9 @@ The kernel resolves the block once, at the queue of the run. It records the bloc
 
 When the model ends a turn with its answer, the kernel closes the turn. Then it runs every check once, in order, with no model. The calls go through the tool path of the routine runner. So the policy, the limits of each tool, and the ledger treat them as calls of the model. Their call ids start with `done_`, and they never enter the history of the model. A check never asks a person: a call that the policy asks for fails the check, as in a check run (section 23).
 
-The checks have a tool budget of their own: at most 8 calls a pass, one per check, each within the `timeout` of the block. The limits of tool calls of the run and of its tree (`budget.maxToolCalls`) neither refuse a check nor count it, and the usage of the run (`usage.toolCalls`) leaves the calls of the checks out. So a run that used its tool calls still has its work checked, and a failed pass takes no call from the turn that fixes the work. A limit of tokens or of cost, and the deadline of the run, still stop a check.
+The checks have a tool budget of their own: at most 8 calls a pass, one per check, each within the `timeout` of the block. The limits of tool calls, tokens, and cost of the run and of its tree (`budget.maxToolCalls`, `maxTokens`, `maxCostUSD`) neither refuse a check nor count it, because a check calls no model. The usage of the run (`usage.toolCalls`) leaves the calls of the checks out. So a run that used its tool calls still has its work checked, and a failed pass takes no call from the turn that fixes the work. Only the deadline of the run, the limit of a person's time, stops a check.
+
+A run that stops at a limit of turns, tool calls, tokens, or cost runs a pass too, after its final report (section 5.2). That pass has `limit` set to the limit and `answer` 0, and a check of the answer reads the final report, the output of the run. A pass that passed gives the end of the run `"done": "checked"`, and one that failed `"done": "failed"`. The run still fails at its limit, with the stop `budget:<limit>`, and the model gets no other turn. At the deadline, no pass runs.
 
 A comparison run goes without what the agent learned (`fw.knowhow: off`, docs/KNOWHOW.md section 4.6), so it has no `memory` and no `recall` tool. A check of one of these tools is skipped there, not failed. Its result has `"passed": true` and `skipped` with the reason.
 
@@ -3202,7 +3221,7 @@ The kernel records the pass as `fw.done.checked`:
 ```
 
 - If every check passed, the run goes on to the grader of its outcome, when it has one, and then completes. Its `fw.run.finished` carries `"done": "checked"`.
-- A pass that passed is weak when it shows nothing about the work of this run. That is so in two cases. No check of the pass that ran is strong: each one is weak or was skipped. Or the run changed nothing: it made no call of its own that ran without an error result to a tool that is not read-only, that is not a view or a read of a path, and that is not `memory` or `recall`, and no such call changed a file of the workspace. Then each check saw only what was there before the run, such as a draft of an earlier run. The pass carries `"weak": true`, and the run completes with `"done": "checked"`, `"doneWeak": true`, and the stop `answered`, not `checked`. So it lands with the runs that a person checks. A consumer counts a run as checked with `fw.CheckedDone(done, doneWeak)`.
+- A pass that passed is weak when it shows nothing about the work of this run. That is so in two cases. No check of the pass that ran is strong: each one is weak or was skipped. Or the run changed nothing: it made no call of its own that ran without an error result to a tool that is not read-only, that is not a view or a read of a path, and that is not `memory` or `recall`, and no such call changed a file of the workspace. Then each check of a call saw only what was there before the run, such as a draft of an earlier run. A strong check of the answer is the exception: a pass with one is never weak, also in a run that changed nothing, because the answer comes from this run. So a job that only reads, with such a check, counts as checked. The pass carries `"weak": true`, and the run completes with `"done": "checked"`, `"doneWeak": true`, and the stop `answered`, not `checked`. So it lands with the runs that a person checks. A consumer counts a run as checked with `fw.CheckedDone(done, doneWeak)`.
 - If a check failed and attempts are left, the model gets a message from the kernel with the note kind `done`. The message names each failed check with the head and the tail of its result. The model gets one more turn to fix the work.
 - If a check failed at the last attempt, or the budget leaves no room for another turn, the run fails. Its output is the last answer of the model, its error starts with `not done:` and names the failed checks, and its `fw.run.finished` carries `"done": "failed"`.
 
@@ -3210,7 +3229,7 @@ The checks run before the grader, because a check is cheap and certain, and a gr
 
 ### 24.3 What a consumer sees
 
-The run object has `done`: the state `checked`, `fixing`, or `failed`, `weak` for a weak pass, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, with `doneWeak`, beside the stop `checked`, `answered` for a weak pass, or `not-done` (section 25). Checked work is `fw.CheckedDone(state, weak)`: the state `checked` and a pass that is not weak. `fw_done_passes_total` counts the passes by agent and result: `passed`, `weak`, `retried`, or `failed`. The front of a fleet reads the lifecycle events of the egress stream. So it tells a checked result from a run whose model stopped, with no change to the egress types of a pool. `fw.done.checked` itself is not on the default egress list of the workbench.
+The run object has `done`: the state `checked`, `fixing`, or `failed`, `weak` for a weak pass, and the attempt and the results of the latest pass. The field `done` of `fw.run.finished` carries the state too, with `doneWeak`, beside the stop `checked`, `answered` for a weak pass, `not-done`, or the stop of a limit after a pass at that limit (section 25). Checked work is `fw.CheckedDone(state, weak)`: the state `checked` and a pass that is not weak. `fw_done_passes_total` counts the passes by agent and result: `passed`, `weak`, `retried`, or `failed`. The front of a fleet reads the lifecycle events of the egress stream. So it tells a checked result from a run whose model stopped, with no change to the egress types of a pool. The workbench also puts `fw.done.checked` on the egress of its pools, so its view and its archive of the runs show which check ran.
 
 ### 24.4 Restarts
 
