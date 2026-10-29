@@ -648,7 +648,8 @@ const (
   "properties": {
     "path": {"type": "string", "description": "The note, such as /memories/notes.md or notes.md."},
     "text": {"type": "string", "description": "The whole new text of the note. Start with one line that says what the note holds."},
-    "ifHash": {"type": "string", "description": "Optional. The SHA-256 of the note that recall showed: the write fails when the note changed since. absent writes only a note that does not exist yet."}
+    "ifHash": {"type": "string", "description": "Optional. The SHA-256 of the note that recall showed: the write fails when the note changed since. absent writes only a note that does not exist yet."},
+    "sources": {"type": "array", "maxItems": 8, "items": {"type": "string"}, "description": "Optional. Where the note came from: page:<path> for a page of the wiki, such as page:launch/plan.md, or file:<path> for a file of the workspace. A note with a page source goes out of date when that page changes. Without this field, the lines of the text that start with Source: name the sources."}
   },
   "required": ["path", "text"],
   "additionalProperties": false
@@ -669,9 +670,10 @@ var memSchemas = map[string]string{memRecall: memRecallSchema, memRemember: memR
 
 // The types of the fields of the input of a memory tool (memField).
 const (
-	memString = iota // a string
-	memLimit         // an integer from 1 to memRecallMax
-	memKinds         // a list of the kinds of a record
+	memString  = iota // a string
+	memLimit          // an integer from 1 to memRecallMax
+	memKinds          // a list of the kinds of a record
+	memSources        // a list of the sources of a note (memory.SourceRef)
 )
 
 // memField is one field of the input of a tool of the memory server.
@@ -685,7 +687,7 @@ type memField struct {
 // server, as its input schema names them.
 var memFields = map[string][]memField{
 	memRecall:   {{"query", memString, false}, {"ref", memString, false}, {"kinds", memKinds, false}, {"limit", memLimit, false}},
-	memRemember: {{"path", memString, true}, {"text", memString, true}, {"ifHash", memString, false}},
+	memRemember: {{"path", memString, true}, {"text", memString, true}, {"ifHash", memString, false}, {"sources", memSources, false}},
 	memForget:   {{"path", memString, true}},
 	memList:     nil,
 }
@@ -799,6 +801,22 @@ func memCanon(tool string, raw json.RawMessage) (json.RawMessage, error) {
 				}
 			}
 			out[f.name] = kinds
+		case memSources:
+			var refs []string
+			if json.Unmarshal(v, &refs) != nil {
+				return nil, fmt.Errorf("the field %q of %s must be a list of strings", f.name, tool)
+			}
+			if len(refs) > memory.MaxTextSources {
+				return nil, fmt.Errorf("the field %q of %s holds at most %d sources", f.name, tool, memory.MaxTextSources)
+			}
+			for i, r := range refs {
+				ref, ok := memory.SourceRef(strings.TrimSpace(r))
+				if !ok {
+					return nil, fmt.Errorf("the field %q of %s holds %q; a source is page:<path> or file:<path>", f.name, tool, r)
+				}
+				refs[i] = ref
+			}
+			out[f.name] = refs
 		}
 	}
 	var buf bytes.Buffer
@@ -907,7 +925,9 @@ func (h *host) newMemServer(b *memBinding) *mcp.Server {
 			InputSchema: json.RawMessage(memRecallSchema), Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: &no}},
 		{Name: memRemember, Description: "Write a note that lasts between runs, such as /memories/notes.md. The text replaces the whole note. " +
 			"Start the note with one line that says what it holds. Keep one topic in each note. " +
-			"Pass ifHash, the SHA-256 that recall shows, to write only when the note did not change. Never store a secret, a key, or a password.",
+			"Pass ifHash, the SHA-256 that recall shows, to write only when the note did not change. " +
+			"When the note comes from a page of the wiki or a file, you can name it in sources, such as page:launch/plan.md. " +
+			"Never store a secret, a key, or a password.",
 			InputSchema: json.RawMessage(memRememberSchema), Annotations: &mcp.ToolAnnotations{IdempotentHint: true, DestructiveHint: &yes, OpenWorldHint: &no}},
 		{Name: memForget, Description: "Delete a note, such as /memories/notes.md.",
 			InputSchema: json.RawMessage(memForgetSchema), Annotations: &mcp.ToolAnnotations{IdempotentHint: true, DestructiveHint: &yes, OpenWorldHint: &no}},
@@ -967,14 +987,33 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 	// after the note is written does not lose its fw.memory.changed.
 	base := context.WithoutCancel(ctx)
 	ctx = fw.WithRunInfo(fw.WithAgent(ctx, h.a), info)
+	// The changes of the call also shape its answer (memory.Answer).
+	var (
+		mu      sync.Mutex
+		changes []fw.MemoryChangedData
+	)
 	ctx = fw.WithMemoryRecorder(ctx, func(d fw.MemoryChangedData) {
 		d.CallID, d.Tool = a.callID, a.tool
+		mu.Lock()
+		changes = append(changes, d)
+		mu.Unlock()
 		run.emit(base, d)
 	})
 	if run.use != nil {
 		ctx = fw.WithMemoryUseRecorder(ctx, func(d fw.MemoryUsedData) { run.use(base, d) })
 	}
 	store, scope := h.mem, run.scope
+	answer := func(text string) string {
+		mu.Lock()
+		defer mu.Unlock()
+		switch more, replace := memory.Answer(changes, store.Front(scope)); {
+		case replace:
+			return more
+		case more != "":
+			return text + " " + more
+		}
+		return text
+	}
 	switch a.tool {
 	case memRecall:
 		var in struct {
@@ -992,9 +1031,10 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		return h.memSearch(ctx, run, in.Query, in.Kinds, in.Limit)
 	case memRemember:
 		var in struct {
-			Path   string `json:"path"`
-			Text   string `json:"text"`
-			IfHash string `json:"ifHash"`
+			Path    string   `json:"path"`
+			Text    string   `json:"text"`
+			IfHash  string   `json:"ifHash"`
+			Sources []string `json:"sources"`
 		}
 		if err := decodeArgs(canon, &in); err != nil {
 			return "Error: " + err.Error(), true
@@ -1005,7 +1045,13 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		}
 		show := memory.Prefix + "/" + name
 		ifHash := strings.TrimSpace(in.IfHash)
-		rec, err := store.Remember(ctx, scope, fw.MemoryRecord{Ref: memory.NoteRef(scope, name), Body: in.Text}, ifHash)
+		// Without sources of the call, the store takes those that the lines
+		// of the text name.
+		var links []fw.MemoryLink
+		for _, ref := range in.Sources {
+			links = append(links, fw.MemoryLink{Ref: ref, Kind: "source"})
+		}
+		rec, err := store.Remember(ctx, scope, fw.MemoryRecord{Ref: memory.NoteRef(scope, name), Body: in.Text, Links: links}, ifHash)
 		switch {
 		case errors.Is(err, memory.ErrFrontConflict):
 			return "Error: " + memory.ConflictText, true
@@ -1016,7 +1062,7 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		case err != nil:
 			return "Error: " + err.Error(), true
 		}
-		return fmt.Sprintf("Saved %s: %d bytes, SHA-256 %s.", show, rec.Size, rec.Hash), false
+		return answer(fmt.Sprintf("Saved %s: %d bytes, SHA-256 %s.", show, rec.Size, rec.Hash)), false
 	case memForget:
 		var in struct {
 			Path string `json:"path"`
@@ -1037,7 +1083,7 @@ func (h *host) memCall(ctx context.Context, a *memArm, canon json.RawMessage) (s
 		case err != nil:
 			return "Error: " + err.Error(), true
 		}
-		return "Deleted " + show + ".", false
+		return answer("Deleted " + show + "."), false
 	case memList:
 		if err := decodeArgs(canon, &struct{}{}); err != nil {
 			return "Error: " + err.Error(), true

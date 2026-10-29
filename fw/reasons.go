@@ -34,10 +34,11 @@ const reasonRerun = "rerun after resume"
 // budget:maxTurns.
 const (
 	// RunStopAnswered: the model ended its turn with an answer, or a
-	// routine or a check run gave the output.
+	// routine or a check run gave the output. A run whose checks passed
+	// with a weak pass stops so too (CheckedDone).
 	RunStopAnswered = "answered"
 	// RunStopChecked: the model answered, and every check of the
-	// definition of done passed (section 24).
+	// definition of done passed with a pass that is not weak (section 24).
 	RunStopChecked = "checked"
 	// RunStopNotDone: the checks of the definition of done failed at the
 	// last attempt.
@@ -111,7 +112,7 @@ func StopOf(d RunFinishedData) string {
 	}
 	switch d.Outcome {
 	case OutcomeCompleted:
-		if d.Done == DoneChecked {
+		if CheckedDone(d.Done, d.DoneWeak) {
 			return RunStopChecked
 		}
 		return RunStopAnswered

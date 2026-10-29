@@ -319,38 +319,80 @@ func (f *front) get(ctx context.Context, scope fw.MemoryScope, name string) (rec
 	return rec, true, nil
 }
 
+// frontChange is the answer of the front to a change of a note. Waiting
+// is set when the change waits for a person (ask first).
+type frontChange struct {
+	Waiting json.RawMessage `json:"waiting"`
+}
+
+// waits reports whether the front holds a change for a person: it
+// answered 202, or its answer names the change that waits.
+func (c frontChange) waits(code int) bool {
+	w := bytes.TrimSpace(c.Waiting)
+	return code == http.StatusAccepted || (len(w) > 0 && string(w) != "null")
+}
+
 // put sends the text of a note. ifHash is the hash of the copy before the
-// change, or "absent" for a new note. A 412 is ErrFrontConflict.
-func (f *front) put(ctx context.Context, scope fw.MemoryScope, name string, body frontPut) error {
-	code, err := f.do(ctx, http.MethodPut, notePath(scope, name), noteQuery(scope), body, nil)
+// change, or "absent" for a new note. A 412 is ErrFrontConflict. waiting
+// is true when the front holds the change for a person, because the owner
+// of the agent asked to read each note first: the front does not keep it
+// until a person does.
+func (f *front) put(ctx context.Context, scope fw.MemoryScope, name string, body frontPut) (waiting bool, err error) {
+	var out frontChange
+	code, err := f.do(ctx, http.MethodPut, notePath(scope, name), noteQuery(scope), body, &out)
 	switch {
 	case err != nil:
-		return err
+		return false, err
 	case code == http.StatusPreconditionFailed:
-		return ErrFrontConflict
+		return false, ErrFrontConflict
 	case code/100 != 2:
-		return errStatus{code}
+		return false, errStatus{code}
 	}
-	return nil
+	return out.waits(code), nil
 }
 
 // remove puts a note away at the front. A note that the front does not
-// have is gone already. A 412 is ErrFrontConflict.
-func (f *front) remove(ctx context.Context, scope fw.MemoryScope, name, ifHash string) error {
+// have is gone already. A 412 is ErrFrontConflict. waiting is true when
+// the removal waits for a person, as for put.
+func (f *front) remove(ctx context.Context, scope fw.MemoryScope, name, ifHash string) (waiting bool, err error) {
 	q := noteQuery(scope)
 	q.Set("ifHash", ifHash)
-	code, err := f.do(ctx, http.MethodDelete, notePath(scope, name), q, nil, nil)
+	var out frontChange
+	code, err := f.do(ctx, http.MethodDelete, notePath(scope, name), q, nil, &out)
 	switch {
 	case err != nil:
-		return err
+		return false, err
 	case code == http.StatusPreconditionFailed:
-		return ErrFrontConflict
+		return false, ErrFrontConflict
 	case code == http.StatusNotFound || code == http.StatusGone:
-		return nil
+		return false, nil
 	case code/100 != 2:
-		return errStatus{code}
+		return false, errStatus{code}
 	}
-	return nil
+	return out.waits(code), nil
+}
+
+// pageHash returns the hash of the page at path of the wiki of the front
+// (GET /v1/pages/{path}). found is false when the front has no such page.
+func (f *front) pageHash(ctx context.Context, path string) (hash string, found bool, err error) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	var out struct {
+		Hash string `json:"hash"`
+	}
+	code, err := f.do(ctx, http.MethodGet, "/v1/pages/"+strings.Join(parts, "/"), nil, nil, &out)
+	switch {
+	case err != nil:
+		return "", false, err
+	case code == http.StatusNotFound || code == http.StatusGone:
+		return "", false, nil
+	case code != http.StatusOK:
+		return "", false, errStatus{code}
+	}
+	hash = strings.ToLower(strings.TrimSpace(out.Hash))
+	return hash, hash != "", nil
 }
 
 // runs returns the runs of the archive of the front that match the words

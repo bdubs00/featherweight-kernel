@@ -45,7 +45,9 @@ Know-how does not learn from the opinion of a model about its own work. It
 learns only from results that a system records. These are a receipt of
 `accepted` or `satisfied`, an outcome grader that passed, and a person's
 thumbs up. A definition of done that passed counts too: `done: checked`
-on the newest `fw.run.finished` (docs/ARCHITECTURE.md section 24).
+on the newest `fw.run.finished`, without `doneWeak` (`fw.CheckedDone`,
+docs/ARCHITECTURE.md section 24). A weak pass, such as a check that only
+views a file that an earlier run wrote, verifies nothing.
 
 ## 2. One word for one thing
 
@@ -151,9 +153,18 @@ in the files of the process, because the front has no such scope.
   that the front lists as put away or waiting. It also removes each copy
   that the front listed before and no longer lists. Some copies were never
   on the list, such as notes from before the front was set. Each of them
-  goes to the front as a new note with `by: agent`. So the first pull of a
-  Task never removes notes that the front never had. If the front does not answer
-  within 5 s, the run uses the copy, and the block says so in one line.
+  goes to the front as a new note with `by: agent`, with the sources that
+  its lines name. So the first pull of a Task never removes notes that the
+  front never had. Several Tasks of one pool can each have a note of the
+  same name from before the front. When the front keeps another text under
+  that name, the text of the copy goes to the front first under a free
+  name, such as `gotchas-2.md`, and the copy keeps it there too. A text
+  that the front lists already, under any name, does not go again. A
+  second pull sends nothing. If the front does not answer within 5 s, the
+  run uses the copy, and the block says so in one line. A pool roll
+  replaces the Task and its `$FW_HOME`, so the notes of a replaced Task
+  reach the front only if the deploy copies `$FW_HOME/memory` into the
+  new Task before its first run.
 - Push: every change through `memory.Store` sends the new text to the
   front. This includes the memory tool, the native API, and the hosted
   `fw-memory` server. The push carries the hash that the copy had as
@@ -172,6 +183,26 @@ in the files of the process, because the front has no such scope.
   run. A write without links sends `"sources": []`. The front must not
   keep the sources of an older text for the new one, because the agent did
   not check them.
+- A note names its sources in its text. The memory tool has the shape of
+  the provider and no field for a source, so a write without links takes
+  the sources of the lines of the note that start with `Source:` or
+  `Sources:`: `Source: page:launch/plan.md` for a page of the wiki, and
+  `Source: file:docs/setup.md` for a file of the workspace, at most 8
+  (`memory.SourcesOf`). The line is optional. The memory section of the
+  system prompt and the description of the tool say so. The `remember`
+  tool of `fw-memory` takes the optional field `sources` too. For each
+  page without a version, the store asks the front for the hash of the
+  page (`GET /v1/pages/{path}`), so the note goes out of date when the page
+  changes. A page that the wiki does not have keeps no version, and the
+  tool says so to the model after its result. `fw.memory.changed` records
+  the sources of the write.
+- Ask first: when the front holds a change of the agent for a person, it
+  answers `202` with `waiting`. The store keeps the text in the copy for
+  this run, and `fw.memory.changed` carries `"waiting": true`. The memory
+  tool then answers "Not kept yet. The new note /memories/x.md waits for a
+  person ...", not "File created successfully", so the model does not tell
+  the user that the note is saved. A removal that waits answers so too.
+  The next pull takes what the front keeps.
 - A removal sends `DELETE` with the hash of the copy. A rename sends the
   note under its new name with `absent`, and then removes the old name.
   With a front, the memory tool deletes and renames one note at a time. It
@@ -208,8 +239,10 @@ Inside each group, the notes that runs used most come first, then the
 newest. Notes that are out of date, resting, put away, or waiting stay out
 of the block. One line counts them: "3 notes are out of date. View
 /memories to read them." The first line shows how full the block is:
-"Notes: 23 kept, 3.1 of 4 KB shown." Hermes Agent shows the same, and an
-agent that sees the limit keeps its notes short.
+"Notes: 23 listed, 3.1 of 4 KB shown." It counts only the notes that the
+block lists, so a model never looks for a note that the line counts and
+the list lacks. Hermes Agent shows the same, and an agent that sees the
+limit keeps its notes short.
 
 What the kernel reads for this block:
 
@@ -253,6 +286,11 @@ The kernel then does three things:
 - It adds no memory block.
 - It takes the tools `memory` and `recall` out of the run.
 - It skips the routine runner.
+
+A check of the definition of done that names `memory` or `recall` is
+skipped in a held-back run, not failed (docs/ARCHITECTURE.md section
+24.2). So the run is not counted as a failure that only the comparison
+caused.
 
 `fw.run.started` records `knowhow: "off"`. Every other run is a normal run.
 A held-back run of Claude Code or opencode gets no memory tools either.
@@ -379,7 +417,12 @@ runs (`memory/front.go`, and the fake front `memory/fronttest`):
   412. A note that is put away counts as absent: the new text takes its
   place, and the journal keeps the old one for undo. Otherwise an agent
   can never write a note again under a name that it deleted. A `PUT`
-  answers any 2xx on success.
+  answers any 2xx on success. A `202`, or an answer with `waiting`, says
+  that the change waits for a person (ask first). A `DELETE` answers so
+  too.
+- A page answers `GET /v1/pages/{path}` with JSON that holds `hash`, and
+  404 when the wiki has no such page. The kernel reads the hash as the
+  version of a page source.
 - A `DELETE` answers any 2xx on success, 404 for a note that the front does
   not have, which the kernel treats as done, and 412 for another hash.
 - The runs answer `{"runs": [{"id", "title", "input", "output", "at",

@@ -18,6 +18,8 @@ import (
 	"maps"
 	"strings"
 	"time"
+
+	"github.com/bdubs00/featherweight-kernel/fw"
 )
 
 // errDirAtFront refuses a delete or a rename of a directory when a front
@@ -35,11 +37,13 @@ func (f *noteFiles) pushCtx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(f.ctx, pushWait)
 }
 
-// push sends the new text of the note name to the front. old is the text
-// of the copy before the write, when existed. On a conflict, the copy
-// takes the text of the front; on any other failure, the copy gets old
-// back, or loses the new note.
-func (f *noteFiles) push(name string, data []byte, hash string, old []byte, existed bool) error {
+// push sends the new text of the note name with its sources to the front.
+// old is the text of the copy before the write, when existed. On a
+// conflict, the copy takes the text of the front; on any other failure,
+// the copy gets old back, or loses the new note. waiting is true when the
+// front holds the change for a person (ask first): the copy keeps the text
+// for this run, and the next pull takes what the front keeps.
+func (f *noteFiles) push(name string, data []byte, hash string, old []byte, existed bool, links []fw.MemoryLink) (waiting bool, err error) {
 	ifHash := "absent"
 	if existed {
 		ifHash = hashOf(old)
@@ -47,7 +51,7 @@ func (f *noteFiles) push(name string, data []byte, hash string, old []byte, exis
 	by, run := byOf(f.ctx)
 	ctx, cancel := f.pushCtx()
 	defer cancel()
-	err := f.store.front.put(ctx, f.scope, name, frontPut{Text: string(data), IfHash: ifHash, Sources: sourcesOf(f.links), By: by, Run: run})
+	waiting, err = f.store.front.put(ctx, f.scope, name, frontPut{Text: string(data), IfHash: ifHash, Sources: sourcesOf(links), By: by, Run: run})
 	switch {
 	case err == nil:
 		f.updateState(func(st *scopeState) bool {
@@ -55,52 +59,59 @@ func (f *noteFiles) push(name string, data []byte, hash string, old []byte, exis
 			if st.Front == nil {
 				st.Front = map[string]FrontNote{}
 			}
-			st.Front[name] = FrontNote{Name: name, Hash: hash, By: by, At: time.Now().UTC(), Uses: prev.Uses, Sources: len(sourcesOf(f.links))}
+			n := FrontNote{Name: name, Hash: hash, By: by, At: time.Now().UTC(), Uses: prev.Uses, Sources: len(sourcesOf(links))}
+			if waiting {
+				n.State = StateWaiting
+			}
+			st.Front[name] = n
 			return true
 		})
-		return nil
+		return waiting, nil
 	case errors.Is(err, ErrFrontConflict):
 		f.takeFront(ctx, name, old, existed)
-		return ErrFrontConflict
+		return false, ErrFrontConflict
 	}
 	f.restore(name, old, existed)
-	return fmt.Errorf("%w (%v)", ErrNotKept, err)
+	return false, fmt.Errorf("%w (%v)", ErrNotKept, err)
 }
 
 // pushRemove puts the note name away at the front, after the copy removed
 // it. old is its text. On a conflict, the copy takes the text of the
-// front; on any other failure, the copy gets the note back.
-func (f *noteFiles) pushRemove(name string, old []byte) error {
+// front; on any other failure, the copy gets the note back. waiting is
+// true when the removal waits for a person: the next pull brings the note
+// back until a person agrees.
+func (f *noteFiles) pushRemove(name string, old []byte) (waiting bool, err error) {
 	ctx, cancel := f.pushCtx()
 	defer cancel()
-	err := f.store.front.remove(ctx, f.scope, name, hashOf(old))
+	waiting, err = f.store.front.remove(ctx, f.scope, name, hashOf(old))
 	switch {
 	case err == nil:
 		f.updateState(func(st *scopeState) bool {
 			delete(st.Front, name)
 			return true
 		})
-		return nil
+		return waiting, nil
 	case errors.Is(err, ErrFrontConflict):
 		f.takeFront(ctx, name, old, true)
-		return ErrFrontConflict
+		return false, ErrFrontConflict
 	}
 	f.restore(name, old, true)
-	return fmt.Errorf("%w (%v)", ErrNotKept, err)
+	return false, fmt.Errorf("%w (%v)", ErrNotKept, err)
 }
 
 // pushRename sends the note under its new name to the front and then puts
 // the old name away, after the copy renamed it. data is its text. When the
 // front does not take the new name, the copy renames the note back. When
 // the front takes the new name and not the removal of the old one, both
-// names hold the note, at the front and in the copy.
-func (f *noteFiles) pushRename(oldname, newname string, data []byte) error {
+// names hold the note, at the front and in the copy. waiting is true when
+// a part of the rename waits for a person.
+func (f *noteFiles) pushRename(oldname, newname string, data []byte) (waiting bool, err error) {
 	hash := hashOf(data)
 	links := f.extraOf(oldname, hash).Links
 	by, run := byOf(f.ctx)
 	ctx, cancel := f.pushCtx()
 	defer cancel()
-	err := f.store.front.put(ctx, f.scope, newname, frontPut{Text: string(data), IfHash: "absent", Sources: sourcesOf(links), By: by, Run: run})
+	waiting, err = f.store.front.put(ctx, f.scope, newname, frontPut{Text: string(data), IfHash: "absent", Sources: sourcesOf(links), By: by, Run: run})
 	if err != nil {
 		if rerr := f.Files.Rename(newname, oldname); rerr == nil {
 			_ = syncParent(f.dir, newname)
@@ -108,31 +119,35 @@ func (f *noteFiles) pushRename(oldname, newname string, data []byte) error {
 		}
 		if errors.Is(err, ErrFrontConflict) {
 			f.takeFront(ctx, newname, nil, false)
-			return ErrFrontConflict
+			return false, ErrFrontConflict
 		}
-		return fmt.Errorf("%w (%v)", ErrNotKept, err)
+		return false, fmt.Errorf("%w (%v)", ErrNotKept, err)
 	}
 	f.updateState(func(st *scopeState) bool {
 		if st.Front == nil {
 			st.Front = map[string]FrontNote{}
 		}
-		st.Front[newname] = FrontNote{Name: newname, Hash: hash, By: by, At: time.Now().UTC(), Sources: len(links)}
+		n := FrontNote{Name: newname, Hash: hash, By: by, At: time.Now().UTC(), Sources: len(links)}
+		if waiting {
+			n.State = StateWaiting
+		}
+		st.Front[newname] = n
 		return true
 	})
-	err = f.store.front.remove(ctx, f.scope, oldname, hash)
+	removeWaits, err := f.store.front.remove(ctx, f.scope, oldname, hash)
 	switch {
 	case err == nil:
 		f.updateState(func(st *scopeState) bool {
 			delete(st.Front, oldname)
 			return true
 		})
-		return nil
+		return waiting || removeWaits, nil
 	case errors.Is(err, ErrFrontConflict):
 		f.takeFront(ctx, oldname, data, true)
 	default:
 		f.restore(oldname, data, true)
 	}
-	return fmt.Errorf("%s now holds the note, and %s stays, because the front did not put the old name away: %w", Prefix+"/"+newname, Prefix+"/"+oldname, err)
+	return waiting, fmt.Errorf("%s now holds the note, and %s stays, because the front did not put the old name away: %w", Prefix+"/"+newname, Prefix+"/"+oldname, err)
 }
 
 // takeFront puts the text of the front for the note name in the copy, after
@@ -212,15 +227,16 @@ func (f *noteFiles) extraOf(name, hash string) noteExtra {
 	return noteExtra{}
 }
 
-// keepExtra keeps the sources and the fields of a write through Remember
-// for the text of hash, and drops those of an earlier text.
-func (f *noteFiles) keepExtra(name, hash string) {
+// keepExtra keeps the sources of a write and the fields of a write
+// through Remember for the text of hash, and drops those of an earlier
+// text.
+func (f *noteFiles) keepExtra(name, hash string, links []fw.MemoryLink) {
 	f.updateState(func(st *scopeState) bool {
 		_, had := st.Notes[name]
-		if !had && len(f.links) == 0 && len(f.meta) == 0 {
+		if !had && len(links) == 0 && len(f.meta) == 0 {
 			return false
 		}
-		setExtra(st, name, noteExtra{Hash: hash, Links: f.links, Metadata: f.meta})
+		setExtra(st, name, noteExtra{Hash: hash, Links: links, Metadata: f.meta})
 		return true
 	})
 }

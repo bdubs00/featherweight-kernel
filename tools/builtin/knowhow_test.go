@@ -211,7 +211,7 @@ func TestNoteSurvivesANewTask(t *testing.T) {
 		t.Fatalf("second run = %+v, %v", r, err)
 	}
 	firstMsg := fw.TextOf(second.requests()[0].Messages[0].Content)
-	if !strings.Contains(firstMsg, "Notes: 1 kept") || !strings.Contains(firstMsg, "/memories/labels.md: Gitea refuses a label name with a space. (checked") {
+	if !strings.Contains(firstMsg, "Notes: 1 listed") || !strings.Contains(firstMsg, "/memories/labels.md: Gitea refuses a label name with a space. (checked") {
 		t.Fatalf("first message of the new Task = %q", firstMsg)
 	}
 	if n, _ := f.Get("default", "agent", "", "labels.md"); n.Text != "Gitea refuses a label name with a blank.\n" {
@@ -257,5 +257,41 @@ func TestFrontTokenRedacted(t *testing.T) {
 	}
 	if got := a.Redact("token " + f.Token); strings.Contains(got, f.Token) {
 		t.Fatalf("Redact = %q", got)
+	}
+}
+
+// TestMemoryToolAsksFirst checks the answers of the memory tool with a
+// front: a note whose last line names a page reaches the front with the
+// page and its hash as a source; a page that the wiki does not have gets
+// a sentence after the result; and with ask first on, the tool says that
+// the note waits for a person, not that the file was created.
+func TestMemoryToolAsksFirst(t *testing.T) {
+	f := fronttest.New("builtin-front-token")
+	t.Cleanup(f.Close)
+	f.PutPage("launch/quillwork-3.md", "Launch day: 2026-11-12\n")
+	m, err := fw.NewBuiltinTool("memory", frontConfig(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := mustOK(t, callAs(t, m, "c1", `{"command":"create","path":"/memories/launch.md","file_text":"Launch day is 2026-11-12.\nSource: page:launch/quillwork-3.md\n"}`))
+	if got != "File created successfully at: /memories/launch.md" {
+		t.Fatalf("answer = %q", got)
+	}
+	if n, _ := f.Get("default", "agent", "", "launch.md"); len(n.Sources) != 1 || n.Sources[0].Version != fronttest.Hash("Launch day: 2026-11-12\n") {
+		t.Fatalf("front note = %+v", n)
+	}
+	got = mustOK(t, callAs(t, m, "c2", `{"command":"create","path":"/memories/old.md","file_text":"x\nSource: page:launch/quillwork-2.md\n"}`))
+	if !strings.HasPrefix(got, "File created successfully at: /memories/old.md") || !strings.Contains(got, "no version of the page launch/quillwork-2.md") {
+		t.Fatalf("answer of a page that the wiki lacks = %q", got)
+	}
+
+	f.SetAskFirst(true)
+	got = mustOK(t, callAs(t, m, "c3", `{"command":"create","path":"/memories/webinar.md","file_text":"The webinar is on 2026-11-19.\n"}`))
+	if strings.Contains(got, "successfully") || !strings.Contains(got, "Not kept yet. The new note /memories/webinar.md waits for a person") {
+		t.Fatalf("answer under ask first = %q", got)
+	}
+	got = mustOK(t, callAs(t, m, "c4", `{"command":"str_replace","path":"/memories/launch.md","old_str":"2026-11-12","new_str":"2026-11-13"}`))
+	if !strings.Contains(got, "The change of /memories/launch.md waits for a person") {
+		t.Fatalf("answer of an edit under ask first = %q", got)
 	}
 }

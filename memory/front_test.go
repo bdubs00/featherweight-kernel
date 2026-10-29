@@ -317,14 +317,16 @@ func TestFrontBrief(t *testing.T) {
 	}
 	lines := strings.Split(b.Text, "\n")
 	want := []string{
-		"Notes: 6 kept, X of 4 KB shown.",
+		"Notes: 4 listed, X of 4 KB shown.",
 		"- /memories/person.md: The user wants short answers. (from a person)",
 		"- /memories/checked-b.md: Checked, used often. (checked 2026-10-27)",
 		"- /memories/checked-a.md: Checked, used once. (checked 2026-10-27)",
 		"- /memories/plain.md: A note without sources.",
 		"1 note is out of date, and 1 note is resting. View /memories to read them.",
 	}
-	if len(lines) != len(want) || !strings.HasPrefix(lines[0], "Notes: 6 kept, 0.") || !strings.HasSuffix(lines[0], " of 4 KB shown.") {
+	// The first line counts the four notes that the block lists, not the
+	// six of the copy: the lines after the list count the others.
+	if len(lines) != len(want) || !strings.HasPrefix(lines[0], "Notes: 4 listed, 0.") || !strings.HasSuffix(lines[0], " of 4 KB shown.") {
 		t.Fatalf("block =\n%s", b.Text)
 	}
 	for i := 1; i < len(want); i++ {
@@ -337,6 +339,9 @@ func TestFrontBrief(t *testing.T) {
 	}
 	if !strings.Contains(s.Section(scope), "the notes that a person wrote first") {
 		t.Fatal("the system section names the order of newest first")
+	}
+	if sec := s.Section(scope); !strings.Contains(sec, `"Source: page:launch/plan.md"`) || !strings.Contains(sec, "goes out of date when that page changes") {
+		t.Fatalf("the system section does not say how a note names its page:\n%s", sec)
 	}
 
 	// The front does not answer: the copy and the labels of the last

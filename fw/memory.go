@@ -110,16 +110,24 @@ type MemoryWriter interface {
 // still reaches the ledger and the bus in other events of the run: the
 // input and the result of the tool call that wrote or read the note, and
 // the index of the notes that fw.run.started holds in its field context.
+//
+// Sources are the sources that the note keeps after a write, such as the
+// page that a line "Source: page:<path>" of the note names, with the
+// version that the front gave. Waiting is true when the front of a fleet
+// holds the change for a person, because the owner of the agent asked to
+// read each note first: the change is not kept until a person keeps it.
 type MemoryChangedData struct {
-	CallID string          `json:"callId,omitempty"`
-	Tool   string          `json:"tool,omitempty"`
-	Op     string          `json:"op"`
-	Ref    string          `json:"ref"`
-	OldRef string          `json:"oldRef,omitempty"`
-	Scope  MemoryScopeKind `json:"scope"`
-	Agent  string          `json:"agent,omitempty"`
-	Size   int64           `json:"size"`
-	SHA256 string          `json:"sha256,omitempty"`
+	CallID  string          `json:"callId,omitempty"`
+	Tool    string          `json:"tool,omitempty"`
+	Op      string          `json:"op"`
+	Ref     string          `json:"ref"`
+	OldRef  string          `json:"oldRef,omitempty"`
+	Scope   MemoryScopeKind `json:"scope"`
+	Agent   string          `json:"agent,omitempty"`
+	Size    int64           `json:"size"`
+	SHA256  string          `json:"sha256,omitempty"`
+	Sources []MemoryLink    `json:"sources,omitempty"`
+	Waiting bool            `json:"waiting,omitempty"`
 }
 
 // MemoryUsedData is the payload of fw.memory.used: the notes that a run

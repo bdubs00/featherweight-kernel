@@ -569,6 +569,21 @@ func (a *Agent) limitSpent(rs *runState) (overrun, bool) {
 	return o, spent
 }
 
+// costSpent reports a limit of tokens or of cost that rs, its tree, or the
+// tree of one of its ancestors used up. The calls of a definition of done
+// have a tool budget of their own (done.go), so only these limits refuse
+// them.
+func (a *Agent) costSpent(rs *runState) (overrun, bool) {
+	b := a.budgetOf(rs)
+	b.MaxToolCalls = 0
+	if o, ok := ownSpent(rs, b, 0); ok {
+		return o, true
+	}
+	room := a.roomOf(rs)
+	room.calls = allowance{}
+	return room.spent()
+}
+
 // spendRoom returns what the trees of the lineage of rs have left, from
 // one read of the usage, and the limit that rs or a tree used up, if any.
 // A child in another process takes its cap from the same read, so the cap

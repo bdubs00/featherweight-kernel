@@ -381,6 +381,10 @@ maxQueuedRuns: 0                # extra admitted root drivers; 0 selects the fin
 # the model the failure and one more turn. At the last failed attempt the
 # run fails as not done. A check never asks a person. A child run never
 # takes the block of its profile, and an inline profile only adds checks.
+# The checks have a tool budget of their own, apart from budget.maxToolCalls.
+# A run counts as checked only when its pass shows the work of the run: a
+# run that changed nothing, or whose checks only view a file with no
+# contains and no lacks, completes as answered (section 24.2).
 #
 # agents:
 #   fixer:

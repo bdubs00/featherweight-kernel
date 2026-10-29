@@ -225,7 +225,7 @@ func (b *cursorBuilder) apply(e Event) {
 			}
 		}
 	case EvToolRequested, EvToolResponded:
-		if e.Type == EvToolRequested {
+		if e.Type == EvToolRequested && !doneCall(e) {
 			c.toolCalls++
 			if e.Seq <= c.queued.Kept {
 				c.keptCalls++

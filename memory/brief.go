@@ -21,14 +21,20 @@ const SystemSection = "# Memory\n\n" +
 	"a decision and its reason, a fact that took effort to find. Start each file with one line that says what it holds, " +
 	"because that line appears in the list at the start of every run. Keep one topic in each file. " +
 	"Update a file instead of adding a second one, and delete a note that turns out to be wrong. " +
+	"When a note comes from a page of the wiki or a file of the workspace, you can end it with a line that names it, " +
+	"such as \"Source: page:launch/plan.md\" or \"Source: file:docs/setup.md\". " +
 	"Never store a secret, a key, or a password."
 
 // SystemSectionFront is SystemSection for notes that a front keeps: the
-// block lists them by group with labels, not newest first.
-var SystemSectionFront = strings.Replace(SystemSection,
+// block lists them by group with labels, not newest first, and a note
+// with a page source goes out of date when the page changes.
+var SystemSectionFront = strings.Replace(strings.Replace(SystemSection,
 	"each line names a note and its first line, newest first. ",
 	"each line names a note and its first line: the notes that a person wrote first, then the checked notes, then the others. "+
-		"A label after a line says that a person wrote the note, or the date when its sources were last found to match. ", 1)
+		"A label after a line says that a person wrote the note, or the date when its sources were last found to match. ", 1),
+	"\"Source: file:docs/setup.md\". ",
+	"\"Source: file:docs/setup.md\". A note with a page source goes out of date when that page changes, "+
+		"and the list at the start of a run leaves it out until it is checked again. ", 1)
 
 // Section returns the memory section of the system prompt for the notes
 // of a scope: SystemSectionFront when a front keeps them, and

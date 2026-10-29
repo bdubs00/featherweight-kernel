@@ -1,9 +1,11 @@
 // Package fronttest is a fake front of a fleet for the tests of the
 // kernel: the routes of the notes and of the runs of docs/KNOWHOW.md
-// section 5.3, in memory, over httptest. It checks the static token and
-// the hash of each change as the front does, records each change that it
-// takes, and can stop answering. It is not a front: it keeps no journal,
-// no switch, and no archive beyond the runs that a test gives it.
+// section 5.3, and GET of a page of the wiki, in memory, over httptest. It
+// checks the static token and the hash of each change as the front does,
+// records each change that it takes, and can stop answering. With ask
+// first on, it holds each change of the agent for a person, as the front
+// does, and answers 202. It is not a front: it keeps no journal and no
+// archive beyond the runs that a test gives it.
 package fronttest
 
 import (
@@ -70,17 +72,20 @@ type Front struct {
 	*httptest.Server
 	Token string
 
-	mu      sync.Mutex
-	notes   map[string]*Note
-	changes []Change
-	runs    []Run
-	queries []string
-	down    bool
+	mu       sync.Mutex
+	notes    map[string]*Note
+	changes  []Change
+	runs     []Run
+	queries  []string
+	down     bool
+	askFirst bool
+	pages    map[string]string
+	held     []Change
 }
 
 // New starts a fake front that wants the static token.
 func New(token string) *Front {
-	f := &Front{Token: token, notes: map[string]*Note{}}
+	f := &Front{Token: token, notes: map[string]*Note{}, pages: map[string]string{}}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	return f
 }
@@ -138,6 +143,31 @@ func (f *Front) Queries() []string {
 	return append([]string(nil), f.queries...)
 }
 
+// SetAskFirst turns ask first on or off: a change that the agent makes
+// waits for a person. A new note is kept in the state waiting, and a
+// change or a removal of a note that exists leaves the note as it is.
+// Each such change answers 202 with the change that waits.
+func (f *Front) SetAskFirst(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.askFirst = on
+}
+
+// Held returns the changes that wait for a person beside a note that
+// exists, in order.
+func (f *Front) Held() []Change {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Change(nil), f.held...)
+}
+
+// PutPage sets the text of a page of the wiki.
+func (f *Front) PutPage(path, text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pages[path] = text
+}
+
 // SetDown makes the fake front answer 503 to every request, or answer
 // again.
 func (f *Front) SetDown(down bool) {
@@ -185,6 +215,14 @@ func (f *Front) serve(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+	case strings.HasPrefix(r.URL.Path, "/v1/pages/") && r.Method == http.MethodGet:
+		p := strings.TrimPrefix(r.URL.Path, "/v1/pages/")
+		text, ok := f.pages[p]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"path": p, "hash": Hash(text), "text": text})
 	case strings.HasPrefix(r.URL.Path, "/v1/knowhow/notes/"):
 		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/v1/knowhow/notes/"), "/", 3)
 		if len(parts) != 3 {
@@ -249,6 +287,17 @@ func (f *Front) note(w http.ResponseWriter, r *http.Request, agent, scope, princ
 		if exists && cur.State != "put-away" {
 			state = cur.State
 		}
+		if f.askFirst && !strings.HasPrefix(b.By, "person") {
+			c.Status = http.StatusAccepted
+			f.changes = append(f.changes, c)
+			if live && cur.State != "waiting" {
+				f.held = append(f.held, c)
+			} else {
+				f.notes[k] = &Note{Agent: agent, Scope: scope, Principal: principal, Name: name, Text: b.Text, State: "waiting", By: b.By, Run: b.Run, At: time.Now().UTC(), Sources: b.Sources}
+			}
+			writeJSON(w, http.StatusAccepted, map[string]any{"note": map[string]any{"name": name}, "waiting": map[string]any{"what": "learned"}})
+			return
+		}
 		f.notes[k] = &Note{Agent: agent, Scope: scope, Principal: principal, Name: name, Text: b.Text, State: state, By: b.By, Run: b.Run, At: time.Now().UTC(), Sources: b.Sources}
 		c.Status = http.StatusOK
 		f.changes = append(f.changes, c)
@@ -260,6 +309,9 @@ func (f *Front) note(w http.ResponseWriter, r *http.Request, agent, scope, princ
 			c.Status = http.StatusNotFound
 		case cur.Hash() != c.IfHash:
 			c.Status = http.StatusPreconditionFailed
+		case f.askFirst:
+			c.Status = http.StatusAccepted
+			f.held = append(f.held, c)
 		default:
 			cur.State = "put-away"
 			c.Status = http.StatusNoContent

@@ -527,13 +527,17 @@ func describe(e fw.Event) string {
 	case fw.EvMemoryChanged:
 		var d fw.MemoryChangedData
 		if e.Decode(&d) == nil {
+			wait := ""
+			if d.Waiting {
+				wait = "; the change waits for a person"
+			}
 			switch d.Op {
 			case fw.FileRenamed:
-				return fmt.Sprintf("the tool %s renamed the note %s to %s", d.Tool, d.OldRef, d.Ref)
+				return fmt.Sprintf("the tool %s renamed the note %s to %s%s", d.Tool, d.OldRef, d.Ref, wait)
 			case fw.FileRemoved:
-				return fmt.Sprintf("the tool %s removed the note %s", d.Tool, d.Ref)
+				return fmt.Sprintf("the tool %s removed the note %s%s", d.Tool, d.Ref, wait)
 			}
-			return fmt.Sprintf("the tool %s %s the note %s (%d bytes)", d.Tool, d.Op, d.Ref, d.Size)
+			return fmt.Sprintf("the tool %s %s the note %s (%d bytes)%s", d.Tool, d.Op, d.Ref, d.Size, wait)
 		}
 	case fw.EvApprovalRequested:
 		var d fw.ApprovalRequestedData
@@ -630,6 +634,9 @@ func describe(e fw.Event) string {
 				if !r.Passed {
 					failed++
 				}
+			}
+			if d.Passed && d.Weak {
+				return fmt.Sprintf("done: %d checks passed, but they show nothing about the work of this run", len(d.Checks))
 			}
 			if d.Passed {
 				return fmt.Sprintf("done: %d checks passed", len(d.Checks))

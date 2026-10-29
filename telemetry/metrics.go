@@ -172,7 +172,7 @@ func NewMetrics(reg prometheus.Registerer, prices fw.Prices) *Metrics {
 		}, []string{"agent", "limit"}),
 		donePasses: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "fw_done_passes_total",
-			Help: "Passes of the checks of a definition of done, by agent and result (passed, retried, failed): retried gave the model another turn, and failed ended the run as not done.",
+			Help: "Passes of the checks of a definition of done, by agent and result (passed, weak, retried, failed): weak passed and shows nothing about the work of the run, retried gave the model another turn, and failed ended the run as not done.",
 		}, []string{"agent", "result"}),
 		runsActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "fw_runs_active",
@@ -638,6 +638,8 @@ func (m *Metrics) Observe(e fw.Event) {
 		}
 		result := "passed"
 		switch {
+		case d.Passed && d.Weak:
+			result = "weak"
 		case d.Passed:
 		case d.Continue:
 			result = "retried"
