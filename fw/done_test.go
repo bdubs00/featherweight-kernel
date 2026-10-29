@@ -437,6 +437,9 @@ func TestCheckDone(t *testing.T) {
 	if err := CheckDone(nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := CheckDone(&Done{Checks: []DoneCheck{{Tool: DoneAnswer, Input: "{}", Contains: []string{"pens="}}}}); err != nil {
+		t.Fatal(err)
+	}
 	many := make([]DoneCheck, MaxDoneChecks+1)
 	for i := range many {
 		many[i] = DoneCheck{Tool: "tests"}
@@ -453,6 +456,7 @@ func TestCheckDone(t *testing.T) {
 		{Checks: []DoneCheck{testsPass}, Attempts: MaxDoneAttempts + 1},
 		{Checks: []DoneCheck{testsPass}, Attempts: -1},
 		{Checks: []DoneCheck{testsPass}, Timeout: MaxDoneTimeout + time.Second},
+		{Checks: []DoneCheck{{Tool: DoneAnswer, Input: `{"path": "a.txt"}`, Contains: []string{"x"}}}},
 	} {
 		if err := CheckDone(d); !errors.Is(err, ErrInvalidRequest) {
 			t.Errorf("CheckDone(%+v) = %v", d, err)
@@ -510,6 +514,9 @@ func TestDoneCheckWeak(t *testing.T) {
 		{DoneCheck{Tool: "tests", Input: `{"package": "./..."}`}, false},
 		{DoneCheck{Tool: "thread_reader", Input: `{"path": "x"}`}, false},
 		{DoneCheck{Tool: "files"}, false},
+		{DoneCheck{Tool: DoneAnswer}, true},
+		{DoneCheck{Tool: DoneAnswer, Contains: []string{"pens="}}, false},
+		{DoneCheck{Tool: DoneAnswer, Lacks: []string{"I could not"}}, false},
 	} {
 		if got := c.chk.Weak(); got != c.weak {
 			t.Errorf("Weak(%s %s) = %v, want %v", c.chk.Tool, c.chk.Input, got, c.weak)
@@ -684,5 +691,73 @@ func TestDoneHeldBackSkips(t *testing.T) {
 	mustState(t, r, err, StateCompleted)
 	if r.Done == nil || r.Done.Checks[0].Skipped != "" || !r.Done.Checks[0].Passed || r.Stop != RunStopChecked {
 		t.Fatalf("normal run: done %+v, stop %q", r.Done, r.Stop)
+	}
+}
+
+// A check of the answer tests the final answer of the run with no tool
+// call. With contains or lacks it is strong, also in a run that changed
+// nothing, so a job that only reads counts as checked. A wrong answer gets
+// the failure and one more turn, as a failed check of a call does. Without
+// contains and lacks it is weak. A tool of the agent with the reserved
+// name is never called.
+func TestDoneAnswer(t *testing.T) {
+	ctx := testCtx(t)
+	count := DoneCheck{Name: "the answer names the pens", Tool: DoneAnswer, Contains: []string{"pens="}, Lacks: []string{"could not"}}
+	read := callTools(use("c1", "lookup", `{}`))
+	for _, c := range []struct {
+		name    string
+		script  []*Response
+		checks  []DoneCheck
+		output  string
+		weak    bool
+		turns   int
+		failure string
+	}{
+		{"a read and a right answer", []*Response{read, endTurn("Stock: pens=90.")}, []DoneCheck{count}, "Stock: pens=90.", false, 2, ""},
+		{"no call", []*Response{endTurn("Stock: pens=90.")}, []DoneCheck{count}, "Stock: pens=90.", false, 1, ""},
+		{"a wrong answer, then a right one", []*Response{read, endTurn("I could not read the stock."), endTurn("Stock: pens=90.")},
+			[]DoneCheck{count}, "Stock: pens=90.", false, 3, `the answer lacks "pens="`},
+		{"a weak check of the answer", []*Response{read, endTurn("Stock: pens=90.")}, []DoneCheck{{Tool: DoneAnswer}}, "Stock: pens=90.", true, 2, ""},
+		{"a weak check of a path beside it", []*Response{read, endTurn("Stock: pens=90.")},
+			[]DoneCheck{{Tool: "files", Input: `{"command": "view", "path": "drafts/latest.md"}`}, count}, "Stock: pens=90.", false, 2, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			called := 0
+			trap := NewTool(ToolSpec{Name: DoneAnswer}, func(context.Context, json.RawMessage) (ToolResult, error) {
+				called++
+				return TextResult("pens="), nil
+			})
+			s := newScript(c.script...)
+			prof := AgentProfile{Name: "clerk", Done: &Done{Checks: c.checks}}
+			a := newTestAgent(t, s.Model(), WithTools(append(pathTools(t), trap)...), WithProfile(prof))
+			r, err := a.Run(ctx, "How many pens are in stock? Only read.", AsAgent("clerk"))
+			mustState(t, r, err, StateCompleted)
+			if r.Output != c.output || len(s.requests()) != c.turns || called != 0 {
+				t.Fatalf("output %q, model calls %d, calls of the tool answer %d", r.Output, len(s.requests()), called)
+			}
+			evs := ledgerEvents(t, a.Ledger(), r.ID)
+			for _, e := range evs {
+				var d ToolRequestedData
+				if e.Type == EvToolRequested && e.Decode(&d) == nil && strings.HasPrefix(d.CallID, doneCallPrefix) && d.Tool == DoneAnswer {
+					t.Fatalf("the check of the answer made a call: %+v", d)
+				}
+			}
+			passes := donePassesOf(t, evs)
+			last := passes[len(passes)-1]
+			if !last.Passed || last.Weak != c.weak {
+				t.Fatalf("passes = %+v", passes)
+			}
+			notes := doneNotes(t, evs)
+			if c.failure != "" && (len(passes) != 2 || passes[0].Passed || len(notes) != 1 || !strings.Contains(notes[0], c.failure)) {
+				t.Fatalf("passes = %+v, notes %q", passes, notes)
+			}
+			stop := RunStopChecked
+			if c.weak {
+				stop = RunStopAnswered
+			}
+			if d := finishedOf(t, evs); d.Done != DoneChecked || d.DoneWeak != c.weak || d.Stop != stop {
+				t.Fatalf("finished = %+v", d)
+			}
+		})
 	}
 }

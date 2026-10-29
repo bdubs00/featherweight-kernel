@@ -47,7 +47,10 @@ learns only from results that a system records. These are a receipt of
 thumbs up. A definition of done that passed counts too: `done: checked`
 on the newest `fw.run.finished`, without `doneWeak` (`fw.CheckedDone`,
 docs/ARCHITECTURE.md section 24). A weak pass, such as a check that only
-views a file that an earlier run wrote, verifies nothing.
+views a file that an earlier run wrote, verifies nothing. A run that only
+reads changes nothing, so its checks of calls are weak. Its product is its
+answer: a check of the answer (the reserved tool `answer`, with `contains`
+or `lacks`) is strong, so such a run can count as verified.
 
 ## 2. One word for one thing
 

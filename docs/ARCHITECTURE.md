@@ -3180,7 +3180,20 @@ agents:
 
 A check passes on four conditions. Its call runs. Its result is not an error. Its exit code is zero, for a tool that reports one, such as `bash`. Its text holds every string of `contains` and no string of `lacks`.
 
-A check is weak when it only reads a file or a page by its path and names no `contains` and no `lacks` (`DoneCheck.Weak`). Such a check passes for any path that exists, also a file that was there before the run. "Only reads a path" means that the input names a path (the key `path`, `file`, `file_path`, `filePath`, or `filename`), and either its `command` is `view` or `read`, as for `files` and `memory`, or the first or the last word of the tool name is `read` or `view`, as for `read_file` or `front.pages_read` (`fw.ReadsPath`). The profile editor of the workbench warns a person who saves a weak check, with the same rule.
+The tool name `answer` is reserved (`fw.DoneAnswer`). A check with that tool makes no tool call, also when the agent has a tool of that name. It tests the final answer of the run: the answer must not be empty, and it must hold every string of `contains` and no string of `lacks`. It takes no input. The answer is the last answer of the model, the rendered answer of a live routine (section 22), or the final report of a run that stopped at a limit (section 24.2). A job that only reads, such as a status check, changes nothing, so a check of a call shows only what was there before the run. Its product is its answer, and a check of the answer tests that product:
+
+```yaml
+agents:
+  stock-reader:
+    done:
+      checks:
+        - name: the answer names the stock
+          tool: answer
+          contains: ["pens="]
+          lacks: ["could not"]
+```
+
+A check is weak when it names no `contains` and no `lacks`, and either it only reads a file or a page by its path, or it checks the answer (`DoneCheck.Weak`). Such a check passes for any path that exists, also a file that was there before the run. "Only reads a path" means that the input names a path (the key `path`, `file`, `file_path`, `filePath`, or `filename`), and either its `command` is `view` or `read`, as for `files` and `memory`, or the first or the last word of the tool name is `read` or `view`, as for `read_file` or `front.pages_read` (`fw.ReadsPath`). The profile editor of the workbench warns a person who saves a weak check, with the same rule.
 
 The kernel resolves the block once, at the queue of the run. It records the block with its defaults in the field `done` of `fw.run.queued`. A run keeps its definition of done for its life, as it keeps its outcome (section 20). A child run never takes the block of its named profile, as for an outcome. An inline profile adds its checks to the checks of the named profile and removes none. So a request cannot weaken the definition of done of the owner of an agent. A process that hosts another agent program (section 19) refuses the block, because the checks need the turn loop.
 
@@ -3202,7 +3215,7 @@ The kernel records the pass as `fw.done.checked`:
 ```
 
 - If every check passed, the run goes on to the grader of its outcome, when it has one, and then completes. Its `fw.run.finished` carries `"done": "checked"`.
-- A pass that passed is weak when it shows nothing about the work of this run. That is so in two cases. No check of the pass that ran is strong: each one is weak or was skipped. Or the run changed nothing: it made no call of its own that ran without an error result to a tool that is not read-only, that is not a view or a read of a path, and that is not `memory` or `recall`, and no such call changed a file of the workspace. Then each check saw only what was there before the run, such as a draft of an earlier run. The pass carries `"weak": true`, and the run completes with `"done": "checked"`, `"doneWeak": true`, and the stop `answered`, not `checked`. So it lands with the runs that a person checks. A consumer counts a run as checked with `fw.CheckedDone(done, doneWeak)`.
+- A pass that passed is weak when it shows nothing about the work of this run. That is so in two cases. No check of the pass that ran is strong: each one is weak or was skipped. Or the run changed nothing: it made no call of its own that ran without an error result to a tool that is not read-only, that is not a view or a read of a path, and that is not `memory` or `recall`, and no such call changed a file of the workspace. Then each check of a call saw only what was there before the run, such as a draft of an earlier run. A strong check of the answer is the exception: a pass with one is never weak, also in a run that changed nothing, because the answer comes from this run. So a job that only reads, with such a check, counts as checked. The pass carries `"weak": true`, and the run completes with `"done": "checked"`, `"doneWeak": true`, and the stop `answered`, not `checked`. So it lands with the runs that a person checks. A consumer counts a run as checked with `fw.CheckedDone(done, doneWeak)`.
 - If a check failed and attempts are left, the model gets a message from the kernel with the note kind `done`. The message names each failed check with the head and the tail of its result. The model gets one more turn to fix the work.
 - If a check failed at the last attempt, or the budget leaves no room for another turn, the run fails. Its output is the last answer of the model, its error starts with `not done:` and names the failed checks, and its `fw.run.finished` carries `"done": "failed"`.
 

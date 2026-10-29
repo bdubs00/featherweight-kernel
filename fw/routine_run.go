@@ -375,7 +375,7 @@ func (a *Agent) checkRoutineDone(ctx context.Context, rs *runState, r Routine, a
 	// calls yet.
 	c, _ := rs.executionCursor()
 	pass := DoneCheckedData{Attempt: 1, Attempts: d.attempts()}
-	if err := a.runDone(ctx, rs, c, d, &pass); err != nil {
+	if err := a.runDone(ctx, rs, c, d, &pass, applied.Answer); err != nil {
 		return err
 	}
 	pass.Continue = !pass.Passed

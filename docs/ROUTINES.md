@@ -259,7 +259,10 @@ again.
    the stop `checked`, so it counts as checked only as any run does. A
    weak pass (`ARCHITECTURE.md` section 24) gives `fw.routine.applied`
    and the end `doneWeak: true`, and the stop is `answered`: the check
-   only reads a path, or the routine changed nothing. In every other
+   only reads a path, or the routine changed nothing. A check of the
+   answer (the reserved tool `answer`) tests the rendered `answer`, and
+   with `contains` or `lacks` it is strong also when the routine only
+   reads. In every other
    case, the run goes to the model: the routine did not complete, or no
    live routine applies. For a live routine that did not apply or did not
    complete, the first user message gets one

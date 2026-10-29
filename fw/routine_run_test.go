@@ -1070,7 +1070,8 @@ func TestRoutineLiveRunsTheChecksOfDone(t *testing.T) {
 // checked, as a run of the model with a weak pass does not: the check only
 // reads the report, or the routine changed nothing. The run completes as
 // answered with done checked and weak, also for a consumer of the
-// lifecycle events alone.
+// lifecycle events alone. A check of the answer reads the rendered answer
+// of the routine, and it is strong also when the routine changed nothing.
 func TestRoutineLiveWeakDone(t *testing.T) {
 	strong := DoneCheck{Name: "the report holds the line of today", Tool: "stock.read", Input: `{"path": "report.txt"}`, Contains: []string{"pens=90"}}
 	weak := DoneCheck{Name: "the report is there", Tool: "stock.read", Input: `{"path": "report.txt"}`}
@@ -1088,6 +1089,8 @@ func TestRoutineLiveWeakDone(t *testing.T) {
 		{"a weak check", stockRoutine(RoutineLive), weak, "", true},
 		{"no change", reader, strong, "STOCK pens=90", true},
 		{"a change and a strong check", stockRoutine(RoutineLive), strong, "", false},
+		// A routine that only reads is checked by its answer.
+		{"no change and a check of the answer", reader, DoneCheck{Name: "the answer names the line", Tool: DoneAnswer, Contains: []string{"SEEN STOCK pens=90"}}, "STOCK pens=90", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := testCtx(t)
