@@ -189,7 +189,10 @@ in the files of the process, because the front has no such scope.
   changes nothing, and the tool answers with an error: "Error: the notes
   under /memories/.agent belong to this agent, so this run can read them
   but cannot change them. Keep your own note instead, such as
-  /memories/labels.md."
+  /memories/labels.md." The hosted `fw-memory` server of Claude Code and
+  opencode does the same: `list` names the notes of the agent first,
+  `recall` reads `/memories/.agent/<name>`, and `remember` and `forget`
+  of such a path answer the same error.
 - Push: every change through `memory.Store` sends the new text to the
   front. This includes the memory tool, the native API, and the hosted
   `fw-memory` server. The push carries the hash that the copy had as
