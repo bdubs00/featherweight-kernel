@@ -210,8 +210,10 @@ Inside each group, the notes that runs used most come first, then the
 newest. Notes that are out of date, resting, put away, or waiting stay out
 of the block. One line counts them: "3 notes are out of date. View
 /memories to read them." The first line shows how full the block is:
-"Notes: 23 kept, 3.1 of 4 KB shown." Hermes Agent shows the same, and an
-agent that sees the limit keeps its notes short.
+"Notes: 23 listed, 3.1 of 4 KB shown." It counts only the notes that the
+block lists, so a model never looks for a note that the line counts and
+the list lacks. Hermes Agent shows the same, and an agent that sees the
+limit keeps its notes short.
 
 What the kernel reads for this block:
 

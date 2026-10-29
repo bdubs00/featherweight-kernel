@@ -239,9 +239,9 @@ func (s *Store) localHashes(ctx context.Context, files *noteFiles) (map[string]s
 // <date>)"), and the other notes. Inside a group, the notes that runs used
 // most come first, then the newest. Notes that are out of date or resting
 // stay out of the list, and one line counts them. The first line says how
-// many notes the copy keeps and how much of the bound the list fills. A
-// front that did not answer adds NoAnswerNote, and the labels then come
-// from the last answer of the front.
+// many notes the block lists, and no others, and how much of the bound
+// the list fills. A front that did not answer adds NoAnswerNote, and the
+// labels then come from the last answer of the front.
 func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint string) (Brief, error) {
 	pulled := s.Pull(ctx, scope)
 	dir, err := s.Dir(scope)
@@ -329,7 +329,9 @@ func (s *Store) frontBrief(ctx context.Context, scope fw.MemoryScope, hint strin
 		size += len(line) + 1
 	}
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Notes: %d kept, %.1f of %d KB shown.", len(notes), shownKB(size), IndexMaxBytes>>10)
+	// The first line counts only the notes that the block lists. The lines
+	// after the list count the notes that it leaves out.
+	fmt.Fprintf(&sb, "Notes: %d listed, %.1f of %d KB shown.", len(lines), shownKB(size), IndexMaxBytes>>10)
 	if !pulled.Answered {
 		sb.WriteString("\n" + NoAnswerNote)
 	}

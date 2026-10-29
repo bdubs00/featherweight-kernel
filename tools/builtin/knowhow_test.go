@@ -211,7 +211,7 @@ func TestNoteSurvivesANewTask(t *testing.T) {
 		t.Fatalf("second run = %+v, %v", r, err)
 	}
 	firstMsg := fw.TextOf(second.requests()[0].Messages[0].Content)
-	if !strings.Contains(firstMsg, "Notes: 1 kept") || !strings.Contains(firstMsg, "/memories/labels.md: Gitea refuses a label name with a space. (checked") {
+	if !strings.Contains(firstMsg, "Notes: 1 listed") || !strings.Contains(firstMsg, "/memories/labels.md: Gitea refuses a label name with a space. (checked") {
 		t.Fatalf("first message of the new Task = %q", firstMsg)
 	}
 	if n, _ := f.Get("default", "agent", "", "labels.md"); n.Text != "Gitea refuses a label name with a blank.\n" {
